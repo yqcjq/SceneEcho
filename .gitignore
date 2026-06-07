@@ -216,3 +216,42 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# === SceneEcho ===
+# Node
+node_modules/
+renderer/node_modules/
+frontend/node_modules/
+renderer/dist/
+frontend/dist/
+renderer/.remotion/
+*.tsbuildinfo
+
+# Backend data & venv
+backend/.venv/
+backend/data/
+backend/app/**/__pycache__/
+
+# Generated IR types & schema (CI regenerates these)
+shared/ir.schema.json
+renderer/src/types/ir.ts
+frontend/src/types/ir.ts
+
+# Env
+*.env
+!.env.example
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
+backend/data/logs/
+
+# Test fixtures (large binaries, kept local per developer)
+tests/fixtures/**
+!tests/fixtures/README.md
+

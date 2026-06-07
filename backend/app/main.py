@@ -1,0 +1,59 @@
+"""FastAPI entry point for SceneEcho backend."""
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from app import tasks_store
+from app.api import projects, samples, tasks
+from app.config import get_settings
+from app.logging import configure_logging, get_logger
+
+settings = get_settings()
+configure_logging(settings.log_level)
+log = get_logger(__name__)
+
+
+def _init_data_tree() -> None:
+    root = settings.data_root
+    for sub in ("samples", "projects", "system", "aigc", "logs",
+                "system/bgm_pool", "system/fonts", "system/stickers_reference",
+                "system/models", "aigc/stickers", "aigc/broll"):
+        (root / sub).mkdir(parents=True, exist_ok=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):  # noqa: ARG001
+    _init_data_tree()
+    tasks_store.init_db()
+    log.info("backend_started", data_root=str(settings.data_root))
+    yield
+    log.info("backend_stopped")
+
+
+app = FastAPI(title="SceneEcho Backend", version="0.1.0", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(samples.router, prefix="/api", tags=["samples"])
+app.include_router(projects.router, prefix="/api", tags=["projects"])
+app.include_router(tasks.router, prefix="/api", tags=["tasks"])
+
+
+@app.get("/health")
+def health() -> dict:
+    return {"status": "ok", "service": "backend"}
+
+
+# Serve DATA_ROOT for media playback (dev convenience).
+settings.data_root.mkdir(parents=True, exist_ok=True)
+app.mount("/data", StaticFiles(directory=str(settings.data_root)), name="data")
