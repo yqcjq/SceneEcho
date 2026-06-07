@@ -1,3 +1,26 @@
+## [2026-06-07-2] feat(plan): add v3.2 workbench v4 upgrade — gantt + causal chain + regression fixture
+
+### 改动
+- `PLAN.md` 新增 **Phase 2.6 AI 决策工作台 v4 升级** 阶段（位于 Phase 2.5 之后、Phase 3 之前），打包 `docs/proposals/001-ai-decision-workbench-v4.md` 的 3 条 🟢 P1 提案：
+  - **O11 甘特图视图**：用 `@visx/scale + @visx/zoom + @visx/group` 实现 SVG 甘特图；lane × 时间轴 × 横条/竖线 × 因果连线；与中栏 EventStream 共享 `selectedEventId` 双向联动
+  - **O3 因果链可视化**：parent_event_id 强约束 + 工作台 SVG dashed line 连父子事件 + hover 联动；不加 child_event_ids 双向链（前端 O(1) 反向构建索引足够）
+  - **O2 events.jsonl 作 regression fixture**：`ReplayClient(LLMClient)` 重放 golden events → CI 跑 `test_golden_runs.py` 比对 IR 一致性；模型升级/子能力代码改动时 IR 字段语义漂移立即被发现
+- **技术栈第一性原理选型**：visx（airbnb 出品的 d3 + React 融合库）而非 TapFlow 借鉴的命令式 D3.js——后者与实时 SSE 增量场景不匹配、与现有 React 心智模型冲突；visx 是 React 友好的 D3 包装（d3-scale/d3-zoom 的 hooks），bundle ~50KB gzipped，天然支持增量渲染
+- **前期阶段零成本"埋点"**（无新工程，只是约束声明）：
+  - Phase 0.5 `VisionEvent` IR 加 `duration_ms: int = 0` 字段；`chat_vision()` 客户端层用 `time.perf_counter()` 自动回填——子能力代码零侵入
+  - Phase 1A 设计约束追加"两阶段 VLM 调用必填 `parent_event_id`"强约束 + CI `scripts/check_parent_event_id.py` 校验脚本
+  - Phase 1B 验证方式追加第 8 条 "Golden runs 种子录制"——完工 close-out 时把 ≥ 3 个 fixture 的 events.jsonl + TemplateIR 复制到 `tests/fixtures/golden_runs/` git-commit
+- **其他章节同步**：阶段总览表加 Phase 2.6 行 + 依赖链改为 0 → 0.5 → 1A → 1B → 2 → 2.5 → 2.6 → 3 → 7 → 4 → 5；技术栈表加 visx 行；末尾追加 v3.2 修订说明
+
+### 涉及文件
+- `PLAN.md`：新增 Phase 2.6 完整章节（前置条件 / 目标 / 设计约束 / 后端 / 前端 / CI / 验证方式 / 课题对齐 / 已明确不做）+ 4 处其他章节小改（阶段总览 / 依赖链 / 技术栈 / VisionEvent IR / Phase 1A 约束 / Phase 1B 验证 / CI 脚本约定 / v3.2 修订说明）
+- `docs/proposals/001-ai-decision-workbench-v4.md`：本次新增功能的提案文档（用户认可 O11/O3/O2 三条 P1）
+
+### 关联
+-> docs/proposals/001-ai-decision-workbench-v4.md
+
+---
+
 ## [2026-06-07-1] docs(plan): fix v3.1 consistency issues [N1-N21]
 
 ### 改动

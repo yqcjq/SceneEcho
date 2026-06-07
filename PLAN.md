@@ -32,7 +32,7 @@
 | **AI 透明工作台 / Workbench（v3 新增）** | 前端 `/workbench/{task_id}` 三栏页面（VLM 看到什么 / 怎么想 / 决定了什么），项目第一产品页 |
 | **0-999 归一化坐标系（v3 新增）** | VLM 输出 bbox 统一用 0-999 整数区间，客户端层 `/1000 * width` 映射到实际像素；参考 Open-AutoGLM 在生产中跑通的方案 |
 | **placeholder_text / length_constraint / semantic_purpose（v3 CaptionStyle 新增）** | VLM 在判断字幕样式时同步给出的语义占位、字符数约束、字幕功能标签；用作应用阶段 LLM 填用户字幕的视觉锚点 |
-| **stage 前缀（v3 新增）** | VisionEvent.stage 字段的命名规范，决定工作台事件染色与过滤；完整列表见"VLM 调用协议·stage 命名规范"小节 |
+| **stage 前缀（v3 新增）** | VisionEvent.stage 字段的命名规范，决定工作台事件染色与过滤；完整列表见"AI 调用协议·stage 命名规范"小节 |
 | **SubcapabilityLab（v3 新增）** | 前端 `/lab` 单点验证页，列出 Phase 1A 所有视觉理解子能力供独立调试 |
 
 ## Context
@@ -71,12 +71,13 @@ v2.4 的架构以"成本可控的 hybrid CV+VLM"为出发点；v3 重新定义�
 | 阶段 1B | 模板提取集成（v3 重写） | 📋 待开始 | 串联 1A 各能力 → 完整 TemplateIR（含 D2 + Tier B 部分项）→ KB，工作台展示全链路 |
 | **阶段 2** | **★MVP 应用闭环（短素材+指定模板）** | 📋 待开始 | **10–20s 口播 + 选模板 → ASR + 套风格 → MP4；模板推荐与套风格全程在工作台可见** |
 | 阶段 2.5 | NL 编辑 + 参数面板 + 工作台事件回放 | 📋 待开始 | 一句话改 IR 重渲染；Visualize 页改为对历史 VisionEvent 的可回放回顾 |
+| **阶段 2.6** | **AI 决策工作台 v4 升级（甘特图 + 因果链 + 回归基础设施，v3.2 新增）** | 📋 待开始 | **events 流的三种新用法：visx 甘特图调度视图 / parent_event_id 因果链可视化 / events.jsonl 反向作 ReplayClient 回归测试** |
 | 阶段 3 | 长视频分步审核闭环 | 📋 待开始 | ~3min 长口播 → 9 step 流水线（含 5 个用户审核暂停点）→ 多 Section 拼接；每 step 独立事件流 |
 | 阶段 4 | 标题条 + 音效预设注入（v3 大幅瘦身） | 📝 略写 | 蒙版/调色/转场前置到 1A 后，本阶段只剩标题条识别 + 用户手工配置的音效注入 |
 | 阶段 5 | AIGC 扩展（生图 + 视频 + 封面） | 📝 略写 | 贴纸生图 + B-roll 视频生成 + 封面生成，均用户主动触发 |
 | 阶段 7 | 结构重排与内容优化 | 📝 略写 | 叙事角色识别 + 多版本重排建议 + 代词依赖检测 + 双时间轴对照 + 用户编辑确认 |
 
-> **依赖链**：0 → 0.5 → 1A → 1B → 2（★MVP）→ 2.5 → 3 → 7 → 4 → 5。0.5 是后续所有 VLM 调用的发射目标，必须在 1A 之前完工；1A 各能力子模块独立验证、1B 才允许集成。阶段 7 强依赖阶段 3 的分步审核基础设施；初版只依赖阶段 3，但充分体验需要阶段 5（AIGC 补缺口）协同。
+> **依赖链**：0 → 0.5 → 1A → 1B → 2（★MVP）→ 2.5 → 2.6 → 3 → 7 → 4 → 5。0.5 是后续所有 VLM 调用的发射目标，必须在 1A 之前完工；1A 各能力子模块独立验证、1B 才允许集成。**Phase 2.6（v3.2 新增）放在 ★MVP 与 Phase 2.5 完工后**——理由：Phase 2 完成时工作台已有真实事件流可被甘特图消费、Phase 1B 完成时已 commit golden_runs 种子供 ReplayClient 回放；放在 Phase 3 之前则长视频 9 step 调度天然受益于甘特图视图。阶段 7 强依赖阶段 3 的分步审核基础设施；初版只依赖阶段 3，但充分体验需要阶段 5（AIGC 补缺口）协同。
 > **时间轴拖拽编辑器**已从主路线移出 → `docs/future-plans/001-timeline-editor.md`（保留为远期演进项，触发条件见该文档）。
 
 ---
@@ -174,6 +175,7 @@ v2.4 的架构以"成本可控的 hybrid CV+VLM"为出发点；v3 重新定义�
 | Text LLM 默认 | `claude-opus-4-7`（推理）/ `qwen-plus`（高频） | 阶段 1A / 2 |
 | VLM 默认（可切换） | `qwen-vl-max-latest`（中文视觉） / `claude-sonnet-4-6`（推理+视觉）/ `gpt-4o`（cross-check 备用） | 阶段 1A |
 | **VisionEvent SSE 事件总线（v3 新增）** | sse-starlette + asyncio 内存广播 + 可选 SQLite 持久化（回放用） | 阶段 0.5 |
+| **工作台甘特图可视化（v3.2 新增）** | `@visx/scale` + `@visx/zoom` + `@visx/group` + `@visx/responsive`（React 友好的 D3 包装，支持 SSE 增量更新；不用命令式 D3，避免与 React 心智模型冲突） | 阶段 2.6 |
 | 任务/状态存储 | SQLite + WAL 模式 | 阶段 0 |
 | 渲染队列 | p-queue（Node side） | 阶段 0 |
 | 日志 | structlog（Python）+ pino（Node） | 阶段 0 |
@@ -264,7 +266,7 @@ v2.4 的架构以"成本可控的 hybrid CV+VLM"为出发点；v3 重新定义�
 
 ### 前端设计语言（v3 新增 · Anthropic 风格 design tokens）
 
-参照 Anthropic 官网视觉风格——克制、温暖、文档感、工具感而非娱乐感。所有页面（SampleExtract / TemplateLibrary / Editor / LongVideoEditor / Workbench / Visualize）共用同一套 token，**禁止逐页面自创色板**。
+参照 Anthropic 官网视觉风格——克制、温暖、文档感、工具感而非娱乐感。所有页面（SampleExtract / TemplateLibrary / Editor / LongVideoEditor / Workbench / WorkbenchGantt(v3.2) / SubcapabilityLab(v3) / Visualize）共用同一套 token，**禁止逐页面自创色板**。
 
 ```css
 /* 颜色 · 写入 frontend/src/styles/tokens.css */
@@ -454,8 +456,9 @@ SceneEcho/
 │     ├─ llm/{client.py, prompts/}  # v3 重构：OpenAICompatClient + AnthropicClient 双适配器
 │     │   └─ prompts/scenarios/     # v3 新增：mock 工作台事件脚本（dev only）
 │     └─ logging.py                 # structlog 配置
-│  └─ tests/{unit/, integration/, fixtures/, golden_runs/, conftest.py}
-│                                   # v3 新增 golden_runs/：每个标杆样例的 events.jsonl 作回归 fixture
+│  └─ tests/{unit/, integration/, conftest.py}
+│                                   # 仅后端单测/集测代码；fixtures 与 golden_runs 在项目根的 tests/fixtures/ 下，
+│                                   # 由 backend/tests/conftest.py 通过 REPO_ROOT/tests/fixtures 引用
 ├─ renderer/                        # Node Remotion 服务
 │  ├─ package.json
 │  ├─ tsconfig.json
@@ -508,6 +511,12 @@ SceneEcho/
 │     │   └─ review/                # Phase 3 增：StepVADReview / StepDedupReview / StepSegmentReview /
 │     │                             #   StepSelectReview / StepReorderReview / StepFinalReview / StepQualityReview
 │     └─ state/                     # Zustand stores（v3 加 workbench.ts: events/filterStage/irSnapshot）
+├─ tests/                           # v3 修订：项目根 fixtures 与 golden runs（跨服务共享 + git tracked）
+│  └─ fixtures/
+│     ├─ {sample_id}/source.mp4     # 开发期 fixtures（S12 路径约定）
+│     ├─ baselines.json             # CI 指标基线
+│     └─ golden_runs/               # v3.2 新增：每个标杆样例的 events.jsonl + template.json 作 ReplayClient 回归 fixture
+│        └─ {sample_id}/{events.jsonl, template.json}
 ├─ pnpm-workspace.yaml              # 管理 renderer + frontend
 ├─ .gitignore
 ├─ .env.example                     # v3 加 MODEL_PROVIDER / ANTHROPIC_API_KEY / ENABLE_DEV_MOCK / DUAL_CHECK_STAGES
@@ -627,8 +636,9 @@ def chat_vision(
     # 1. 调外部 VLM API（OpenAI/Anthropic 双适配器自动选）
     # 2. 用 schema 校验返回 JSON
     # 3. 自动构造 VisionEvent 列表（每个识别到的实体一个事件）
-    # 4. 调 event_bus.publish(task_id, events) 广播
-    # 5. 返回 (structured_result, events) 元组
+    # 4. **v3.2 新增**：客户端层用 time.perf_counter() 自动测得 duration_ms 写入每个 event（外层调用方零侵入）
+    # 5. 调 event_bus.publish(task_id, events) 广播
+    # 6. 返回 (structured_result, events) 元组
 ```
 
 **对其他 AI 客户端方法的同等约束（v3.1 拓宽 · D13）**：`chat_text()`、ASR、Demucs 等所有 AI 调用必采用相同模式——返回 `tuple[BaseModel, list[VisionEvent]]` 元组，内部调 `event_bus.publish()`，event.source 按调用类型填 `text_llm` / `asr` / `audio` 等。签名规范：
@@ -936,6 +946,7 @@ jobs:
 **v3.1 新增 CI 校验脚本**（在 Phase 0.5 实施时一并创建）：
 - `scripts/check_stage_naming.py`：grep 源码所有 `stage="..."` 字面量，校验是否匹配"stage 命名规范"表的前缀模式；不匹配则 fail（参考 H2）
 - `scripts/check_event_emission.py`（v3.1 新增）：grep 所有 AI 客户端方法定义（`def chat_vision` / `def chat_text` / `def transcribe` / `def extract_bgm` 等），校验函数体内是否调用了 `event_bus.publish`；缺则 fail（参考 D13 + N4/N12）
+- `scripts/check_parent_event_id.py`（v3.2 新增）：grep 所有"两阶段"VLM 调用点（命名匹配 `*_refine` / `*_phase2` / `*_classify`），校验函数体内 `chat_vision()` 调用是否传了 `parent_event_id=` 关键字参数；缺则 fail（参考 Phase 1A 设计约束 + Phase 2.6 因果链）
 
 **Fixtures 清单**（按阶段准备，用户提供）
 - `samples/sample_basic_15s/`：含字幕 + BGM + 1 处缩放（必备）
@@ -970,10 +981,11 @@ class VisionEvent(BaseModel):
     event_id: str        # UUID，便于工作台中央栏跳转回放
     task_id: str         # 关联到任务表，前端按 task_id 订阅 SSE
     sequence: int        # 任务内单调递增，前端按 sequence 排序与去重
-    timestamp: str       # ISO8601
+    timestamp: str       # ISO8601；事件**起始**时刻（v3.2 修订）
+    duration_ms: int = 0 # v3.2 新增：事件持续时长（毫秒）。长程任务（如一次 VLM 调用从发请求到收响应）填实际耗时；瞬时事件（如"切点检测"）填 0。甘特图横条按 [timestamp, timestamp + duration_ms] 画区间；0 渲染为竖线
     source: Literal["vlm", "cv", "asr", "audio", "text_llm", "system"]
     model_used: str | None       # AI 调用时填具体 model id（VLM/Text LLM 都填），便于 cross-check 对比；CV/audio 等非模型来源填 None
-    stage: str           # 见"VLM 调用协议·stage 命名规范"小节；示例 "1A.captions" / "3.step03.dedup" / "5.aigc.sticker"
+    stage: str           # 见"AI 调用协议·stage 命名规范"小节；示例 "1A.captions" / "3.step03.dedup" / "5.aigc.sticker"
     frame_ts: float | None       # 视频时间戳（如果事件由某帧触发）
     frame_url: str | None        # /data/{kind}/{id}/extracted/frames/{ts}.jpg
     bbox_norm: tuple[float, float, float, float] | None  # 0-999 归一化 (x, y, w, h)；None 表示事件不针对具体位置
@@ -982,7 +994,7 @@ class VisionEvent(BaseModel):
     confidence: float            # 0-1
     ir_target: IRTarget | None   # 这条事件最终写入了 IR 哪个字段
     ir_value: dict | None        # 写入的具体值（前端工作台第三栏拿来做字段填充动画）
-    parent_event_id: str | None  # 事件的因果链（"贴纸语义判断" 依赖 "贴纸 bbox 检测"），便于工作台连线可视化
+    parent_event_id: str | None  # 事件的因果链（"贴纸语义判断" 依赖 "贴纸 bbox 检测"），便于工作台连线可视化。**v3.2 强约束**：所有两阶段 VLM 调用（粗判 → 精化）的第二阶段事件必填此字段指向第一阶段 event_id（详见 Phase 1A 设计约束 + Phase 2.6 因果链可视化）；前端从 events 列表反向 O(1) 增量构建 `childIndex: Map<parentId, eventId[]>`，不冗余存 child_event_ids 字段
     cost_tokens: int | None      # AI 调用 token 数（VLM/Text LLM 都填），工作台可展示但不当作核心约束；CV/audio 等非 token 来源填 None
 ```
 
@@ -1371,6 +1383,7 @@ class Patch(BaseModel):
 - 不要在 1A 出现 `extract_template()` 这种串联函数——那是 1B 的事。
 - VLM 坐标使用 0-999 归一化系统；客户端层负责映射到 0-1 写入 IR。
 - 单点验证可在 `pnpm dev` 起服务后通过工作台 `/workbench/{task_id}` 实时观察事件流。
+- **parent_event_id 强约束（v3.2 新增 · 为 Phase 2.6 因果链可视化准备）**：所有"两阶段"VLM 调用——VLM 粗判后再调一次精化（如：贴纸 bbox 检测 → 贴纸语义判断、字幕样式识别 → 字幕功能分类、几何蒙版有无判 → 几何参数给出、调色 dominant_tag → 直方图微调），**第二阶段事件必填 `parent_event_id` 指向第一阶段 event_id**。零成本（多写一行 `parent_event_id=prev_event.event_id`），但前置了 Phase 2.6 因果链 / 甘特图跨 lane 连线的核心数据。CI 脚本 `scripts/check_parent_event_id.py` grep 校验：所有命名为 `*_refine` / `*_phase2` / `*_classify` 的子能力函数体内若调 `chat_vision()`，必传 `parent_event_id=` 关键字参数；缺则 fail。
 
 ### Fixtures 矩阵（用户准备 / 一次性补齐）
 
@@ -1567,6 +1580,7 @@ class Patch(BaseModel):
 5. **端到端**：UI 上传 `sample_basic_15s` → extract → 工作台看完整识别过程（≥ 30 条事件）→ 模板库看到模板（含 placeholder、转场、蒙版、调色字段）+ 缩略图 + sanity check 状态。
 6. **失败降级**：故意删 `LLM_API_KEY` → extract 在 VLM 步骤 发 `severity=error` 事件 → 该字段标 `degraded=true` → pipeline 不阻塞，产出可入库 TemplateIR + degraded warning。
 7. **课题对齐验证**：打开任一模板的工作台事件回放 → 评审能看到"从样例中抽取了什么"（事件流）+ "为什么这么抽"（reasoning）+ "写入了 IR 哪里"（字段填充动画）——直接满足评分项 7。
+8. **Golden runs 种子录制（v3.2 新增 · 为 Phase 2.6 ReplayClient 准备）**：1B 完工 close-out 时，选 ≥ 3 个稳定的标杆 fixture（建议 `sample_basic_15s` / `sample_with_sticker_12s` / `sample_with_mask_10s`），每个跑一次完整 extract → 把 `data/samples/{sid}/extracted/events_{task_id}.jsonl` 与对应 `TemplateIR`（从 `kb.sqlite` 导出为 `template.json`）一并 copy 到 `tests/fixtures/golden_runs/{sample_id}/{events.jsonl, template.json}` → 人工 review（无 PII / 无密钥 / IR 字段语义符合预期）→ git commit。本步无需写代码（手工脚本 + cp 即可），但产出的种子文件是 Phase 2.6 `test_golden_runs.py` 的输入；不录种子 → Phase 2.6 ReplayClient 无可回放对象。
 
 ---
 
@@ -1731,6 +1745,104 @@ class Patch(BaseModel):
 4. 重渲染 cancel：连续 3 次 NL 编辑（每次间隔 100ms）→ 后台应只完成最后一次渲染。
 5. **工作台事件回放**（v3 新验证）：访问 `/projects/{id}/replay` → 时间线从 0% 走到 100% → 三栏与原始任务跑时一致 → IRPane 字段填充顺序与 sequence 严格对应 → 导出 30s 录屏 webm 文件存在。
 6. 端到端：浏览器在 Editor 输入"字幕换成黄色"→ 看到预览字幕变色 → 点渲染 → mp4 字幕变色 → 工作台第二栏出现"NL 解析：字幕颜色改 #FFD400"事件。
+
+---
+
+## 阶段 2.6: AI 决策工作台 v4 升级（甘特图 + 因果链 + 回归基础设施，v3.2 新增）📋
+
+### 前置条件
+- 阶段 2 ★MVP 闭环已稳定（Phase 2 验证 7+9+10 通过；短素材选模板出 mp4 + 工作台事件流可见）。
+- 阶段 2.5 工作台事件回放器已稳定（Phase 2.5 验证 5+6 通过；events.jsonl 历史文件可读、Visualize 页能拖拽时间线）。
+- Phase 0.5 已在 `VisionEvent` IR 加 `duration_ms` 字段、`llm.client.chat_vision()` 已用 `time.perf_counter()` 自动回填该字段。
+- Phase 1A 已对两阶段 VLM 调用强制填 `parent_event_id`（CI `scripts/check_parent_event_id.py` 绿）。
+- Phase 1B 已 commit 至少 3 个 sample 的 `tests/fixtures/golden_runs/{sid}/{events.jsonl, template.json}` 种子文件（Phase 1B 验证 8）。
+
+### 目标
+把工作台从「事件列表 + 回放器」升级为「甘特图调度视图 + 因果链可视化 + AI 决策痕迹回归基础设施」。三件事是同一份数据（events 流）的三种新用法：
+1. **甘特图视图**：把 1A 子能力的并发 + Phase 3 step 的串行用 lane 形式可视化，"30 秒 extract 里 VLM 字幕花 5s、贴纸 8s、调色 3s 并发完成" 一眼可见
+2. **因果链可视化**：父子事件在工作台中栏 + 甘特图上画 dashed line，"识别红色矩形 → 判为 CTA → 决定字幕样式 = 强调红色" 的推理路径可见
+3. **events.jsonl 作 regression fixture**：通过 `ReplayClient` 把历史 events 重放到 mock VLM → 验证 IR 重建一致性；模型升级 / 子能力代码改动时 CI 自动跑、IR 字段语义漂移立即被发现
+
+> **方法论**：工作台从"被动观测"升级为"AI 治理基础设施"。这三件事共享同一套渲染管线（hover 联动、`selectedEventId` state、stage 染色）与同一份数据（events 流），因此打包到一个阶段而非分散到 1A/1B/2.5 各处。
+
+### 设计约束（本阶段必守）
+- **实时增量渲染**：甘特图必须支持 SSE 推一条事件 → SVG 增加/更新一个横条，不全量重画；用 visx 的 React 声明式管线天然支持（避免 D3 命令式 enter/update/exit 心智负担）。
+- **三视图共享 selection state**：列表 / 帧 / IR 树 / 甘特图四种视图共享 `workbench.ts` 的 `selectedEventId` Zustand state；任一视图点选 → 其他三视图联动高亮。
+- **ReplayClient 纯函数性**：同一 fixture 跑两次必产出位级别一致的 IR；ReplayClient 不调任何外部 API（无网络依赖，CI 毫秒级跑过）。
+- **golden_runs 入库 review 强制**：种子文件入库时必须人工 review 一遍 events.jsonl（无 PII / 无 API key 泄漏 / IR 字段语义符合预期），review 通过才 git commit；CI 跑 ReplayClient 与 commit 的 golden IR 比对。
+- **不加 `child_event_ids` 双向链**（v3.2 决策）：前端从 `events` 列表按 `parent_event_id` O(1) 增量构建 `childIndex: Map<parentId, eventId[]>`，避免后端 schema 冗余字段、避免父事件发出后回头改的逻辑复杂度。
+
+### 后端改动
+- **扩展** `backend/app/api/events.py`：新增 `GET /api/tasks/{task_id}/gantt` 端点，从 `events_{task_id}.jsonl` 聚合返回 visx 友好的 lane 列表 `{lanes: [{stage, color_token, events: [{event_id, start_ms, duration_ms, semantic_label, parent_event_id, reasoning, confidence}]}], total_duration_ms: int}`；按 stage 命名规范前缀分组（`1A.captions` 与 `1A.captions_anim` 同 lane group 还是分两 lane？默认按完整 stage 字符串分 lane，超过 20 lane 时折叠到 stage 前缀第一级——保留扩展空间）。
+- **新增** `backend/app/llm/replay_client.py`：
+  - `class ReplayClient(LLMClient)`：实现 `LLMClient` 抽象基类的所有方法（`chat_vision` / `chat_text` / `transcribe` / `extract_bgm`）
+  - 构造时传 `golden_run_path: str` → 读 events.jsonl 到 `dict[stage, deque[VisionEvent]]`（按 stage 维护 FIFO 队列）
+  - 调用 `chat_vision(stage, ...)` 时从对应 stage 队列 popleft 一条 event → 用 `event.ir_value` 重建 `BaseModel`（pydantic 反序列化）→ 返回 `(reconstructed_result, [event])`
+  - `event_bus.publish` 仍调用（重放也走相同事件总线），便于测试同步验证 SSE 链路
+  - 队列空时 raise `ReplayExhaustedError` 提示 "golden run 缺事件，stage=X"
+- **新增** `scripts/record_golden.py`（typer CLI）：
+  - `record-golden --sample SID` → 用真实 client 跑 `extract_template(SID)` → 跑完后 copy `data/samples/{SID}/extracted/events_{task_id}.jsonl` 与 `kb.sqlite` 里对应 `TemplateIR.model_dump_json(indent=2)` 到 `tests/fixtures/golden_runs/{SID}/{events.jsonl, template.json}`
+  - 不自动 git add（强制人工 review 后 commit）
+- **新增** `backend/tests/integration/test_golden_runs.py`：
+  - `@pytest.mark.parametrize("sample_id", os.listdir("tests/fixtures/golden_runs"))`
+  - 每个 sample：构造 `ReplayClient(golden_runs/{sid}/events.jsonl)` → 用依赖注入替换默认 client → 跑 `extract_template(sid)` → 与 `golden_runs/{sid}/template.json` 加载的 `TemplateIR` 做 `model_dump(mode='json')` 深度对比 → assert 一致
+  - diff 时输出 jsonpatch 风格的差异（用 `jsondiff` 库）
+
+### 前端改动
+- **扩展** `frontend/package.json`：加 `@visx/scale@3.x` / `@visx/zoom@3.x` / `@visx/group@3.x` / `@visx/responsive@3.x` / `@visx/text@3.x`（visx 模块化，按需引入，gzipped ~50KB）
+- **新增** `frontend/src/pages/WorkbenchGantt.tsx`（路由：`/workbench/:taskId?view=gantt`，也作为 `Workbench.tsx` 的可切换 tab）：
+  - 顶部 ResponsiveContainer：X 轴时间轴（`@visx/scale.scaleLinear`，domain=[0, total_duration_ms]，range=[0, container_width]）；Y 轴 lane 列表（`scaleBand`）
+  - 中央 SVG：
+    - **lane 背景**：斑马纹 `<rect>`（偶数 lane 浅灰），lane header 文字（stage 全称 + 事件数 badge）
+    - **横条**：`duration_ms > 0` 的事件，`<rect x={scale(start_ms)} y={laneY} width={scale(duration_ms)} height={16} fill={stageColor}>`；hover 显示 tooltip（stage / duration / reasoning / confidence）
+    - **竖线**：`duration_ms == 0` 的瞬时事件，`<line x1={scale(start_ms)} y1={0} x2={scale(start_ms)} y2={containerHeight}>`，hover tooltip
+    - **因果链**：`parent_event_id` 链上的事件间画 `<path d="M parent.endX,parent.midY Q midX,midY child.startX,child.midY" stroke-dasharray="4,4">`（贝塞尔曲线，从父事件横条右端连到子事件横条左端）
+  - 缩放/平移：`@visx/zoom.useZoom` 鼠标滚轮缩放（scale 0.1x~10x）+ 拖拽平移；长视频任务 500+ 事件不卡（visx 按 React reconciliation 增量 diff，未变化的 `<rect>` 不重渲染）
+  - lane 折叠：默认只展开"近 5s 内有事件"的 lane，其余 lane header 折叠（点击展开）；解决长视频 9 step 全展开占屏问题
+  - 点击横条/竖线 → `setSelectedEventId(event_id)` → URL 切回 `?view=list`、Workbench.tsx 中栏自动滚到该事件
+- **新增** `frontend/src/components/workbench/CausalChainOverlay.tsx`（中栏 + 右栏共用）：
+  - 维护 `Map<eventId, DOMRect>` 记录每张事件卡片在中栏的位置（用 `ResizeObserver` + `forwardRef`）
+  - 根据 `childIndex` 画 SVG `<path>` overlay 连父子卡片
+  - hover 父事件 → 所有子卡片加 `border: var(--accent-primary)`；反之亦然（与甘特图同步）
+- **扩展** `frontend/src/state/workbench.ts`：
+  - 加 `view: "list" | "gantt"`（URL query param 同步）
+  - 加 `selectedEventId: string | null`（四视图共享）
+  - 加派生 selector `childIndex: Map<parentId, eventId[]>`（从 `events` 数组 useMemo 增量计算；events push 时 O(1) 更新）
+- **扩展** `frontend/src/api/events.ts`：`fetchGanttData(taskId): Promise<GanttLanes>` 调 `/api/tasks/{taskId}/gantt`
+- **扩展** `frontend/src/pages/Workbench.tsx`：顶栏加 view 切换 segmented control（4 选 1：列表 / 帧 / IR 树 / 甘特图）；URL `?view=` query param 双向同步；切换时复用同一 `taskId` 的 events 数据，不重新 fetch
+
+### 渲染服务改动
+- 无（本阶段不涉及渲染）。
+
+### 工作区与 CI 改动
+- **新增** `tests/fixtures/golden_runs/README.md`：解释录制 / review / commit 流程；说明何时需要重录（IR 字段语义变更 / 子能力 prompt 改 / 新模型上线）
+- **扩展** `.github/workflows/ci.yml`：加 `golden-runs` job——纯 CPU pytest 跑 `test_golden_runs.py`，0 API key 依赖；run 在 `python` job 之后但与 `integration` 并行
+- **新增** `scripts/check_parent_event_id.py`：CI grep 校验脚本（在 Phase 1A 已声明，本阶段实际写代码）；扫源码所有"两阶段"VLM 调用函数（命名匹配 `*_refine` / `*_phase2` / `*_classify` 或函数 docstring 包含 "two-stage"），校验函数体内 `chat_vision()` 调用是否传 `parent_event_id=` 关键字参数；缺则 fail
+
+### 验证方式
+1. **甘特图端到端**（短素材）：浏览器跑 `sample_basic_15s` extract → 切换甘特图视图 → 看到 ≥ 5 个 lane（`1A.scenes` / `1A.captions` / `1A.stickers` / `1A.zoom_direction` / `1A.audio`）+ ≥ 10 个横条 + 至少 1 条因果链 dashed line；鼠标滚轮缩放、拖拽平移流畅（FPS ≥ 50）；hover 横条 tooltip 显示 stage + duration + reasoning。
+2. **长视频甘特图**：跑 `long_3min` Phase 3 9 step → 甘特图显示 9 个 lane group（按 step 分组）+ 500+ 事件不卡（FPS ≥ 30）；lane 折叠功能可用。
+3. **因果链联动**（中栏 ↔ 甘特图双向）：在中栏 hover "贴纸语义判断" 事件卡片 → 其父事件 "贴纸 bbox 检测" 卡片加 accent border + 中间画虚线；切到甘特图视图 → 同样虚线跨 lane 连接两事件 + 两横条同步高亮。
+4. **ReplayClient round-trip**（`pytest backend/tests/integration/test_golden_runs.py`）：
+   - 用 `ReplayClient(golden_runs/sample_basic_15s/events.jsonl)` 替换默认 client → 跑 `extract_template("sample_basic_15s")` → 与 `golden_runs/sample_basic_15s/template.json` deep equal 通过
+   - 故意改 `CaptionStyle.placeholder_text` 默认值（如 list 改回 str）→ test fail + jsondiff 输出指向该字段
+   - 故意 push 一个 1A 子能力的 prompt 微调 commit（不改 IR 字段）→ ReplayClient 不走真实 VLM 所以 test 仍绿（证明回归测试只盯 IR 字段稳定性，不会被 prompt 变化误报）
+5. **golden runs 录制流程**：`python scripts/record_golden.py --sample sample_basic_15s` → `tests/fixtures/golden_runs/sample_basic_15s/{events.jsonl, template.json}` 生成 → git diff 显示新增 2 文件 → 人工 review 无 PII → commit。
+6. **CI golden-runs job 绿灯**：push → Actions 该 job 通过（不需 GPU、不需 API key、< 5s 跑完）；故意 push 一个修了 IR 字段语义的 commit → 该 job 红 + diff 提示具体字段。
+7. **视图切换 URL 同步**：手动改 URL `?view=gantt` ↔ `?view=list` ↔ `?view=ir` → Workbench 顶栏切换器 + 实际视图同步切换；浏览器后退按钮可回到上一个 view。
+8. **答辩演示价值验证**（主观）：录一段 30s 屏幕录像，开场 5s 切到甘特图视图 → 评审一眼看到"AI 30 秒里到底干了什么"——这是项目可解释性的视觉冲击点；中段切因果链 hover → 展示"AI 的思考链"。
+
+### 课题对齐
+- **评分项 6（迁移过程可视化，10 分）**：甘特图 + 因果链把"迁移过程"从"日志列表"升级为"调度时间线 + 推理图谱"，直接命中"清晰展示如何迁移、如何补全"的高分要求
+- **加分项"对'结构迁移'有较强的可解释性展示"**：因果链 + ReplayClient 把"可解释性"从"展示给人看"扩展到"机器可验证"——这是工程力上的差异化
+- **加分项"有较好的工程质量、交互细节或视觉完成度"**：CI golden-runs job 是质量门体现工程化成熟度；visx + 因果链 SVG 渲染是交互细节
+- **答辩动线开场冲击力**：甘特图是 30 秒可视化爆点，比"事件列表"叙事性更强
+
+### 已明确不做（v3.2 范围内）
+- **VisionEvent.child_event_ids 双向链字段**：前端反向 O(1) 增量构建索引足够，无需后端冗余字段
+- **甘特图导出 PNG/SVG**：浏览器右键截图或用 Phase 2.5 已实现的 MediaRecorder 录屏即可；专门做导出按钮 ROI 低
+- **TapFlow 风格的命令式 D3.js**：与实时 SSE 场景不匹配 + 与 React 心智模型冲突，改用 visx
+- **gantt-chart 商业库（react-gantt-task 等）**：商业项目调度风格无法表达"AI 子能力 lane"语义
 
 ---
 
@@ -2156,6 +2268,36 @@ category 取值：`whoosh | ding | pop | typing | swoosh | impact | bell | trans
 ---
 
 ## 改动点总结
+
+### v3.2（2026-06-07）：工作台 v4 升级 — 甘特图 + 因果链 + 回归基础设施
+
+v3.1 通读核查 + `docs/proposals/001-ai-decision-workbench-v4.md` 提案评审后，把 3 条 🟢 P1 提案（O11 / O3 / O2）打包到新增的 Phase 2.6 实施。三者本质同源——都是 events 流这份数据的不同用法（按时间维度排成 lane / 按因果维度排成图 / 反向作为 ReplayClient 输入），因此放同一阶段而非分散。
+
+**新增 Phase 2.6 阶段**：位于 Phase 2.5 之后、Phase 3 之前。理由：①Phase 2 ★MVP 已经能出片，工作台已有真实事件流可供甘特图消费；②Phase 1B 完工时已 commit golden_runs 种子供 ReplayClient 回放；③Phase 3 长视频 9 step 调度天然受益于甘特图视图（开场冲击力强）；④不阻塞 ★MVP 主路径。
+
+**前期阶段的零成本"埋点"**（无新工程，只是约束声明）：
+- Phase 0.5：`VisionEvent` IR 加 `duration_ms: int = 0` 字段；`chat_vision()` 客户端层用 `time.perf_counter()` 自动回填——子能力代码零侵入
+- Phase 1A 设计约束追加"两阶段 VLM 调用必填 `parent_event_id`"强约束 + CI `scripts/check_parent_event_id.py` 校验脚本
+- Phase 1B 验证方式追加第 8 条 "Golden runs 种子录制"——完工 close-out 时把 ≥ 3 个 fixture 的 events.jsonl + TemplateIR 复制到 `tests/fixtures/golden_runs/` git-commit
+
+**Phase 2.6 三项新能力**：
+1. **甘特图视图（O11）**：用 `@visx/scale + @visx/zoom + @visx/group` 实现 SVG 甘特图；lane = stage、横条 = 长程事件（`duration_ms > 0`）、竖线 = 瞬时事件；与中栏 EventStream 共享 `selectedEventId` 双向联动。**技术栈第一性原理选型**：visx 而非 TapFlow 借鉴的命令式 D3——后者与实时 SSE 增量场景不匹配，且与现有 React 心智模型冲突；visx 是 React 友好的 D3 包装（d3-scale/d3-zoom 的 hooks），bundle ~50KB gzipped。
+2. **因果链可视化（O3）**：parent_event_id 已是 v3 IR 字段但 v3 / v3.1 未真正用起来。v3.2 强约束所有两阶段 VLM 调用必填 + 工作台中栏 + 甘特图都画 SVG dashed `<path>` 连父子事件 + hover 联动。**v3.2 决策**：不加 `child_event_ids` 双向链——前端从 `events` 列表按 parent_event_id 反向 O(1) 增量构建 `childIndex: Map<parentId, eventId[]>`，避免后端 schema 冗余。
+3. **events.jsonl 作 regression fixture（O2）**：新增 `backend/app/llm/replay_client.py ReplayClient(LLMClient)` 从 golden_runs 读 events 重放；`pytest test_golden_runs.py` 用 ReplayClient 跑 extract → 与 commit 的 golden IR 深度比对；任何 IR 字段语义漂移立即被 CI 发现。CI golden-runs job 0 API key 依赖，<5s 跑完。
+
+**已明确不做（v3.2 范围内 · 提案 P2 推迟）**：
+- O6 对外可解释性 API：推迟到 Phase 2.6 完工后单独评估
+- O8 SubcapabilityLab 升一等公民：Phase 1A 完工后再评估
+- O9 VLM 成本/延迟仪表盘：数据已有（cost_tokens 字段），仪表盘 UI 推到 Phase 1B 后期
+- O10 答辩演示动线：纯文档，无代码工作，Phase 全部完工前再写
+- VisionEvent.child_event_ids 双向链字段：前端反向 O(1) 增量构建索引足够
+- TapFlow 风格命令式 D3.js：技术栈第一性原理评估后改用 visx
+
+**这一轮工作量**：
+- 文档：1 新增 Phase 章节 + 4 处其他章节小改（阶段总览 / 依赖链 / 技术栈表 / VisionEvent IR / Phase 1A 设计约束 / Phase 1B 验证方式 / CI 脚本约定）
+- 实际编码：Phase 2.6 大致 4-5 天（visx 学习 + 因果链 SVG 渲染 + ReplayClient + golden_runs CI + 跨视图联动）
+
+---
 
 ### v3.1（2026-06-07）：核查修复 — 18 处硬错误 + 15 处优化 + D13 拓宽
 
