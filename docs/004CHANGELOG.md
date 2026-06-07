@@ -1,3 +1,23 @@
+## [2026-06-07-1] docs(plan): fix v3.1 consistency issues [N1-N21]
+
+### 改动
+- `PLAN.md` 修复 v3.1 修订后通读核查发现的 21 处内部不一致（详见 `docs/proposals/002-v3p1-consistency-fixes.md`），分三类：
+  - **P0 schema bug**（N1）：`VisionEvent.source` Literal 补 `text_llm`，与 D13 拓宽对齐；不修则 Phase 3 Step 03 Text LLM 去重的事件会 pydantic 校验 fail
+  - **P1 路径方案 B 残留**（N2-N3）：关键机制"事件持久化"段 + Phase 3 D13 强化段把旧的 `pipeline/events.jsonl` 改为 v3.1 方案 B 的 `events_{task_id}.jsonl` + `event_bus.publish` 按 `tasks.resource_kind` 路由的描述；Phase 3 stage 列表补 `3.step01.asr` / `3.step09.render`
+  - **P1 D13 拓宽未同步**（N4-N14）：把 10 处"VLM 调用必发事件"统改为"AI 调用必发事件"（含视频理解技术选型表尾段、工作台事件流章节、AI 调用协议章节标题、VisionEvent 章节首句、`model_used` / `cost_tokens` 字段注释、Phase 0.5 D13 + `chat_vision` 强约定、Phase 1A 验证 5、关键设计决策 D13、"已明确不做"VLM 静默调用、Phase 3 累计 token 数描述）
+  - **P2 数量描述**（N15-N16）：`Patch` op 数量 5→4（移除已被替换为 Workbench API 的 `replay_vision_event`）、Phase 7 前置条件 6 项→7 项验证
+  - **P3 结构/格式**（N17-N19）：`backend/app/api/lab.py` 从 Phase 1A 前端改动段移到后端段；fixtures 表格前补空行；stage 命名规范表 Phase 3 行补 `3.step01.asr` / `3.step09.render`
+  - **CI 脚本约定 + 历史标注**（N20-N21）：CI yaml 后追加 `scripts/check_stage_naming.py` / `scripts/check_event_emission.py` 约定；v3 改动总结里 source 5 个枚举 / D13 VLM 描述两条原文末尾追加 v3.1 修订标注，原文保留作为历史快照
+
+### 涉及文件
+- `PLAN.md`：21 处修订点（详见提案文档锚定字符串）
+- `docs/proposals/002-v3p1-consistency-fixes.md`：本次修复的执行清单（含验收 grep 11 条全部通过）
+
+### 关联
+-> docs/proposals/002-v3p1-consistency-fixes.md
+
+---
+
 ## [2026-06-06-2] fix(renderer): Serve user material over HTTP /data instead of file:// URLs [ISS-005]
 
 ### 改动

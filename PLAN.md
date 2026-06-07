@@ -19,22 +19,45 @@
 | **IR（Intermediate Representation）** | 中间表示，模板/项目/账本都用 pydantic 结构化表达 |
 | **TemplateIR / ProjectIR / TranscriptLedger** | 三大 IR：模板配方 / 实例化时间线 / ASR 时间戳账本 |
 | **账本（Ledger）** | WhisperX 词级时间戳的不可变 ASR 单元列表，LLM 操作的唯一真相源（D11） |
-| **Tier A / B / C** | 风格保真度分层：A=结构+字幕+缩放+BGM 特征+贴纸（MVP）/ B=蒙版+调色+标题条/ C=任意特效 1:1（不做） |
-| **D2 / D3** | 保真度同 Tier A / Tier B 的代号（阶段 1 做 D2，阶段 4 做 D3） |
+| **Tier B（v3 修订）** | 标题条 + 音效预设注入（v3 把蒙版/调色/转场前置到 1A 后，Tier B 显著瘦身；Tier C=任意特效 1:1 仍不做） |
+| **D2-core / D2-extended / D3（v3 三层）** | D2-core=切点/字幕样式含 placeholder/缩放/BGM/贴纸（Phase 1B 集成）；D2-extended=转场/几何蒙版/调色语义（Phase 1A 单点+1B 集成）；D3=标题条+音效预设（Phase 4） |
 | **保序** | 时间线上的片段顺序不被打乱（D3 默认约定；Phase 7 是唯一例外） |
 | **Patch** | 对 ProjectIR 的结构化编辑操作（NL / 参数面板 / 时间轴 / 重排都产出 Patch） |
 | **分步审核（Staged Review）** | 长视频管线在关键决策点暂停等待用户 Accept / Edit / Rerun（D12） |
-| **VLM** | Vision-Language Model，视觉大模型（贴纸描述 / 字幕功能 / 标签）|
+| **VLM** | Vision-Language Model，视觉大模型；v3 升格为视觉理解主路径 |
 | **Text LLM** | 纯文本大模型（去重 / 分段 / NL→Patch） |
 | **AIGC** | AI 生成内容（贴纸图 / B-roll 视频 / 封面，Phase 5） |
+| **VisionEvent（v3 新增）** | AI 决策事件的结构化记录，每次 VLM/CV/ASR/audio/LLM 决策都发一条，含 `frame_url + bbox_norm + reasoning + ir_target` 等字段；由 event_bus 广播到 SSE + 持久化 jsonl |
+| **IRTarget（v3 新增）** | 指向 IR 树的某个节点，让工作台第三栏 IR Pane 知道事件写入了哪个字段，触发对应填充动画 |
+| **AI 透明工作台 / Workbench（v3 新增）** | 前端 `/workbench/{task_id}` 三栏页面（VLM 看到什么 / 怎么想 / 决定了什么），项目第一产品页 |
+| **0-999 归一化坐标系（v3 新增）** | VLM 输出 bbox 统一用 0-999 整数区间，客户端层 `/1000 * width` 映射到实际像素；参考 Open-AutoGLM 在生产中跑通的方案 |
+| **placeholder_text / length_constraint / semantic_purpose（v3 CaptionStyle 新增）** | VLM 在判断字幕样式时同步给出的语义占位、字符数约束、字幕功能标签；用作应用阶段 LLM 填用户字幕的视觉锚点 |
+| **stage 前缀（v3 新增）** | VisionEvent.stage 字段的命名规范，决定工作台事件染色与过滤；完整列表见"VLM 调用协议·stage 命名规范"小节 |
+| **SubcapabilityLab（v3 新增）** | 前端 `/lab` 单点验证页，列出 Phase 1A 所有视觉理解子能力供独立调试 |
 
 ## Context
 
 SceneEcho 解决一个真实痛点：**一镜到底口播视频枯燥，需要字幕动画、缩放推进、贴纸、BGM 卡点、转场这些复杂特效才能留住观众**；创作者能感受到"这条视频的剪辑风格更出效果"却很难把这种风格抽象、复用到自己的素材上。本项目从 5–20s 优质口播样例中提取「**结构骨架 + 视听风格**」模板入知识库；MVP 阶段实现"用户传 10–20s 短口播素材 + 指定一个模板 → 自动套风格出片"；后续阶段扩展到长视频自动拼接、AIGC 补画面、时间轴手动微调。
 
-**自闭环出片，不经过剪映**：Python 后端做分析（ASR / OCR / Demucs / CV / LLM 编排），Node 服务跑 Remotion 渲染叠加层，FFmpeg 处理音视频剪接，最终输出 MP4。
+**自闭环出片，不经过剪映**：Python 后端做分析（ASR / VLM / Demucs / CV / LLM 编排），Node 服务跑 Remotion 渲染叠加层，FFmpeg 处理音视频剪接，最终输出 MP4。
 
 **硬约束**：输入是导出后的 MP4 成片（非剪映工程文件），模板只能靠 CV / ASR / 多模态推断。
+
+---
+
+## v3 修订核心思想（2026-06-07）
+
+v2.4 的架构以"成本可控的 hybrid CV+VLM"为出发点；v3 重新定义出发点为**「在 demo 阶段不计 API 成本、追求识别效果与可解释性最优」**。基于该立场，PLAN 在五条主轴上重审：
+
+1. **VLM 升级为视觉理解主路径**。原 plan 第 112–117 行"为什么不 VLM 一把梭"的五条理由中，第 2 条"像素位置模糊"被推翻——参考 Open-AutoGLM 已在生产中验证的 0-999 归一化坐标系（`x = coord / 1000 * width`），通用 VLM 同样能给出 ±5–10% 精度的归一化 bbox，足够字幕/贴纸/标题条/几何蒙版的"识别 + 复用"需求。仅保留两条物理上限的理由：①切点级时间精度（±0.04s）VLM 做不到，由 PySceneDetect 与 WhisperX 把守；②音频信号处理不在 VLM 能力域，由 Demucs + librosa 把守。
+2. **OCR（字符识别）整体退场**。模板提取阶段不需要知道样例字幕的具体文本——用户素材的字幕来自用户自己的录音，模板复用的是"字幕长什么样、动效是什么"，不是"字幕写了什么"。CaptionStyle 新增 `placeholder_text` / `length_constraint` / `semantic_purpose` 三个字段，由 VLM 直接给出"4-6 字 CTA 强调"这种描述性占位，作为应用阶段 LLM 填字幕的视觉锚点与长度约束。
+3. **新增"AI 透明工作台"作为本项目第一产品页**。VLM 的语义化输出（"看到底部红色 CTA 字幕、动画为逐字弹入"）通过 SSE 事件总线实时推送到前端 `/workbench` 三栏页面：左 = VLM 此刻看到的视频帧 + bbox 高亮，中 = 时序化的语义决策日志，右 = TemplateIR 字段被实时填充的动画。这直接打满课题评分项 7（迁移过程可视化，10 分）+ 加分项"结构迁移可解释性"。
+4. **Phase 1 拆为 1A（单点验证）+ 1B（集成）**。每个识别能力（字幕样式 / 贴纸 / 缩放方向 / 转场 / 调色 / 几何蒙版 / 动画细节）都先独立交付 fixture + 指标基线 + AI 工作台事件回放三件套；单点指标全过后才允许进 1B 的端到端集成。这避免"大集成里一个子能力拉胯导致整条线评分崩"的常见失败模式。
+5. **Tier B 部分项目前置到 Phase 1A**。VLM 主路径化后，几何蒙版 / 调色语义判断 / 转场分类这三项的实现成本骤降（VLM 直接给参数即可），从 Phase 4 前置到 Phase 1A。Phase 4 显著瘦身，只剩"标题条识别"+"用户手工配置的音效预设注入"两项。
+
+**v3 立场补充**：本项目处于 demo / 答辩准备阶段，API 调用成本与延迟在合理范围内（单样例提取 ≤ 5 分钟）不构成约束。所有"为成本而牺牲识别效果"的旧决策被允许重审。
+
+**v3 前端设计语言**：整套 UI 参照 Anthropic 官网风格（米白底 + 衬线无衬线对比排版 + 温暖橙强调色 + 细线条卡片 + 大量留白），具体 design tokens 见"跨服务契约"章节后的"前端设计语言"小节。
 
 ---
 
@@ -42,16 +65,18 @@ SceneEcho 解决一个真实痛点：**一镜到底口播视频枯燥，需要�
 
 | 阶段 | 名称 | 状态 | 一句话说明 |
 |------|------|------|-----------|
-| 阶段 0 | 地基与渲染骨架 | 📋 待开始 | 三服务脚手架 + IR codegen + CI；mp4 → Remotion+FFmpeg → 叠字幕的 mp4 跑通 |
-| 阶段 1 | 模板提取（D2 范围） | 📋 待开始 | 5–20s 样例 → TemplateIR（切点/字幕/缩放/BGM/贴纸/骨架/标签）→ KB |
-| **阶段 2** | **★MVP 应用闭环（短素材+指定模板）** | 📋 待开始 | **10–20s 口播 + 选模板 → ASR + 套风格 → MP4** |
-| 阶段 2.5 | NL 编辑 + 参数面板 + 迁移可视化 | 📋 待开始 | 一句话改 IR 重渲染；前端展示抽取→映射→缺口→补全全链路 |
-| 阶段 3 | 长视频分步审核闭环 | 📋 待开始 | ~3min 长口播 → 9 step 流水线（含 5 个用户审核暂停点）→ 多 Section 拼接 |
-| 阶段 4 | 保真度升级到 D3（Tier B） | 📝 略写 | 转场分类 + 几何蒙版 + 调色匹配 + 标题条 + 音效预设注入 |
+| 阶段 0 | 地基与渲染骨架 | ✅ 已完成 | 三服务脚手架 + IR codegen + CI；mp4 → Remotion+FFmpeg → 叠字幕的 mp4 跑通 |
+| **阶段 0.5** | **AI 透明工作台骨架（v3 新增）** | 📋 待开始 | **SSE 事件总线 + VisionEvent IR + 前端 `/workbench` 三栏页面骨架，用 mock 事件验证渲染** |
+| 阶段 1A | 视觉理解能力单点验证（v3 重写） | 📋 待开始 | 字幕样式/贴纸/缩放方向/转场/调色/蒙版/动画细节，每个独立 fixture + 指标基线，VLM 调用同步发射 VisionEvent |
+| 阶段 1B | 模板提取集成（v3 重写） | 📋 待开始 | 串联 1A 各能力 → 完整 TemplateIR（含 D2 + Tier B 部分项）→ KB，工作台展示全链路 |
+| **阶段 2** | **★MVP 应用闭环（短素材+指定模板）** | 📋 待开始 | **10–20s 口播 + 选模板 → ASR + 套风格 → MP4；模板推荐与套风格全程在工作台可见** |
+| 阶段 2.5 | NL 编辑 + 参数面板 + 工作台事件回放 | 📋 待开始 | 一句话改 IR 重渲染；Visualize 页改为对历史 VisionEvent 的可回放回顾 |
+| 阶段 3 | 长视频分步审核闭环 | 📋 待开始 | ~3min 长口播 → 9 step 流水线（含 5 个用户审核暂停点）→ 多 Section 拼接；每 step 独立事件流 |
+| 阶段 4 | 标题条 + 音效预设注入（v3 大幅瘦身） | 📝 略写 | 蒙版/调色/转场前置到 1A 后，本阶段只剩标题条识别 + 用户手工配置的音效注入 |
 | 阶段 5 | AIGC 扩展（生图 + 视频 + 封面） | 📝 略写 | 贴纸生图 + B-roll 视频生成 + 封面生成，均用户主动触发 |
 | 阶段 7 | 结构重排与内容优化 | 📝 略写 | 叙事角色识别 + 多版本重排建议 + 代词依赖检测 + 双时间轴对照 + 用户编辑确认 |
 
-> **依赖链**：0 → 1 → 2（★MVP）→ 2.5 → 3 → 7 → 4 → 5。阶段 7 强依赖阶段 3 的分步审核基础设施；初版只依赖阶段 3，但充分体验需要阶段 4（过渡处理）/ 阶段 5（AIGC 补缺口）协同。
+> **依赖链**：0 → 0.5 → 1A → 1B → 2（★MVP）→ 2.5 → 3 → 7 → 4 → 5。0.5 是后续所有 VLM 调用的发射目标，必须在 1A 之前完工；1A 各能力子模块独立验证、1B 才允许集成。阶段 7 强依赖阶段 3 的分步审核基础设施；初版只依赖阶段 3，但充分体验需要阶段 5（AIGC 补缺口）协同。
 > **时间轴拖拽编辑器**已从主路线移出 → `docs/future-plans/001-timeline-editor.md`（保留为远期演进项，触发条件见该文档）。
 
 ---
@@ -67,81 +92,93 @@ SceneEcho 解决一个真实痛点：**一镜到底口播视频枯燥，需要�
 - **D1 输入是 MP4 ⇒ 提取靠推断**：成片是像素、无剪辑元数据；所有模板信息必须从像素/音频/语音转写中重建。
 - **D2 模板 ≠ 产物**：模板是 KB 里的可复用配方；产物 = 模板 + 用户素材实例化后的 MP4。
 - **D3 默认保序 = 不改时间线顺序**：短素材场景下天然保序；长视频默认 ASR/去重/分段保序。**结构重排是 D3 的唯一例外，仅在 Phase 7 经用户多步审核确认后允许**（见 D12）。
-- **D4 保真度分层**：D2（Phase 1：切点/字幕样式含多行/缩放/BGM 特征/贴纸位置+描述）→ D3（Phase 4：转场分类 / 几何蒙版 / 调色匹配 / 标题条 / 音效预设注入）。**字幕多行布局放 D2**（长中文字幕天然需多行）。音效识别 / 高潮位置 / 变速识别 / 画面缩放出框 在 v2.3 砍掉，详见 Phase 4 "已砍项"。
+- **D4 保真度分层（v3 修订）**：D2-core（Phase 1B：切点/字幕样式含多行/缩放/BGM 特征/贴纸位置+描述）→ D2-extended（Phase 1A 单点验证后随 1B 一起进 KB：转场分类 / 几何蒙版语义参数 / 调色风格语义）→ D3（Phase 4：标题条 / 音效预设注入）。**字幕多行布局放 D2**（长中文字幕天然需多行）。音效识别 / 高潮位置 / 变速识别 / 画面缩放出框 在 v2.3 砍掉，详见 Phase 4 "已砍项"。
 - **D5 骨架"发现"非"预设"**：基础三段（开头/主体/结尾）按位置阈值发现，所有口播必有；其余角色按样例实际出现、开放可扩展；不预设固定清单。
 - **D6 选模板用标签 + LLM 重排**：≤50 模板用标签匹配 + LLM 评分足够、可解释；向量检索 = Future。
 - **D7 渲染锁 Remotion + FFmpeg**：输出 MP4 自闭环，不依赖任何外部 GUI 编辑器。
 - **D8 模板是「可伸缩风格规则集」**：模板编码风格 + 节奏规则，套用时按用户素材实际长度自适应铺开（槽位时长 = {min, nominal, max} 区间）。
 - **D9 长视频 = 多主题段 × 模板**：长素材先按主题分段（保序），每个主题段各选一个模板，多段套完按原序拼接。
 - **D10 AIGC 用户主动触发**：AI 生图（贴纸）和 AI 生视频（B-roll）**绝不自动启用**；用户通过项目级开关或段级勾选明确授权，且在产物上披露 AI 内容。
-- **D11 LLM 决策 ≠ 文本改写**：所有 LLM/VLM 决策（去重/分段/选模板/打标签/NL→patch）都返回**对结构化 id 的指令**，绝不改写 `Unit.text` 或像素内容。**但用户可在审核界面手动校正 `Unit.text`**（修正 WhisperX 误识的品牌名/方言/专有名词），校正后系统自动重跑该 Unit 后续依赖的 step（字幕渲染、强调词识别等）。
+- **D11 LLM 决策 ≠ 文本改写（v3 补充 placeholder 例外）**：所有 LLM/VLM 决策（去重/分段/选模板/打标签/NL→patch）都返回**对结构化 id 的指令**，绝不改写 `Unit.text` 或像素内容。**但用户可在审核界面手动校正 `Unit.text`**（修正 WhisperX 误识的品牌名/方言/专有名词），校正后系统自动重跑该 Unit 后续依赖的 step（字幕渲染、强调词识别等）。**v3 补充**：`CaptionStyle.placeholder_text` 不属于"改写文本"——它是 VLM 看样例字幕后给出的语义占位描述（如"4-6 字 CTA 短语示例：立即抢购"），用途是给应用阶段 LLM 填用户字幕时的视觉锚点与长度约束，不是从样例 OCR 出的原文。
 - **D12 分步用户审核**：长视频（Phase 3）/ 结构重排（Phase 7）等多步流水线在关键决策点（去静音 / 去重 / 主题分段 / 选模板 / 重排方案）**暂停等待用户 Accept / Edit / Rerun**；中间产物全部持久化到 `projects/{id}/pipeline/`，便于"打回任意 step"而无需从头跑。短素材场景（Phase 2）不走分步审核（一步出活，成本不值）。
+- **D13 所有 AI 决策必发射 Event（v3 新增 · 强约束）**：不仅 VLM 调用，**Text LLM / ASR / VAD / Demucs / 任何 AI 决策**都通过统一的 `event_bus.publish(task_id, event)` 发射 `VisionEvent`（命名沿用，含 `source ∈ {vlm, cv, asr, audio, text_llm, system}`）。任何 AI 客户端方法返回 `(structured_result, list[VisionEvent])` 元组；未发射事件的调用视为 bug，CI 通过 grep 扫源码强制校验。这是 AI 透明工作台的可观测性底座——账本机制管"LLM 文本决策的可回滚"，事件流机制管"所有 AI 决策的可观测"，二者共同覆盖项目所有 AI 黑盒环节。
 
-### 视频理解技术选型（第一性原理）
+### 视频理解技术选型（v3 重审 · 第一性原理）
 
-**核心判断**：不同提取任务对"时间精度 / 像素精度 / 语义理解深度"需求差异巨大，单一技术统治所有任务是次优的。**hybrid 是唯一合理选择**。
+**核心判断**：在不计 API 成本的前提下，视觉理解任务统一交给 VLM 做主路径，CV 与专用模型只在 VLM 物理上限做不到的地方把守（帧级时间精度、音频信号处理、动画微观位移精度）。理由：①VLM 的语义化输出可直接驱动「AI 透明工作台」对用户的可解释展示，是 CV 给不了的产品价值；②VLM 的归一化坐标（参考 Open-AutoGLM 在生产中跑通的 0-999 方案，`x = coord / 1000 * width`）足够 ±5–10% 精度，覆盖字幕/贴纸/标题条/几何蒙版的"识别 + 复用"需求；③单一技术栈减少 hybrid 切换成本；④demo 阶段无规模化经济约束。
 
 | 任务 | 主技术 | 是否调 VLM | 理由 |
 |------|--------|-----------|------|
-| 切点检测 | PySceneDetect | ❌ | 帧级精度（±0.04s），VLM 做不到 |
-| 字幕 OCR（文本/位置/颜色） | PaddleOCR (`ch_PP-OCRv4`) | ❌ | 像素级 bbox，中文最优 |
-| 字幕入场动画类型 | 帧位移启发式 | 模糊时 VLM 兜底 | 滑入/淡入/逐字 用 Y/X 位移和 alpha 曲线判 |
-| 字幕功能分类（标题/强调/卖点/CTA） | VLM + ASR 上下文 | ✅ | 纯语义判断 |
-| 缩放方向粗判 | VLM 看首/中/末三帧 | ✅ | 推进/拉远/稳定/抖动语义判断 |
-| 缩放关键帧曲线（仅非稳定 scene） | OpenCV `goodFeaturesToTrack` + Lucas-Kanade 光流 | ❌ | 时间序列上的 scale 值 |
-| BGM 有/无 + BPM + 能量曲线 | Demucs (`htdemucs`) + librosa | ❌ | 信号处理直出 |
-| BGM 情绪标签 | librosa 特征 + 规则映射 | 可选 VLM 验证 | 规则可用，需要时 VLM 强化 |
-| 贴纸**检测**（位置 + 时机） | VLM 网格抽帧（每 4–6 帧一组） | ✅ | 口播脸部高显著性会污染纯 CV 方案 |
-| 贴纸 bbox 精细化 | CV 帧差 + Canny edge（在 VLM 给的区域内） | ❌ | VLM 给粗位置，CV 精化 ±10% |
-| 贴纸视觉描述 | VLM on cropped region | ✅ | 纯语义，区域裁图 |
+| 切点检测 | PySceneDetect | ❌ | 帧级精度（±0.04s）是 VLM 物理上限做不到的事 |
+| 字幕**文本**识别 | **删除（不需要）** | — | 模板提取不需要原文，只需要"长什么样、怎么动"。OCR rec 完全退场 |
+| 字幕位置 + 样式（颜色/字体推测/描边/字号） | **VLM 直接给归一化 bbox + 样式 JSON** | ✅ | 一次 vision call 同时返回 bbox + 视觉属性，比 OCR det + 启发式色彩分析更连贯 |
+| 字幕入场/强调动画（语义类型） | **VLM 看 3 帧（出现前/中/后）判断"逐字弹入/整句滑入/淡入/打字机"** | ✅ | 语义判断 VLM 天然擅长，给出 placeholder 配合 CV 验证细节 |
+| 字幕动画**微观细节**（逐帧位移曲线） | OpenCV 5fps 帧差 + 光流 | ❌ | "逐字出现的字符 stagger 时长"等 ±5px 精度细节 VLM 抽样太稀疏 |
+| 字幕功能分类（标题/强调/卖点/CTA） | VLM | ✅ | 纯语义判断，沿用原方案 |
+| 字幕 `placeholder_text` 与 `length_constraint` | **VLM 在判断字幕样式时同步输出** | ✅ | 给应用阶段 LLM 填字幕的视觉锚点："这里应该填 4-6 字 CTA 短语" |
+| 缩放方向粗判（推进/拉远/稳定/抖动） | VLM 看首/中/末三帧 | ✅ | 沿用原方案 |
+| 缩放关键帧曲线（仅非稳定 scene） | OpenCV `goodFeaturesToTrack` + Lucas-Kanade 光流 | ❌ | 时间序列上的 scale 值是数值任务，CV 精度高于 VLM |
+| BGM 有/无 + BPM + 能量曲线 | Demucs (`htdemucs`) + librosa | ❌ | 信号处理直出，VLM 不处理音频 |
+| BGM 情绪标签 | librosa 特征 + 规则映射 | ❌ | 规则可靠且零延迟，沿用原方案 |
+| 贴纸**检测**（位置 + 类型 + 时机） | **VLM 网格抽帧（每 4–6 帧一组）** | ✅ | 沿用原方案；归一化坐标系覆盖位置精度 |
+| 贴纸 bbox 精细化（±5px 边界） | CV 帧差 + Canny edge（在 VLM 给的区域内） | ❌ | VLM 给粗位置，CV 精化到像素 |
+| 贴纸视觉描述 + `semantic_category` | VLM on cropped region | ✅ | 沿用原方案，并新增"强调提示/装饰/信息标签/情绪表达"分类 |
 | 骨架三段划分 | 位置阈值（rule） | ❌ | D5 约定 |
-| 标签建议（function/scene/notes） | VLM + Text LLM | ✅ | 整体样例采样帧 + ASR → 综合判 |
-| 整体提取 sanity check | VLM | ✅ | "这模板和样例一致吗？" 防错 |
-| 语音转写（词级时间戳） | WhisperX (`large-v3` zh) + forced align | ❌ | 词级精度 |
+| 标签建议（function/scene/notes） | VLM + Text LLM | ✅ | 沿用原方案 |
+| 整体提取 sanity check | VLM | ✅ | 沿用原方案 |
+| 语音转写（词级时间戳） | WhisperX (`large-v3` zh) + forced align | ❌ | 词级精度，物理上限 |
 | 静音检测 | silero-VAD | ❌ | 信号处理 |
 | 重复/口误识别 | Text LLM（id 决策） | ✅（text only） | 文本语义 |
 | 主题分段 | Text LLM（id 决策） | ✅（text only） | 文本语义 |
-| 转场分类（D3） | 帧序列 pattern + VLM 兜底 | 兜底 ✅ | 大多 classical 能判 |
-| 几何蒙版（D3） | OpenCV 分割（或 SAM2）+ VLM 先判有无 | 先判 ✅ | 无蒙版样例直接跳过精分割 |
-| 调色 LUT（D3） | 颜色直方图 + 预设库匹配 | ❌ | 不做 1:1，匹配 5–10 个预设 |
-| 标题条（D3） | OCR 长矩形检测 + 颜色提取 | ❌ | 口播包装高频元素 |
+| 转场分类（D2 范围，v3 从 D3 前置） | **VLM 主判 + CV 验证** | ✅ | VLM 看相邻 scene 边界 3 帧直接判"硬切/叠化/滑入/推拉" |
+| 几何蒙版（D2 范围，v3 从 D3 前置） | **VLM 直接给几何参数（圆/线分屏/矩形 + 归一化坐标）** | ✅ | VLM 先判有无，有则一次性给参数；复杂场景 fallback SAM2 |
+| 调色 LUT 语义（D2 范围，v3 从 D3 前置） | **VLM 给"暖色/冷色/高饱和/低饱和/电影感"语义 + 直方图微调** | ✅ | 不做 1:1 LUT 提取，5–10 预设库 + VLM 语义匹配 |
+| 标题条（D3 保留） | OCR 长矩形检测 + 颜色提取 | ❌ | 待评估是否也升级为 VLM；保留原方案到 Phase 4 |
 | 音效预设注入（D3，**非识别**） | 模板手工标注 + FFmpeg 混入 | ❌ | 不从样例学，用户主动配 |
 
-**VLM 调用成本预估**：每个模板提取约 5–8 次 VLM 调用（贴纸描述 N 次 + 字幕功能 N 次 + 标签建议 1 次 + sanity check 1 次），按 Qwen-VL-Max 估算约 ¥0.5–2/模板。可控。
+**所有 AI 调用必发射 VisionEvent**（v3.1 D13 拓宽）：见"关键机制·AI 透明工作台事件流"章节。强约束——任何 `llm.client.chat_vision()` / `chat_text()` / ASR / VAD / Demucs 等 AI 客户端方法不发事件视为 bug，CI 通过 `scripts/check_event_emission.py` 扫源码强制校验。
 
-**为什么不"VLM 一把梭"**：
-1. 时间戳精度差（VLM 给"大约第几秒"）。
-2. 像素位置模糊（"屏幕底部偏右"非归一化坐标）。
-3. 同次调用结果可变，KB 一致性差。
-4. 完整 video input 成本约 ¥5+/30s，规模化不经济。
-5. 失败定位困难，黑盒。
+**VLM 调用延迟预估**（成本已不是约束）：每个模板提取约 15–30 次 VLM 调用（v2.4 是 5–8 次）：字幕样式 N 次 + 字幕动画 N 次 + 字幕功能 N 次 + 贴纸 N 次 + 缩放方向 N 次 + 转场 N 次 + 蒙版/调色判断 + 标签 + sanity check。单次调用 2–10s，总提取时延 ≤ 5 分钟（可接受，因为有工作台让用户清楚看到进度）。
 
-**为什么不"Classical 一把梭"**：贴纸描述、标签语义、字幕功能这些纯语义任务，规则化做不出来。
+**为什么不"VLM 一把梭"（v3 精简版）**：
+1. **帧级时间精度**：切点 ±0.04s、字幕词级对齐 ±0.05s 是 VLM 物理上限做不到的，必须 PySceneDetect / WhisperX 把守。
+2. **音频信号处理**：VLM 不消费音频，BGM 分离 / BPM / 能量 / VAD 必须 Demucs / librosa / silero-VAD。
+3. **动画微观位移**：±5px 的逐字 stagger / 滑入轨迹需要 5fps 密集采样的帧差与光流，VLM 抽样稀疏达不到。
+4. **延迟权衡**：完整 30s 视频 input 单次调用 8–15s，30 次 = 4–8 分钟。比拆解后并发的 1–3 分钟慢，且失败定位困难——拆解的子调用每个都对应工作台的一条 VisionEvent，黑盒退化为白盒。
+
+> **v2.4 原五条理由的修订**：① 保留（帧级时间精度）→ 拆为更精确的两条（1/2）；② 删除（"像素位置模糊"被 Open-AutoGLM 0-999 坐标系反驳）；③ 删除（同次调用可变性通过 temperature=0+seed+多模型 cross-check 解决）；④ 调整为"延迟权衡"（成本约束已退场）；⑤ 删除（"失败定位困难"被 VisionEvent 工作台白盒化解决）。
+
+**为什么不"Classical 一把梭"**：贴纸描述、标签语义、字幕功能分类、几何蒙版有无判断、调色情绪、转场识别这些纯语义任务，规则化做不出来，也无法给前端工作台提供可读解释。
 
 ### 技术栈
 
 | 组件 | 选型 | 引入阶段 |
 |------|------|----------|
-| Python 后端 | FastAPI + uvicorn + BackgroundTasks | 阶段 0 |
+| Python 后端 | FastAPI + uvicorn + BackgroundTasks + sse-starlette | 阶段 0 / 0.5（SSE）|
 | Node 渲染服务 | Node 18+ / TypeScript / Remotion 4.x / Express | 阶段 0 |
-| 前端 | React 18 + TypeScript + Vite + @remotion/player | 阶段 0 |
+| 前端 | React 18 + TypeScript + Vite + @remotion/player + EventSource | 阶段 0 |
+| 前端 UI 组件库 | Tailwind CSS + Radix UI primitives（Anthropic 风格 design tokens 自定） | 阶段 0.5 |
 | 服务通信 | HTTP + JSON IR（pydantic ↔ JSON Schema ↔ zod 三向校验） | 阶段 0 |
-| 媒体处理 | FFmpeg 6+ / ffprobe / OpenCV-Python 4.x | 阶段 0 / 1 |
-| 分镜切点 | PySceneDetect 0.6+ (`ContentDetector`) | 阶段 1 |
-| 字幕识别 | PaddleOCR 2.7+ (`ch_PP-OCRv4_det/rec`) | 阶段 1 |
-| BGM 分离 | Demucs 4.x (`htdemucs`) | 阶段 1 |
-| 音频特征 | librosa 0.10+ (BPM/RMS/Spectral) | 阶段 1 |
-| 贴纸检测 | VLM 网格抽帧 + CV 精化 bbox | 阶段 1 |
+| 媒体处理 | FFmpeg 6+ / ffprobe / OpenCV-Python 4.x | 阶段 0 / 1A |
+| 分镜切点 | PySceneDetect 0.6+ (`ContentDetector`) | 阶段 1A |
+| ~~字幕识别~~ | ~~PaddleOCR~~（**v3 删除**：模板提取不需要文本字符识别） | — |
+| 字幕样式/动画/位置 | **VLM（归一化 0-999 坐标系）+ OpenCV 5fps 帧差/光流验证动画细节** | 阶段 1A |
+| 贴纸检测 | VLM 网格抽帧 + CV 精化 bbox | 阶段 1A |
+| 缩放方向 / 几何蒙版 / 调色语义 / 转场分类（**v3 从 Phase 4 前置**） | VLM 直接给参数 | 阶段 1A |
+| 缩放关键帧曲线 | OpenCV `goodFeaturesToTrack` + Lucas-Kanade | 阶段 1A |
+| BGM 分离 | Demucs 4.x (`htdemucs`) | 阶段 1A |
+| 音频特征 | librosa 0.10+ (BPM/RMS/Spectral) | 阶段 1A |
 | 语音转写 | WhisperX 3.x (`large-v3`, zh) | 阶段 2 |
 | 静音检测 | silero-VAD 4.x | 阶段 3 |
-| LLM/VLM 客户端 | OpenAI-compatible（统一 endpoint） | 阶段 1 |
-| Text LLM 默认 | `claude-opus-4-7`（推理）/ `qwen-plus`（高频） | 阶段 1 / 2 |
-| VLM 默认 | `qwen-vl-max-latest`（中文视觉）| 阶段 1 |
+| **LLM/VLM 客户端（v3 双协议适配器）** | OpenAI-compatible + Anthropic-native 双适配器，运行时按 `MODEL_PROVIDER` env 选 | 阶段 0.5 / 1A |
+| Text LLM 默认 | `claude-opus-4-7`（推理）/ `qwen-plus`（高频） | 阶段 1A / 2 |
+| VLM 默认（可切换） | `qwen-vl-max-latest`（中文视觉） / `claude-sonnet-4-6`（推理+视觉）/ `gpt-4o`（cross-check 备用） | 阶段 1A |
+| **VisionEvent SSE 事件总线（v3 新增）** | sse-starlette + asyncio 内存广播 + 可选 SQLite 持久化（回放用） | 阶段 0.5 |
 | 任务/状态存储 | SQLite + WAL 模式 | 阶段 0 |
 | 渲染队列 | p-queue（Node side） | 阶段 0 |
 | 日志 | structlog（Python）+ pino（Node） | 阶段 0 |
 | IR 类型生成 | datamodel-code-generator + json-schema-to-zod | 阶段 0 |
-| Phase 4 蒙版分割（可选） | SAM2 / OpenCV 分割 | 阶段 4 |
+| Phase 4 蒙版分割（可选 fallback） | SAM2（仅复杂场景，**v3 主路径已是 VLM**） | 阶段 4 |
 | 生图 API | 第三方（接 OpenAI 兼容 image endpoint） | 阶段 5 |
 | 视频生成 API | 第三方（Runway/Sora/Kling/即梦，阶段 5 选型） | 阶段 5 |
 
@@ -149,7 +186,7 @@ SceneEcho 解决一个真实痛点：**一镜到底口播视频枯燥，需要�
 
 - **开发模式**：三服务全跑本地（Python 18521 / Node 8001 / Vite 5173）。`docs/dev-setup.md` 给一键启动脚本（`pnpm dev` 用 concurrently 起三服务 + watch IR codegen）。
 - **演示/生产模式**：Python 后端 + Node 渲染服务部署到云 GPU 机器；前端可本地连云后端，也可一并部署。Python ↔ Node 通过内网 HTTP 通信，前端走对外端口；**共享存储用同机器卷或 MinIO**。
-- **环境变量**（`.env`）：`RENDERER_URL`、`LLM_BASE_URL`、`LLM_API_KEY`、`MODEL_VLM`、`MODEL_TEXT`、`MODEL_TEXT_CHEAP`、`DATA_ROOT`、`BGM_STRATEGY`(features|original)、`ENABLE_CLI_INGEST`(dev only)。
+- **环境变量**（`.env`，v3 扩充）：`RENDERER_URL`、`BACKEND_URL`、`LLM_BASE_URL`、`LLM_API_KEY`、`MODEL_PROVIDER`(openai|anthropic|mixed)、`ANTHROPIC_API_KEY`、`MODEL_VLM`、`MODEL_TEXT`、`MODEL_TEXT_CHEAP`、`DATA_ROOT`、`BGM_STRATEGY`(features|original)、`ENABLE_CLI_INGEST`(dev only)、`ENABLE_DEV_MOCK`(dev only, v3 工作台 mock 流)、`DUAL_CHECK_STAGES`(逗号分隔 stage 列表，启用双模型 cross-check)。
 
 ### 跨服务契约
 
@@ -202,16 +239,16 @@ SceneEcho 解决一个真实痛点：**一镜到底口播视频枯燥，需要�
 - Node 在 `/render` 处用 zod 校验请求体；Frontend 在 API 调用边界用 TS 类型。
 - **CI 检查**：每次 PR 跑 `pnpm run gen:types && git diff --exit-code`，schema 与生成文件不一致则红。
 
-**异步任务与进度上报**
-- 长任务（extract/apply/render/aigc）走 FastAPI `BackgroundTasks`；任务态写 `data/kb.sqlite` 的 `tasks` 表（`id, kind, status, progress, stage, result_json, error, created_at, updated_at`）。
-- 前端 `GET /tasks/{id}` 轮询（阶段 0 选轮询，简单）；阶段 4 后如需要实时升级到 SSE。
-- 渲染端收到 `/render` 后用 Remotion 的 `onProgress` callback，每 5% 回调 Python `POST /internal/task-progress` 更新 `tasks.progress`。
+**异步任务与进度上报（v3 修订：SSE 主路径）**
+- 长任务（extract/apply/render/aigc）走 FastAPI `BackgroundTasks`；任务态写 `data/kb.sqlite` 的 `tasks` 表（v3 schema：`id, kind, status, progress, stage, resource_kind, resource_id, events_jsonl_path, last_event_sequence, result_json, error, created_at, updated_at`，新增 `resource_kind ∈ {sample, project, template}` / `resource_id` / `events_jsonl_path` / `last_event_sequence` 四列定位事件流）。
+- **v3 任务进度与 AI 决策事件统一走 SSE**：前端订阅 `GET /api/tasks/{id}/events`（sse-starlette + 浏览器 EventSource）。事件类型：`progress`（任务进度）/ `vision`（AI 决策事件，含 VLM/CV/ASR/audio/text_llm 各 source）/ `stage`（pipeline step 推进）。Phase 0 阶段已部署轮询作为兜底，Phase 0.5 起 SSE 为主路径。
+- 渲染端 Remotion `onProgress` callback 每 5% 回调 Python `POST /internal/task-progress` 更新 `tasks.progress`，后端继续以 `progress` event 推 SSE。
 
 **错误处理与降级**
 - Python ↔ Node：HTTP 错误返 JSON `{code, message, retry_safe: bool}`；Python 按 `retry_safe=true` 自动重试一次。
 - LLM/VLM/AIGC 限流/超时：指数退避 3 次；最终失败标 Gap 为"待补全"而非 crash。
 - ASR 低置信（WhisperX 平均 logprob < -0.6）：标记该段，UI 提示"需校对"。
-- OCR 无字幕识别但骨架推断有字幕：标记并 fallback 到无字幕骨架。
+- VLM 字幕识别失败（返回空字幕列表）但骨架推断有字幕：标记并 fallback 到无字幕骨架（v3：OCR 已退场，此处只看 VLM 输出）。
 - 渲染失败：保留 ProjectIR 与中间产物（`projects/{id}/outputs/intermediates/`），日志写明失败 step；前端展示"渲染失败，点击重试"。
 - 渲染服务不可达：Python 启动时 `GET {RENDERER_URL}/health` 探活；挂掉则首页 banner 提示。
 
@@ -224,6 +261,73 @@ SceneEcho 解决一个真实痛点：**一镜到底口播视频枯燥，需要�
 - 入：接受任意 mp4/mov/webm；FFmpeg 首步统一转 H.264 baseline + AAC + 30fps + yuv420p + 1080×1920（默认 9:16）→ 存 `{kind}/{id}/normalized.mp4`，后续处理基于归一化版。
 - 出：H.264 + AAC + 30fps + yuv420p + faststart（兼容剪映/抖音/微信视频号）。
 - canvas 不匹配处理：模板 9:16、用户素材 16:9 → "contain" 策略 letterbox + 模糊背景（FFmpeg `pad` + `boxblur`）。模板/素材都用 16:9 则直接渲染。
+
+### 前端设计语言（v3 新增 · Anthropic 风格 design tokens）
+
+参照 Anthropic 官网视觉风格——克制、温暖、文档感、工具感而非娱乐感。所有页面（SampleExtract / TemplateLibrary / Editor / LongVideoEditor / Workbench / Visualize）共用同一套 token，**禁止逐页面自创色板**。
+
+```css
+/* 颜色 · 写入 frontend/src/styles/tokens.css */
+:root {
+  /* 背景层级 */
+  --bg-canvas: #FAF9F7;          /* 主背景，温暖米白 */
+  --bg-surface: #FFFFFF;         /* 卡片/面板背景 */
+  --bg-subtle: #F5F4F0;          /* 次级面板/输入框 */
+  --bg-inverted: #1F1E1C;        /* 工作台中栏的暗背景日志区可选 */
+
+  /* 文字层级 */
+  --text-primary: #1F1E1C;       /* 正文 */
+  --text-secondary: #6B6962;     /* 次级说明 */
+  --text-tertiary: #A8A49B;      /* 元信息/时间戳 */
+  --text-inverted: #FAF9F7;
+
+  /* 强调色（暖橙系，Anthropic logo 衍生） */
+  --accent-primary: #CC785C;     /* CTA 按钮、活跃 step、当前 VLM 高亮 bbox */
+  --accent-hover: #B86A50;
+  --accent-subtle: #F5E5DD;      /* 强调色的弱填充（被选中卡片背景） */
+
+  /* 语义色（克制使用） */
+  --color-success: #5C8A6E;
+  --color-warning: #C99846;
+  --color-error: #C76B5A;
+  --color-info: #6B8CAE;
+
+  /* 边框 */
+  --border-default: #E8E5DE;     /* 细线条卡片用 */
+  --border-strong: #C9C5BC;
+  --border-focus: var(--accent-primary);
+
+  /* 字体 */
+  --font-serif: "Source Serif 4", "Source Han Serif SC", Georgia, serif;
+  --font-sans: "Inter", "Source Han Sans SC", -apple-system, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Source Han Sans Mono", Consolas, monospace;
+
+  /* 间距（克制留白，8px 基准 + 大模块用 24/48） */
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-6: 24px; --space-8: 32px; --space-12: 48px; --space-16: 64px;
+
+  /* 圆角（细微，避免 ios 过圆） */
+  --radius-sm: 4px; --radius-md: 6px; --radius-lg: 8px;
+
+  /* 阴影（极少用；偏向用边框分层） */
+  --shadow-subtle: 0 1px 2px rgba(31, 30, 28, 0.04);
+  --shadow-card: 0 1px 3px rgba(31, 30, 28, 0.06), 0 1px 2px rgba(31, 30, 28, 0.04);
+}
+```
+
+**关键应用规则**：
+- **卡片**默认 `bg-surface + border-default + radius-md`，**不用 shadow**——边框承担分层，符合 Anthropic 的文档感
+- **按钮**：主按钮 `accent-primary` 填充 + 白字；次按钮透明 + `border-default` + `text-primary`；危险按钮 `color-error` 边框 + 文字（不填充）
+- **AI 工作台第二栏（语义日志）**用 `bg-inverted + text-inverted + font-mono`，制造"AI 内部思考"的可读感（类似 IDE 调试面板）
+- **VLM bbox 高亮**：`border: 2px solid var(--accent-primary)` + 标签气泡 `bg-accent-subtle + text-accent-primary`
+- **强调文字**用 serif 字体（标题、模板名、Section 名），正文用 sans，代码/日志用 mono——三体并用制造 Anthropic 的"出版物"感
+- **大量留白**：单页面有效内容宽度不超过 1280px，外围都是 `--space-12`+ 的边距
+
+**组件库选型**：Tailwind CSS（写入 `frontend/tailwind.config.ts` 把上述 tokens 注册为 theme.extend）+ Radix UI primitives（Dialog/Dropdown/Tooltip/Tabs 用 Radix 无样式版本，外观用 token 套）。**不引入 MUI / Ant Design / Chakra**——它们的视觉语言与 Anthropic 风格冲突。
+
+**插画与图标**：lucide-react（线条克制、weight 一致）。绝不用 Material Icons / Font Awesome。
+
+**动效原则**：所有过渡 200-300ms ease-out；工作台事件出现用 80ms 短淡入 + 4px 上移；bbox 高亮用 1.5s fade-in-out 循环。**禁止任何"弹性 spring"动画**——会破坏文档感。
 
 ### 素材目录结构与生命周期
 
@@ -238,10 +342,14 @@ data/                              # 由 DATA_ROOT 指向，gitignore
 │  │  ├─ SourceHanSans-{weight}.otf
 │  │  └─ fonts_index.json          # family → file 映射
 │  ├─ stickers_reference/          # 用户提供的贴纸参考图（可选）
+│  ├─ luts/                        # v3 新增：调色预设库（5-10 个），VLM 调色语义匹配的目标 ID 集合
+│  │  └─ luts_index.json           # {id, name, hue_shift, saturation, brightness, category}
+│  ├─ sfx_pool/                    # v3 新增：音效池（Phase 4 音效预设注入用）
+│  │  ├─ {sfx_id}.mp3
+│  │  └─ sfx_index.json            # {id, name, category, file_path}
 │  └─ models/                      # ML 模型缓存
 │     ├─ whisperx/
-│     ├─ paddleocr/
-│     └─ demucs/
+│     └─ demucs/                  # v3：paddleocr 已删（不再用 OCR）
 ├─ samples/                        # 提取模板的样例（输入）
 │  └─ {sample_id}/
 │     ├─ source.mp4                # 原始上传
@@ -249,9 +357,11 @@ data/                              # 由 DATA_ROOT 指向，gitignore
 │     ├─ thumbnail.jpg             # 首帧
 │     └─ extracted/                # 中间产物
 │        ├─ scenes.json
-│        ├─ captions.json
+│        ├─ captions.json          # v3：VLM 给的 CaptionStyle 列表（非 OCR 原文）
 │        ├─ stickers_crops/        # 贴纸区域裁图
 │        ├─ bgm_stem.wav           # Demucs 分离的 BGM
+│        ├─ frames/                # v3 新增：关键帧抽样器输出 {ts}.jpg，VLM 调用与工作台共用
+│        ├─ events_{task_id}.jsonl # v3 新增：本次 extract 任务的 AI 决策事件流（每次 ingest/rerun 一文件）
 │        └─ extract.log
 ├─ projects/                       # 用户项目（输入+输出）
 │  └─ {project_id}/
@@ -268,7 +378,9 @@ data/                              # 由 DATA_ROOT 指向，gitignore
 │     │  ├─ 06_reorder_plans.json  # Phase 7 启用时填，否则 identity
 │     │  ├─ 07_project_ir.json
 │     │  ├─ 08_quality.json        # Quality scoring 结果
-│     │  └─ pipeline_state.json
+│     │  ├─ pipeline_state.json
+│     │  ├─ events_{task_id}.jsonl # v3 新增：本次 apply/long-pipeline 任务的事件流
+│     │  └─ frames/                # v3 新增：用户素材关键帧抽样 {ts}.jpg（apply 阶段 VLM 与工作台用）
 │     └─ outputs/
 │        ├─ render_{ts}.mp4
 │        └─ intermediates/         # 渲染失败时保留
@@ -305,37 +417,45 @@ data/                              # 由 DATA_ROOT 指向，gitignore
 - **贴纸/字幕参考图**：放 `system/stickers_reference/`，命名 `{category}_{n}.png`（如 `arrow_red_01.png`）。VLM 描述时可参考此库做匹配增强。
 - **BGM 音源**：放 `system/bgm_pool/`，命名 `{mood}_{bpm}_{id}.mp3`（如 `energetic_128_01.mp3`）。同时维护 `bgm_index.json`。
 
-### 项目结构
+### 项目结构（v3 修订：补 0.5/1A/1B 新增模块）
 
 ```
 SceneEcho/
-├─ docs/{PLAN.md, dev-setup.md, decisions/, future-plans/, 003ISSUES.md}
+├─ docs/{PLAN.md, dev-setup.md, decisions/, future-plans/, proposals/, 003ISSUES.md}
+│                                   # v3 新增 proposals/（含 001-ai-decision-workbench-v4.md 等架构提案）
 ├─ .github/workflows/{ci.yml, release.yml}
 ├─ shared/
-│  └─ ir.schema.json                # pydantic 导出的 JSON Schema
+│  └─ ir.schema.json                # pydantic 导出的 JSON Schema（v3 含 VisionEvent / IRTarget）
 ├─ scripts/
 │  └─ gen_schema.py                 # pydantic → JSON Schema
 ├─ backend/                         # Python FastAPI
-│  ├─ pyproject.toml
+│  ├─ pyproject.toml                # v3 新依赖: sse-starlette, anthropic
 │  ├─ ruff.toml
 │  ├─ .venv/                        # gitignore
 │  └─ app/
-│     ├─ main.py                    # FastAPI 入口
-│     ├─ config.py                  # 环境变量加载
+│     ├─ main.py                    # FastAPI 入口（v3 挂载 api/events.py）
+│     ├─ config.py                  # 环境变量加载（v3 加 model_provider/anthropic_api_key/enable_dev_mock/dual_check_stages）
 │     ├─ cli.py                     # ingest 命令（dev only）
+│     ├─ tasks_store.py             # tasks 表 CRUD（v3 加 resource_kind/resource_id/events_jsonl_path/last_event_sequence）
+│     ├─ event_bus.py               # v3 新增：asyncio 内存广播 + jsonl 持久化 + replay
 │     ├─ api/{samples, templates, projects, edit, tasks, pipeline, reorder}.py
-│     ├─ ir/{template.py, project.py, ledger.py, patch.py, pipeline.py, narrative.py, export.py}
+│     │                             # v3 新增: events.py(SSE) / replay.py / dev_workbench.py / lab.py(Phase 1A 子能力调试)
+│     ├─ ir/{template, project, ledger, patch, pipeline, narrative, export}.py
+│     │                             # v3 新增: vision_event.py（VisionEvent + IRTarget）
 │     ├─ extract/{scenes, motion, captions, audio, stickers, skeleton, normalize, pipeline}.py
-│     │                              # Phase 4 增: title_bar.py, color.py, masks.py
+│     │                             # v3 Phase 1A 新增: frame_sampler.py / captions_anim.py / transitions.py / masks.py / color.py
+│     │                             # Phase 4 增: title_bar.py
 │     ├─ understand/{asr, vad, dedup, segment, vision}.py
 │     ├─ apply/{mapping, gaps, fill, style, pipeline, long_pipeline, pipeline_state, quality}.py
 │     ├─ render/{client.py, ffmpeg.py}
 │     ├─ kb/{store, tagging, select, recommend}.py
 │     ├─ agent/{tools, orchestrator, nl_edit, aigc, narrative, render_queue}.py
-│     │                              # Phase 4 增: sfx_preset.py
-│     ├─ llm/{client.py, prompts/}  # OpenAI-compatible 统一客户端
+│     │                             # Phase 4 增: sfx_preset.py
+│     ├─ llm/{client.py, prompts/}  # v3 重构：OpenAICompatClient + AnthropicClient 双适配器
+│     │   └─ prompts/scenarios/     # v3 新增：mock 工作台事件脚本（dev only）
 │     └─ logging.py                 # structlog 配置
-│  └─ tests/{unit/, integration/, fixtures/, conftest.py}
+│  └─ tests/{unit/, integration/, fixtures/, golden_runs/, conftest.py}
+│                                   # v3 新增 golden_runs/：每个标杆样例的 events.jsonl 作回归 fixture
 ├─ renderer/                        # Node Remotion 服务
 │  ├─ package.json
 │  ├─ tsconfig.json
@@ -346,51 +466,89 @@ SceneEcho/
 │     ├─ queue.ts                   # p-queue
 │     ├─ progress.ts                # 回调 Python
 │     ├─ logger.ts                  # pino
-│     ├─ types/ir.ts                # generated from JSON Schema
+│     ├─ preflight.ts               # 渲染前资源完整性检查（Phase 2 引入）
+│     ├─ types/ir.ts                # generated from JSON Schema（v3 含 VisionEvent）
 │     └─ compositions/
 │        ├─ Project.tsx
-│        ├─ Caption.tsx
+│        ├─ Caption.tsx             # v3 支持 placeholder_text 渲染（模板预览模式）
 │        ├─ ZoomLayer.tsx
 │        ├─ Sticker.tsx
+│        ├─ Mask.tsx                # v3 从 Phase 4 前置到 1B
+│        ├─ ColorLayer.tsx          # v3 从 Phase 4 前置到 1B
 │        ├─ TitleBar.tsx            # Phase 4
-│        ├─ Transition.tsx          # Phase 4
-│        ├─ ColorLayer.tsx          # Phase 4
-│        └─ Mask.tsx                # Phase 4
+│        └─ Transition.tsx          # Phase 4
 ├─ frontend/                        # React + Vite
-│  ├─ package.json
+│  ├─ package.json                  # v3 新依赖: tailwindcss, @radix-ui/react-*, lucide-react
 │  ├─ vite.config.ts
+│  ├─ tailwind.config.ts            # v3 新增：注册 design tokens 到 theme.extend
 │  ├─ scripts/gen-types.ts
 │  └─ src/
-│     ├─ api/index.ts
+│     ├─ api/{index, events}.ts     # v3 events.ts: subscribeEvents / fetchEventHistory / fetchReplayEvents
 │     ├─ types/ir.ts                # generated from JSON Schema
-│     ├─ pages/{SampleExtract, TemplateLibrary, Editor, LongVideoEditor, Visualize}.tsx
-│     ├─ components/{RemotionPlayer, ParamPanel, NLBar, TaskProgress}.tsx
-│     │                              # Phase 3 增: StepVADReview, StepDedupReview, StepSegmentReview,
-│     │                              # StepSelectReview, StepReorderReview, StepFinalReview
-│     └─ state/                     # Zustand stores
+│     ├─ styles/tokens.css          # v3 新增：Anthropic 风格 design tokens（颜色/字体/留白/圆角）
+│     ├─ pages/
+│     │   ├─ SampleExtract.tsx
+│     │   ├─ TemplateLibrary.tsx
+│     │   ├─ Editor.tsx
+│     │   ├─ LongVideoEditor.tsx
+│     │   ├─ Workbench.tsx          # v3 新增：核心三栏工作台（/workbench/:taskId）
+│     │   ├─ Visualize.tsx          # v3 重写：事件回放器（/projects/:id/replay）
+│     │   └─ SubcapabilityLab.tsx   # v3 新增：1A 子能力单点验证（/lab，dev only）
+│     ├─ components/
+│     │   ├─ RemotionPlayer.tsx
+│     │   ├─ ParamPanel.tsx
+│     │   ├─ NLBar.tsx
+│     │   ├─ TaskProgress.tsx
+│     │   ├─ workbench/             # v3 新增：三栏组件 + 公共组件
+│     │   │   ├─ WorkbenchVisionPane.tsx
+│     │   │   ├─ WorkbenchEventStream.tsx
+│     │   │   ├─ WorkbenchIRPane.tsx
+│     │   │   ├─ BboxOverlay.tsx    # 帧上 SVG bbox + 气泡
+│     │   │   └─ EventBadge.tsx     # stage 染色徽章
+│     │   └─ review/                # Phase 3 增：StepVADReview / StepDedupReview / StepSegmentReview /
+│     │                             #   StepSelectReview / StepReorderReview / StepFinalReview / StepQualityReview
+│     └─ state/                     # Zustand stores（v3 加 workbench.ts: events/filterStage/irSnapshot）
 ├─ pnpm-workspace.yaml              # 管理 renderer + frontend
 ├─ .gitignore
-├─ .env.example
+├─ .env.example                     # v3 加 MODEL_PROVIDER / ANTHROPIC_API_KEY / ENABLE_DEV_MOCK / DUAL_CHECK_STAGES
 └─ README.md
 ```
 
-### 总体数据流
+### 总体数据流（v3 修订：加 AI 决策事件支线）
 ```
-[样例 mp4] ──extract──▶ TemplateIR ──▶ 知识库 KB（带标签）
-                                              │ 用户指定 template_id（阶段 2）
-                                              │ 自动 select（阶段 3）
-[用户口播素材] ──understand──▶ 账本 ──┐         │
-                                     ▼         ▼
-            apply: 映射 + 缺口识别 + 缺口补全 + 套风格
-                                              ▼
-                       ProjectIR（保序 EDL + Caption 列表）
-                                              │ render.client
-                                              ▼
-                              Node Remotion 服务 + FFmpeg
-                                              ▼
-                                          MP4 产物
-   [自然语言指令 / 参数面板修改] ──agent.nl_edit──▶ Patch ──▶ 重渲染
-   [用户勾选 AI 补画面] ──agent.aigc──▶ 调外部 API ──▶ 替换素材
+[样例 mp4] ─extract─▶ TemplateIR ─▶ KB（带标签）
+     │      │                  │  用户指定 template_id（Phase 2）/ 自动 select（Phase 3）
+     │      └─VisionEvent─┐    │
+     │      stream         │    │
+[用户口播素材] ─understand─▶ 账本 ─┐   │
+     │      │              ▼     ▼
+     │      │  apply: 映射 + 缺口识别 + 缺口补全 + 套风格
+     │      ├─VisionEvent stream──┤
+     │      │                     ▼
+     │      │   ProjectIR（保序 EDL + Caption 列表）
+     │      │                     │ render.client
+     │      │                     ▼
+     │      │   Node Remotion 服务 + FFmpeg
+     │      │                     ▼
+     │      │                 MP4 产物
+     ▼      ▼
+┌────────────────────────┐
+│  event_bus              │   ←── 所有 AI 决策（VLM/CV/ASR/audio/text_llm）发事件至此
+│  (asyncio in-memory     │
+│   + jsonl 持久化)        │
+└─────────┬──────────────┘
+          │ SSE /api/tasks/{id}/events  (event 类型: vision / progress / stage)
+          ▼
+┌────────────────────────────────────────────────────────────────┐
+│  AI 透明工作台 /workbench/{task_id}（v3 第一产品页 · 三栏）      │
+│  ┌─────────┬─────────┬─────────┐                              │
+│  │ VLM 看到 │ VLM 怎么 │ VLM 决定 │  事件回放页 /projects/{id}/replay │
+│  │ 帧+bbox  │ 想 reason│ IR 填充  │  按 sequence 重播全过程         │
+│  └─────────┴─────────┴─────────┘                              │
+└────────────────────────────────────────────────────────────────┘
+
+[自然语言指令 / 参数面板修改] ─agent.nl_edit─▶ Patch ─▶ 重渲染（同时发 VisionEvent）
+[用户勾选 AI 补画面]        ─agent.aigc────▶ 调外部 API ─▶ 替换素材（同时发 VisionEvent）
 ```
 
 ### 关键机制
@@ -418,21 +576,168 @@ SceneEcho/
 
 （人工校正入口：D11 允许用户在审核界面手动改 `Unit.text` 修正 WhisperX 误识，但 AI 不行。）
 
-#### 提取流水线（Phase 1，D2 范围）
+#### AI 透明工作台事件流（v3 新增 · 与账本机制并列的项目第二 novel 设计）
+
+**核心**：所有 AI 决策（v3.1 D13 拓宽：VLM 视觉、Text LLM 文本、ASR 转写、Demucs/librosa 音频、CV 信号处理）同步发射结构化的 `VisionEvent`，通过 SSE 事件总线实时推送到前端 `/workbench/{task_id}` 三栏页面。AI "看到/听到什么 / 怎么想 / 决定了什么"三件事被结构化、可订阅、可回放、可否决。
+
+**为什么这么设计**——用一个反例说明：
+
+如果让 VLM 的视觉理解输出"只返回结构化结果给后端处理"（v2.4 默认做法），会发生：
+1. 用户上传样例后等 30s–5min 才看到结果，整段过程是黑盒，焦虑感真实存在
+2. 评审打开系统看不到 AI 在"做什么"，"迁移过程可视化"评分项只能事后回看 Visualize 页
+3. VLM 给出错误识别时（比如把广告条认成 CTA 字幕），用户无法在过程中干预，只能等结果出来后整体重跑
+4. "AI 决策的可解释性"加分项缺乏过程证据，只能靠最终 IR 的文字说明
+
+**工作台机制下**：
+- `llm.client.chat_vision(messages, model)` 强制返回 `tuple[structured_result, list[VisionEvent]]`
+- VLM 客户端层在返回时自动调 `event_bus.publish(task_id, events)` 广播到所有订阅者
+- 前端 `EventSource('/api/tasks/{id}/events')` 实时拿到事件流，按 stage 分组渲染到三栏
+- 左栏：根据 `frame_url` + `bbox_norm` 在帧上叠加 bbox 高亮；右栏：根据 `ir_target` 触发 IR 字段填充动画；中栏：按 `sequence` 时序展示 `reasoning` + `semantic_label` + `confidence`
+- 用户在中栏可对任一事件"否决" → 产生 `reject_vision_event` Patch → 触发该子能力 rerun（保留账本机制的"决策可回滚"语义）
+
+**事件持久化**：每个任务的事件流按 v3.1 路径方案 B 落对应资源目录——`samples/{sid}/extracted/events_{task_id}.jsonl`（样例提取任务）或 `projects/{pid}/pipeline/events_{task_id}.jsonl`（项目应用任务），由 `event_bus.publish` 根据 `tasks.resource_kind + resource_id` 路由（详见"核心数据结构 · VisionEvent · 持久化路径"小节）。Phase 2.5 的回放页面可按时间顺序重播全过程，作为答辩 demo 录屏的素材库。
+
+**与账本机制的关系**：
+- 账本机制管的是"LLM 文本决策的可解释与可回滚"（id 决策 + Unit 不可变）
+- 工作台事件流管的是"所有 AI 决策的可观测与可干预"（VisionEvent + 事件回放，v3 D13 拓宽后含 Text LLM/ASR/audio/CV/VLM）
+- 二者共享设计哲学：**AI 决策对人类透明、可结构化追溯、可干预、不丢失中间态**
+
+**水平扩展约束（v3 已知 trade-off · S2）**：`event_bus` 当前是单进程内存广播（`asyncio.Queue` + `dict[task_id, list[Queue]]`）。MVP 单实例后端足够；若未来部署多 worker 后端，需替换为 Redis pub/sub（`channel = events:{task_id}`）或专用消息队列。这一限制在 demo 阶段不构成阻塞。
+
+#### AI 调用协议（v3 强约束 · v3.1 拓宽到全部 AI 客户端）
+
+**契约**：
+
+```python
+# 旧（v2.4）
+def chat_vision(messages, model) -> str: ...
+
+# 新（v3）
+def chat_vision(
+    messages: list[dict],
+    model: str,
+    stage: str,                      # "1A.captions" / "1A.stickers" / ...
+    task_id: str,                    # 用于事件总线广播
+    frames: list[FrameRef] | None,   # 输入帧的引用（含 ts 与 url），用于自动填 VisionEvent.frame_ts/frame_url
+    ir_target_template: IRTarget | None,  # 调用方预声明本次调用结果会写入哪个 IR 节点
+    schema: type[BaseModel],         # 强制结构化输出（pydantic 校验）
+) -> tuple[BaseModel, list[VisionEvent]]:
+    ...
+    # 内部行为：
+    # 1. 调外部 VLM API（OpenAI/Anthropic 双适配器自动选）
+    # 2. 用 schema 校验返回 JSON
+    # 3. 自动构造 VisionEvent 列表（每个识别到的实体一个事件）
+    # 4. 调 event_bus.publish(task_id, events) 广播
+    # 5. 返回 (structured_result, events) 元组
+```
+
+**对其他 AI 客户端方法的同等约束（v3.1 拓宽 · D13）**：`chat_text()`、ASR、Demucs 等所有 AI 调用必采用相同模式——返回 `tuple[BaseModel, list[VisionEvent]]` 元组，内部调 `event_bus.publish()`，event.source 按调用类型填 `text_llm` / `asr` / `audio` 等。签名规范：
+
+```python
+def chat_text(
+    messages: list[dict],
+    model: str,
+    stage: str,                      # "2.5.nl_edit" / "3.step03.dedup" / "3.step04.segment" / ...
+    task_id: str,
+    ir_target_template: IRTarget | None,
+    schema: type[BaseModel],
+    silent: bool = False,
+) -> tuple[BaseModel, list[VisionEvent]]:
+    ...    # 内部行为同 chat_vision，event.source="text_llm"
+
+def transcribe(
+    audio_path: str,
+    stage: str,                      # "3.step01.asr" / "2.asr"
+    task_id: str,
+    ir_target_template: IRTarget | None,
+) -> tuple[TranscriptLedger, list[VisionEvent]]:
+    ...    # event.source="asr"，每个 Unit 一条事件或按句聚合
+
+def extract_bgm(
+    normalized_path: str,
+    save_stem: bool,
+    task_id: str,
+    stage: str = "1A.audio",
+) -> tuple[AudioStyle, list[VisionEvent]]:
+    ...    # event.source="audio"，has_bgm / bpm / mood 各发一条
+```
+
+CI 通过 `scripts/check_event_emission.py` grep 所有 AI 客户端方法定义，校验函数体内是否调用了 `event_bus.publish`；缺则 fail。
+
+**编码规范**：
+- 调用方必须传 `stage`、`task_id`、`ir_target_template`，缺一个 CI 红
+- 调用方拿到 `events` 后不需要手动发布——客户端层已经发了；events 列表的作用是让调用方可以在拿到结果后做后续逻辑（如选其中 confidence 最高的事件做下一步动作）
+- 工作台页面的"事件类型"染色按 `stage` 前缀（如 `1A.*` 用蓝色、`2.*` 用绿色、`3.*` 用橙色）
+
+**模型选择策略**：
+- 默认 `qwen-vl-max-latest`（中文最优、单调用 2–5s）
+- **dual-model cross-check 启用规则（v3 明确 · S3）**：默认关闭。要启用，在 `.env` 设 `DUAL_CHECK_STAGES="1A.captions.semantic_purpose,1A.masks.has_mask,1A.color_lut.dominant_tag"` 列出需要双模的具体 stage。客户端层在 `chat_vision()` 内检查当前 `stage` 是否命中列表，命中则自动走 `chat_vision_dual()`：并发调 Qwen + Claude，两者**结构化字段**一致才写入 IR，否则在 VisionEvent 加 `confidence_warning=True` 提示用户在工作台 review。延迟翻倍、token 翻倍是已知代价，仅用于真正关键的决策。
+- Provider 切换由 `MODEL_PROVIDER` env 控制（`openai` | `anthropic` | `mixed`）。`mixed` 模式按 `stage` 前缀路由（如 1A 视觉走 OpenAI 兼容 Qwen，2.recommend 文本推理走 Anthropic Claude），具体路由表在 `llm.client.PROVIDER_ROUTING_TABLE` 维护。
+- **silent 模式（v3 新增 · O4 准备）**：`chat_vision(..., silent=True)` 时跳过 `event_bus.publish` 但仍 log；用于背景 sanity check 等不需要在工作台展示的辅助调用，避免事件流被次要事件淹没。
+
+#### stage 命名规范（v3 强约束 · H2）
+
+VisionEvent.stage 字段所有合法取值集中在此表，工作台前端按 stage 前缀染色与过滤：
+
+| Stage 模式 | 阶段 | 染色 | 示例 |
+|-----------|------|------|------|
+| `0.5.mock` | Phase 0.5 mock 流 | 灰 | `0.5.mock.captions_demo` |
+| `1A.{capability}` | Phase 1A 子能力 | 蓝 | `1A.scenes` / `1A.captions` / `1A.captions_anim` / `1A.stickers` / `1A.zoom_direction` / `1A.zoom_curve` / `1A.transitions` / `1A.masks` / `1A.color_lut` / `1A.audio` / `1A.caption_function` |
+| `1B.{step}` | Phase 1B 集成 | 蓝 | `1B.skeleton` / `1B.tagging` / `1B.sanity_check` |
+| `2.{step}` | Phase 2 应用 | 绿 | `2.recommend` / `2.asr` / `2.mapping` / `2.gaps` / `2.fill` / `2.style.caption` / `2.style.bgm` |
+| `2.5.nl_edit` | Phase 2.5 NL 编辑 | 紫 | `2.5.nl_edit` |
+| `3.step{NN}.{kind}` | Phase 3 长视频 step | 橙 | `3.step01.asr`（ASR 转写，source="asr"）/ `3.step02.vad` / `3.step03.dedup` / `3.step04.segment` / `3.step05.select` / `3.step06.reorder.score` / `3.step06.reorder.deps` / `3.step06.reorder.plan` / `3.step07.apply` / `3.step08.quality` / `3.step09.render`（渲染进度，event 类型 progress 而非 vision）|
+| `4.{capability}` | Phase 4 | 青 | `4.title_bar` / `4.sfx_preset` |
+| `5.aigc.{kind}` | Phase 5 AIGC | 粉 | `5.aigc.sticker` / `5.aigc.broll` / `5.aigc.cover` |
+
+**注意**：Phase 7 重排逻辑虽是"叙事分析"，但实际是 Phase 3 Step 06 的实现，stage 沿用 `3.step06.reorder.*`，**不**用 `7.narrative.*`——避免 stage 前缀与 phase 号交叉冲突，工作台按 stage_filter 时统一在 `3.*` 命名空间下。
+
+**新增 stage 时**：必须先在本规范表添加，再写代码；CI 校验 `git grep -nE 'stage="[^"]+"'` 出现的所有字面量是否都匹配本表前缀模式（脚本 `scripts/check_stage_naming.py`）。
+
+#### SSE 服务端约定（v3 强约束 · H3）
+
+`GET /api/tasks/{task_id}/events` 端点的响应格式：每条 SSE event 必须由三行组成，**`id:` 字段不可省略**——浏览器原生 EventSource 依赖这个字段在重连时自动通过 `Last-Event-ID` header 回传：
+
+```
+id: {event.event_id}
+event: vision
+data: {json.dumps(event.model_dump())}
+
+```
+（双换行表示 event 结束。）
+
+服务端处理 `Last-Event-ID` header 时：从 `event_bus.replay(task_id, from_event_id=...)` 拿到 last event 之后的所有历史事件先推，再订阅 live queue 推后续。心跳每 15s 发空 comment `: heartbeat\n\n` 保活。
+
+前端封装 `frontend/src/api/events.ts::subscribeEvents()` 直接用浏览器 EventSource 不需手动管理 last id（浏览器自动维护）；只需在 onError 时记录最后看到的 event_id 供调试。
+
+#### 提取流水线（Phase 1B 集成 · v3 重写后）
 
 ```
 FFmpeg 归一化
-  → 切点（PySceneDetect）
-  → 缩放（VLM 粗判方向 + CV 在有缩放镜头里算 scale 曲线）
-  → 字幕样式/时机/动画（PaddleOCR + 跨帧追踪 + anim_in 推断 + 多行检测）
-  → BGM（Demucs 分离 → BPM/energy/mood，可选保留 BGM stem）
-  → 贴纸（VLM 网格抽帧识别 + CV 精细化 bbox + 跨帧追踪）
-  → 骨架发现（位置阈值 0–30%/30–70%/70–100%）
-  → 字幕功能分类（VLM）
-  → 标签建议（VLM + Text LLM）
-  → sanity check（VLM）
-  → 入 KB
+  → 切点（PySceneDetect）                              ← 时间精度专用工具
+  → 关键帧抽样器（采样首/中/末 + 各切点前后 + 1fps 全局，
+                  写 data/samples/{id}/extracted/frames/{ts}.jpg，
+                  作为后续所有 VLM 调用的输入帧源 + 工作台左栏的展示源）
+  ↓
+  ↓ 以下子流程并发执行，每个 VLM 调用同步发射 VisionEvent ↓
+  ├─ 字幕（VLM 主）：位置 + 样式（颜色/字体推测/描边/字号）+ 动画类型 + placeholder_text + length_constraint + semantic_purpose
+  ├─ 字幕动画细节（CV）：5fps 采样 + 帧差 + Lucas-Kanade 光流，验证 VLM 给的 anim_in 类型的微观细节
+  ├─ 贴纸：VLM 网格抽帧（每 4-6 帧一组）→ 描述 + position_norm + semantic_category；CV 帧差 + Canny 精化 bbox 到 ±5px
+  ├─ 缩放方向（VLM）：看首/中/末三帧粗判推进/拉远/稳定/抖动
+  ├─ 缩放关键帧曲线（CV，仅非稳定 scene）：goodFeaturesToTrack + Lucas-Kanade 光流采样 5fps
+  ├─ 转场分类（VLM）★ v3 从 D3 前置：看相邻 scene 边界 3 帧判硬切/叠化/滑入/推拉
+  ├─ 几何蒙版（VLM）★ v3 从 D3 前置：看采样帧判有无 + 几何参数（圆/线分屏/矩形 + 归一化坐标）；SAM2 仅复杂场景 fallback
+  ├─ 调色语义（VLM）★ v3 从 D3 前置：看采样帧给"暖/冷/高饱和/低饱和/电影感"标签 + 直方图微调匹配 5–10 LUT 预设库
+  └─ BGM（Demucs + librosa）：分离 → BPM / energy / mood，按 BGM_STRATEGY 决定保留 stem
+  ↓ 各子流程结果归并 ↓
+  → 骨架发现（位置阈值 rule：0–30%/30–70%/70–100%）
+  → 字幕功能分类（VLM 综合各 Caption 段位置 + ASR 上下文 → CTA/标题/卖点/强调/regular）
+  → 标签建议（VLM + Text LLM，看 3 采样帧 + 骨架概要 + StyleRule 摘要）
+  → sanity check（VLM 看整体 + KB 对比）
+  → 入 KB（事件流落 events.jsonl）
 ```
+
+**Phase 1A 单点验证版本**：上述流程的每个 ◯VLM 节点 / ◯CV 节点都先独立交付——独立 fixture + 独立指标基线 + 独立工作台事件流验证。1A 全过后才允许在 1B 串成上面这条线。详见 Phase 1A 节。
 
 #### 应用流水线
 
@@ -577,7 +882,7 @@ generate_cover(project_ir, ledger, style_hint) → image_path        # C1 新增
 
 **性能与成本**
 - 每 step 产物缓存复用：rerun step N 只重跑 N，已通过的 N-1 不动。
-- LLM/VLM 调用 token 数累计到 `pipeline_states.llm_cost`，UI 显示成本。
+- AI 调用 token 数（LLM/VLM/ASR 等，v3.1 D13 拓宽统计）累计到 `pipeline_states.llm_cost`，UI 显示成本。
 - Phase 3 完整跑（无 rerun）预计 LLM 调用 5–8 次；Phase 7 额外 2–3 次。
 
 **与 NL 编辑（Phase 2.5）的关系**
@@ -628,6 +933,10 @@ jobs:
     - pytest backend/tests/integration/ --baseline tests/baselines.json
 ```
 
+**v3.1 新增 CI 校验脚本**（在 Phase 0.5 实施时一并创建）：
+- `scripts/check_stage_naming.py`：grep 源码所有 `stage="..."` 字面量，校验是否匹配"stage 命名规范"表的前缀模式；不匹配则 fail（参考 H2）
+- `scripts/check_event_emission.py`（v3.1 新增）：grep 所有 AI 客户端方法定义（`def chat_vision` / `def chat_text` / `def transcribe` / `def extract_bgm` 等），校验函数体内是否调用了 `event_bus.publish`；缺则 fail（参考 D13 + N4/N12）
+
 **Fixtures 清单**（按阶段准备，用户提供）
 - `samples/sample_basic_15s/`：含字幕 + BGM + 1 处缩放（必备）
 - `samples/sample_with_sticker_12s/`：含 1 个明显贴纸（阶段 1 测）
@@ -642,6 +951,50 @@ jobs:
 ---
 
 ## 核心数据结构
+
+### VisionEvent（v3 新增 · AI 透明工作台的核心 IR）
+
+每次 AI 决策的"副产品"（v3.1 D13 拓宽，含 VLM/Text LLM/ASR/audio/CV），由 `llm.client.chat_vision()` / `chat_text()` / 各 AI 客户端方法强制返回，由 `event_bus` 广播到前端工作台。它把 AI "看到什么 / 怎么想的 / 决定写入 IR 哪个字段"三件事结构化。
+
+```python
+class IRTarget(BaseModel):
+    """指向 IR 树的某个节点，让前端工作台第三栏的字段填充动画能精确触发"""
+    ir_type: Literal["TemplateIR", "ProjectIR", "TranscriptLedger"]
+    path: str            # **lodash get/set 风格**（不是标准 JSONPath）：点+方括号路径
+                         # 示例："skeleton.slots[1].style.caption" / "sections[0].segments[2].applied_style"
+                         # 前端用 lodash.set(state.ir, path, value) 做增量写入（S14）
+    field: str | None    # 如果是给某个字段赋值："placeholder_text"
+    op: Literal["set", "append", "remove"] = "set"
+
+class VisionEvent(BaseModel):
+    event_id: str        # UUID，便于工作台中央栏跳转回放
+    task_id: str         # 关联到任务表，前端按 task_id 订阅 SSE
+    sequence: int        # 任务内单调递增，前端按 sequence 排序与去重
+    timestamp: str       # ISO8601
+    source: Literal["vlm", "cv", "asr", "audio", "text_llm", "system"]
+    model_used: str | None       # AI 调用时填具体 model id（VLM/Text LLM 都填），便于 cross-check 对比；CV/audio 等非模型来源填 None
+    stage: str           # 见"VLM 调用协议·stage 命名规范"小节；示例 "1A.captions" / "3.step03.dedup" / "5.aigc.sticker"
+    frame_ts: float | None       # 视频时间戳（如果事件由某帧触发）
+    frame_url: str | None        # /data/{kind}/{id}/extracted/frames/{ts}.jpg
+    bbox_norm: tuple[float, float, float, float] | None  # 0-999 归一化 (x, y, w, h)；None 表示事件不针对具体位置
+    semantic_label: str          # "CTA字幕" | "强调贴纸" | "推进缩放" | "硬切转场" | "暖色调"
+    reasoning: str               # VLM 给的中文解释（≤ 200 字），原文直接展示在工作台中栏
+    confidence: float            # 0-1
+    ir_target: IRTarget | None   # 这条事件最终写入了 IR 哪个字段
+    ir_value: dict | None        # 写入的具体值（前端工作台第三栏拿来做字段填充动画）
+    parent_event_id: str | None  # 事件的因果链（"贴纸语义判断" 依赖 "贴纸 bbox 检测"），便于工作台连线可视化
+    cost_tokens: int | None      # AI 调用 token 数（VLM/Text LLM 都填），工作台可展示但不当作核心约束；CV/audio 等非 token 来源填 None
+```
+
+**生命周期**：内存广播（asyncio queue）+ 任务持久化。
+
+**持久化路径（v3 修订 · 方案 B：按资源 kind 分支）**：events 文件随资源走，task_id 作为文件后缀：
+- 样例提取任务：`data/samples/{sample_id}/extracted/events_{task_id}.jsonl`
+- 项目应用任务：`data/projects/{project_id}/pipeline/events_{task_id}.jsonl`
+
+由 `event_bus.publish(task_id, event)` 根据 `tasks.resource_kind + tasks.resource_id` 字段路由到对应路径（tasks 表写入时落 `events_jsonl_path` 全路径缓存）。同一资源被多次 extract/apply 时，每个 task_id 一份独立文件；删 sample/project 时整目录级联清理；step rerun 时按 task_id 软关闭旧文件、新建新文件。
+
+**sequence 并发分配（v3 强约束 · S1）**：`event_bus` 内部维护 `dict[task_id, AtomicCounter]`，`publish()` 在落盘前原子 `counter.next()` 分配 sequence。同一 task_id 下 1A 各子能力并发发事件时，sequence 仍保证全局单调递增。跨 task_id 的 sequence 不可比较（前端按 sequence 排序仅在同 task 维度有效）。
 
 ### TranscriptLedger（账本——时间戳唯一真相源）
 ```python
@@ -668,12 +1021,19 @@ class CaptionStyle(BaseModel):
     color: str                     # #RRGGBB
     stroke_color: str | None = None
     stroke_width: int = 0
-    position: tuple[float, float]  # 归一化坐标 (0~1)
+    position: tuple[float, float]  # 归一化坐标 (0~1)，渲染时映射，与 VLM 0-999 坐标系做一次 /1000 转换
     layout: str = "single"         # single | multi（D2 支持多行）
     max_chars_per_line: int = 12   # D2 多行布局参数
     anim_in: str                   # 逐字弹入|整句滑入|淡入|打字机|unknown
     anim_emphasis: str | None      # 关键词高亮|抖动|放大|None
     emphasis_words: list[str] = [] # VLM 识别出的强调词
+    # v3 新增字段，由 VLM 在判断字幕样式时一次性返回（不是 OCR 来的原文）
+    placeholder_text: list[str] = []         # 描述性占位列表，按 VLM 推荐顺序，第 0 个首选；
+                                             # 示例：["4-6 字 CTA 强调短语", "立即抢购", "促销+数字"]
+                                             # 应用阶段 LLM 拿到的是整个列表作为引导，给更多选择空间（S15）
+    length_constraint: dict | None = None    # {min_chars: 3, max_chars: 8, max_lines: 1}
+    semantic_purpose: str | None = None      # VLM 给的语义标签："CTA强调"|"标题"|"卖点说明"|"过渡引语"
+    coord_system: str = "normalized_0_999"   # 显式标注源坐标系，便于日后切换
 
 class ZoomKeyframe(BaseModel):
     relative_time: float   # 0~1 相对槽位时长
@@ -697,10 +1057,13 @@ class AudioStyle(BaseModel):
 
 class StickerEvent(BaseModel):
     description: str                 # VLM 描述（"红色感叹号图标"）
-    position: tuple[float, float]    # 归一化坐标
+    position: tuple[float, float]    # 归一化坐标 (0~1)，从 VLM 0-999 坐标 /1000
     size: tuple[float, float]
     start: float; end: float         # 相对槽位时长 0~1
     generated_image: str | None = None  # Phase 5 生图后填
+    # v3 新增
+    semantic_category: str | None = None   # "强调提示"|"装饰"|"信息标签"|"情绪表达"，前端工作台用此色标
+    coord_system: str = "normalized_0_999"
 
 class StyleRule(BaseModel):
     caption: CaptionStyle | None
@@ -800,17 +1163,24 @@ class Patch(BaseModel):
         "override_unit_text",     # D11 用户手工校正 Unit.text
         # 重排（Phase 7）
         "reorder_sections",       # 重排（value={new_order: [section_id...]}）
+        # v3 新增：占位文字与语义占位（CaptionStyle 的 placeholder 三件套）
+        "set_placeholder_text",   # 改 CaptionStyle.placeholder_text（用户在模板编辑界面调整 VLM 给的占位描述）
+        "set_length_constraint",  # 改 CaptionStyle.length_constraint
+        "set_semantic_purpose",   # 改 CaptionStyle.semantic_purpose
+        # v3 新增：AI 工作台事件级操作（reject 确实改 IR；replay 不改 IR，已移到 Workbench API 而不是 Patch op）
+        "reject_vision_event",    # 标记某条 VisionEvent 为"识别错误"（清除该 event.ir_target 处之前写入的值），并触发该步重跑
     ]
-    target: dict      # {section_idx, segment_idx, unit_id, step_no, ...} 视 op 而定
+    target: dict      # {section_idx, segment_idx, unit_id, step_no, event_id, ...} 视 op 而定
     value: dict       # op 对应的参数
-    source: str       # "nl" | "panel" | "review" | "timeline"（来源追踪）
+    source: str       # "nl" | "panel" | "review" | "timeline" | "workbench"（v3 新增 workbench 来源）
     timestamp: str
     pipeline_step: int | None = None  # 来自哪个 step（来自分步审核时填）
+    triggered_by_event_id: str | None = None  # v3：如果是 workbench 中"否决 VLM 决策"产出的 patch，记录源 event 便于追溯
 ```
 
 ---
 
-## 阶段 0: 地基与渲染骨架 📋
+## 阶段 0: 地基与渲染骨架 ✅
 
 ### 前置条件
 1. **Python 版本**：阶段 0 可暂用 3.13（仅 FastAPI/pydantic）；**进阶段 1 前必须新建 3.11 或 3.12 venv**（ML 库对 3.13 适配滞后）。
@@ -882,96 +1252,335 @@ class Patch(BaseModel):
 
 ---
 
-## 阶段 1: 模板提取（D2 范围） 📋
+## 阶段 0.5: AI 透明工作台骨架（v3 新增）📋
 
 ### 前置条件
-- 阶段 0 的 `render_project()` 可将最小 ProjectIR 渲成 mp4（阶段 0 验证 1+3 通过）。
-- Python venv 已切 3.11/3.12，可装 PaddleOCR / Demucs / PySceneDetect / opencv-python / librosa / whisperx。
-- `.env` 已配 `LLM_BASE_URL`、`LLM_API_KEY`、`MODEL_VLM`、`MODEL_TEXT`。
-- `data/system/fonts/` 已放入至少 2 个中文字体；`data/system/bgm_pool/` 已放入至少 5 首免版权曲（fixture 阶段 2 才用，阶段 1 不强求）。
-- 测试 fixtures：`sample_basic_15s` / `sample_with_sticker_12s` / `sample_fast_pace_8s` / `sample_no_bgm_10s` 已 ingest（至少 3 个）。
+- 阶段 0 完成（三服务脚手架 + IR codegen + CI + 最小渲染链路均已验证）
+- 阶段 0 的 `tasks` 表与 `BackgroundTasks` 任务机制可用
 
 ### 目标
-5–20s 样例 → 完整 `TemplateIR`（D2 范围：切点 + 字幕样式含多行 + 缩放 + BGM 特征 + 贴纸位置+描述 + 骨架三段 + 字幕功能分类 + 标签 + VLM sanity check）→ 存入 KB，可在前端列表查看。
+搭建 AI 透明工作台的可观测性底座，使得后续阶段（1A/1B/2/2.5/3）任何 VLM 调用都能"零额外工作"地把识别过程实时推送到前端三栏页面、并持久化到 `events.jsonl` 供答辩 demo 回放。
+
+本阶段**不调任何真实 VLM**——用 mock 事件流验证整套机制。1A 起才开始接入真实 VLM。
 
 ### 设计约束（本阶段必守）
-- 只提"怎么剪"，不判断样例说了什么内容本身（D2）。
-- 骨架按位置阈值发现（D5）；其余角色按字幕有无标 material_req。
-- 保真度只做 D2；D3 字段留空（VisualStyle.mask 等）（D4）。
-- 槽位时长输出为 `{min, nominal, max}` 可伸缩区间（D8）。
-- 贴纸只识别位置 + 时机 + 描述；图形生成留 Phase 5（D10）。
-- VLM/LLM 调用都返回 id 决策或结构化 JSON，绝不改写源文本（D11）。
-- 每次 extract 调用 VLM ≤ 8 次（成本控制）。
+- D13（v3.1 拓宽版）：所有 AI 调用（VLM / Text LLM / ASR / audio / CV）必发射 VisionEvent；本阶段建立这条契约的客户端层（chat_vision + chat_text 两套签名均符合 v3 协议）。
+- 事件总线必须支持多订阅者（前端工作台 + 持久化 writer 同时订阅）。
+- SSE 连接断开重连后能从 `last_event_id` 续推（前端长任务不能因为网络抖动错过事件）。
+- 工作台页面骨架可独立运行（不依赖任何真实 VLM 输出，用 mock generator 驱动）。
 
-### 后端改动
-- **新增** `backend/app/llm/client.py`：OpenAI-compatible 统一客户端；`chat_text(messages, model=cheap|reasoning) -> str`、`chat_vision(messages_with_images, model) -> str`、`structured_output(prompt, schema) -> dict`（自动 JSON mode + pydantic 校验 + 重试）。
-- **新增** `backend/app/llm/prompts/`：`sticker_describe.md`、`caption_function.md`、`tag_suggest.md`、`sanity_check.md`、`dedup.md`、`segment.md`、`nl_edit.md`。
-- **新增** `backend/app/extract/normalize.py`：复用 `render/ffmpeg.py::normalize()` 包装为 extract pipeline 的第一步。
-- **新增** `backend/app/extract/scenes.py`：`detect_scenes(normalized_path) -> list[Scene]`，PySceneDetect `ContentDetector(threshold=27)`；输出 `{start, end, duration}` + 整体节奏 `{mean, std, count}`。
-- **新增** `backend/app/extract/motion.py`：`estimate_zoom(normalized_path, scenes) -> list[ZoomKeyframe]`，**VLM 粗判 + CV 精细化两阶段**（替代原 ORB+RANSAC 重型方案）：
-  - 阶段 1（粗判）：对每个 scene 取首 / 中 / 末三帧合成 1×3 网格 → VLM 判断 `direction ∈ {推进, 拉远, 稳定, 抖动}`；稳定的 scene 直接跳过阶段 2
-  - 阶段 2（精细化，仅非稳定 scene）：在该 scene 内采样 5fps，用 OpenCV `goodFeaturesToTrack` + Lucas-Kanade 光流跟踪中心点周围特征 → scale 曲线 → 取 5 个 ZoomKeyframe
-  - scale > 1.1 推进、< 0.9 拉远、其余稳定；scale 变化 > 3.0 视为抖动（不入关键帧）
-- **新增** `backend/app/extract/captions.py`：`extract_captions(normalized_path) -> list[CaptionEvent]`，PaddleOCR (`ch_PP-OCRv4`) 抽帧（1fps）；跨帧追踪同一文字块（IoU > 0.5）→ 合并 `{text, position, size, color, stroke, anim_in, start, end}`；`anim_in` 由帧间位移/alpha 曲线判（Y 上升=滑入、alpha 0→1=淡入、bbox 宽度逐字增=逐字弹入、其余=unknown）；**多行布局**：bbox 高度 > 1.5 * 行高 → `layout=multi`，估算 `max_chars_per_line`。
-- **新增** `backend/app/extract/audio.py`：`extract_bgm(normalized_path, save_stem: bool) -> AudioStyle`，Demucs `htdemucs` 分离 → 检查 vocals stem RMS 判 `is_instrumental` → librosa 算 BPM（tempogram）+ 每秒能量（RMS）+ mood（规则映射：BPM>120 高能/<80 舒缓 + 能量方差大=动态/小=平稳）→ 若 `BGM_STRATEGY=original` 保存 `bgm_stem.wav` 并填 `bgm_path`。
-- **新增** `backend/app/extract/stickers.py`：`extract_stickers(normalized_path, scenes, captions) -> list[StickerEvent]`，**VLM-first 采样策略**（替代原 OpenCV 显著性方案，因后者在口播脸部高显著性区域产生大量假阳性）：
-  - 步骤 1：采样 1fps + 在 PySceneDetect 给的 scene cut 前后额外抽 1 帧（贴纸常在切点出现/消失）→ 帧序列
-  - 步骤 2：每 4–6 帧合成 2×2 或 2×3 网格图（带帧号水印）→ 一次 VLM 调用，prompt `prompts/sticker_detect.md` 要求结构化 JSON：`[{description, frames_appeared:[i,j,k], position_normalized:[x,y], size_normalized:[w,h], confidence}]`
-  - 步骤 3：对 VLM 返回的每个贴纸候选，在指定帧的位置 ±10% 范围内做帧差 + Canny edge → 精确化 bbox 边界
-  - 步骤 4：跨帧合并同一贴纸（IoU > 0.5 或描述余弦相似度 > 0.8）→ 输出 `{description, position, size, start, end, crop_frames}`，裁图存 `extracted/stickers_crops/{n}/`
-  - 步骤 5：参考 `system/stickers_reference/` 时让 VLM 在描述里附"是否近似已知贴纸 ID"
-  - 降级：VLM 返回非 JSON / 不可解析 → fallback 到空贴纸列表（不阻塞 pipeline）
-- **新增** `backend/app/extract/skeleton.py`：`build_skeleton(scenes, captions, stickers, duration) -> list[Slot]`；位置阈值 `start/duration < 0.30` → 开头、`> 0.70` → 结尾、其余 → 主体；槽位时长 `{min=slot_duration*0.7, nominal=slot_duration, max=slot_duration*1.5}`；`material_req`：有字幕=人物口播，无字幕但有缩放/贴纸=B-roll/包装，二者皆无=待定。
-- **新增** `backend/app/understand/vision.py`：`classify_caption_function(caption_event, frame) -> str`，VLM 送字幕区域裁图 + 文本 → 返回 `regular|标题|强调|卖点|CTA`；调用时按 caption 个数批量。
-- **新增** `backend/app/extract/pipeline.py`：`extract_template(sample_id) -> TemplateIR`，串联 normalize → scenes → motion → captions → audio → stickers → skeleton → vision.classify_caption_function → kb.tagging.suggest_tags → sanity check；每 step 写 `tasks.stage_timings` 和 `extracted/extract.log`；返回完整 TemplateIR。
-- **新增** `backend/app/kb/store.py`：SQLite `templates` 表（`id, name, source_sample, ir_json, tags_json, thumbnail_path, created_at`）+ `tasks` 表；`save_template(ir)`、`get_template(id)`、`list_templates()`、`init_db()` 启动时建表 WAL 模式。
-- **新增** `backend/app/kb/tagging.py`：`suggest_tags(ir, sample_frames) -> Tags`，VLM 送 3 张采样帧 + 骨架概要 + ASR 文本（如有）+ 字幕样式摘要 → prompts/tag_suggest.md → 返回 `{position, function, scene, notes}`。
-- **新增** `backend/app/kb/select.py`：`select_template(query_tags, kb) -> template_id`，标签精确匹配 + LLM 重排；阶段 1 占位（阶段 3 完整）。
-- **新增** `backend/app/agent/aigc.py`：v0 占位空函数（Phase 5 填）。
-- **扩展** `backend/app/api/samples.py`：`POST /samples/{id}/extract` 触发 `extract_template()` BackgroundTask → 入 KB → 返回 task_id；`GET /samples/{id}/thumbnail` 已在阶段 0 处理。批量：同批次多个 sample_id 各自独立 extract。
-- **新增** `backend/app/api/templates.py`：`GET /templates`、`GET /templates/{id}`、`PATCH /templates/{id}/tags`、`DELETE /templates/{id}`。
+### 后端改动（backend/）
+- **新增** `backend/app/ir/vision_event.py`：`VisionEvent` + `IRTarget` pydantic 模型（同核心数据结构定义）；同步更新 `backend/app/ir/export.py` 把 VisionEvent 加入 JSON Schema 导出。
+- **新增** `backend/app/event_bus.py`：内存事件总线 + jsonl 持久化（v3 路径方案 B）
+  - `class EventBus`：维护 `dict[task_id, list[asyncio.Queue]]` 订阅者表 + `dict[task_id, AtomicCounter]` sequence 计数器（S1）
+  - `subscribe(task_id) -> asyncio.Queue`：返回新订阅 queue
+  - `unsubscribe(task_id, queue)`：清理
+  - `publish(task_id, event: VisionEvent)`：① 原子分配 `event.sequence = counter.next()` ② 广播到所有订阅 queue ③ 按 `tasks_store.get(task_id).events_jsonl_path` 追加到对应 jsonl 文件（路径已由 `tasks_store.create_task` 根据 `resource_kind + resource_id` 提前计算好）
+  - `replay(task_id, from_event_id: str | None = None) -> list[VisionEvent]`：从持久化文件读历史事件，若传 from_event_id 则跳过该 id 之前的所有事件，供 SSE 重连时 catch-up（H3）
+  - `resolve_events_path(resource_kind, resource_id, task_id) -> str`：路径计算工具函数，按 v3 方案 B：
+    - `sample` → `samples/{resource_id}/extracted/events_{task_id}.jsonl`
+    - `project` → `projects/{resource_id}/pipeline/events_{task_id}.jsonl`
+    - `template` → `samples/{source_sample_id}/extracted/events_{task_id}.jsonl`（模板继承自 sample）
+- **扩展** `backend/app/tasks_store.py`：`create_task(kind, resource_kind, resource_id) -> Task` 调 `event_bus.resolve_events_path()` 写 `events_jsonl_path` 字段；`tasks` 表 schema 加 `resource_kind` / `resource_id` / `events_jsonl_path` / `last_event_sequence` 四列（迁移脚本写在 `alembic/versions/` 或简化为 init_db 自动建表，MVP 阶段无 Alembic 也可）
+- **扩展** `backend/app/config.py`：Settings 类加四个字段：`model_provider: Literal["openai","anthropic","mixed"] = "openai"`、`anthropic_api_key: str | None = None`、`enable_dev_mock: bool = False`、`dual_check_stages: list[str] = []`（env 里逗号分隔解析）
+- **新增** `backend/app/llm/client.py`（占位骨架，1A 才填真实逻辑）：
+  - `class LLMClient`：抽象基类，定义 `chat_text` / `chat_vision` 接口
+  - `class OpenAICompatClient(LLMClient)`：占位实现（本阶段返 mock 数据 + 发 mock VisionEvent）
+  - `class AnthropicClient(LLMClient)`：占位实现（同上）
+  - `def get_llm_client(model_provider: str) -> LLMClient`：工厂，按 `MODEL_PROVIDER` env 选
+  - **强约定（v3.1 拓宽）**：
+    - `chat_vision` 签名必为 `(messages, model, stage, task_id, frames, ir_target_template, schema, silent=False) -> tuple[BaseModel, list[VisionEvent]]`
+    - `chat_text` 签名必为 `(messages, model, stage, task_id, ir_target_template, schema, silent=False) -> tuple[BaseModel, list[VisionEvent]]`（无 frames 参数，其余同 chat_vision）
+    - 本阶段两个方法的实现都内部直接构造 mock VisionEvent 列表、调 `event_bus.publish()`、返回 mock 结构化结果
+    - 后续 Phase 3 的 dedup/segment 等 Text LLM 调用直接走 `chat_text`，自动满足 D13
+- **新增** `backend/app/api/events.py`：
+  - `GET /api/tasks/{task_id}/events`：SSE 端点（`sse-starlette.EventSourceResponse`）
+    - 读 `Last-Event-ID` 请求 header（浏览器原生 EventSource 重连时自动回传）→ 调 `event_bus.replay(task_id, from_event_id=...)` 先推历史 → 再订阅 queue 推后续
+    - **每条 event 必须三行格式**（H3 强约束）：`id: {event.event_id}\nevent: vision\ndata: {json}\n\n`；`id:` 字段不可省略，浏览器自动用它续推
+    - 心跳：每 15s 发空 comment `: heartbeat\n\n` 保活
+    - 任务结束时发 `event: done\ndata: {}\n\n` 让前端关闭 EventSource
+  - `GET /api/tasks/{task_id}/events/history`：一次性返回所有历史事件 JSON 数组（供 Visualize 回放页加载全量）
+- **扩展** `backend/app/main.py`：挂载 `api/events.py` 路由
+- **扩展** `backend/pyproject.toml`：加 `sse-starlette` 依赖
+- **新增** `backend/app/api/dev_workbench.py`（仅 `ENABLE_DEV_MOCK=true` 时启用）：
+  - `POST /api/dev/workbench/mock-stream` body `{task_id, scenario}` → 在 BackgroundTask 中读 `backend/app/llm/prompts/scenarios/{scenario}.json`（v3 明确路径 · S7）按脚本每 500ms 发一条 mock VisionEvent，供前端工作台开发期验证
+  - 脚本格式：`[{delay_ms: int, event: VisionEvent}, ...]`
+  - 内置脚本：`captions_demo.json` / `stickers_demo.json` / `full_extract_demo.json`（用户需在动手 Phase 0.5 前一次性补齐这几个 JSON，每个 8-15 条事件覆盖三栏所有 UI 状态）
+- **新增** `backend/tests/conftest.py` 补：`mock_event_stream(task_id, events)` fixture，集测用
+- **新增** `backend/tests/unit/test_event_bus.py`：多订阅者广播、replay 一致性、持久化 jsonl 格式
+
+### 前端改动（frontend/）
+- **扩展** `frontend/src/styles/`：新增 `tokens.css` 实现"前端设计语言"章节定义的 design tokens；扩展 `tailwind.config.ts` 注册 tokens 到 theme.extend
+- **扩展** `frontend/package.json`：加 `tailwindcss`、`@radix-ui/react-dialog`、`@radix-ui/react-tabs`、`@radix-ui/react-tooltip`、`lucide-react`
+- **新增** `frontend/src/api/events.ts`：
+  - `subscribeEvents(taskId, onEvent, onError, lastEventId?) -> () => void`：封装 `EventSource`，自动重连、保存 last event id、断线时从 lastEventId 续推
+  - `fetchEventHistory(taskId) -> Promise<VisionEvent[]>`：调 history 接口
+- **新增** `frontend/src/state/workbench.ts`：Zustand store，维护 `{taskId, events: VisionEvent[], filterStage, selectedEventId, irSnapshot}`
+- **新增** `frontend/src/pages/Workbench.tsx`：核心三栏页面骨架
+  - 路由：`/workbench/:taskId`
+  - 顶部 bar：任务名 + 当前 stage（"1A 字幕能力调试中"）+ 进度 + 「⏸ 暂停接收」按钮（可选，用于截图）
+  - 三栏布局（CSS grid `1fr 1fr 1fr`，移动端折叠为单列 tab）：
+    - **左栏 `WorkbenchVisionPane.tsx`**：根据 `selectedEventId` 显示对应帧（`<img src={event.frame_url}>`）+ 在帧上用 SVG overlay 画 bbox（按 `event.bbox_norm` 计算位置）+ 标签气泡（`event.semantic_label`）。多个 bbox 时按 confidence 高低用粗细区分。
+    - **中栏 `WorkbenchEventStream.tsx`**：按 sequence 倒序滚动展示事件流，每条卡片显示 `{sequence, stage badge, semantic_label, reasoning（≤200字）, confidence, model_used, [跳到对应帧] 按钮, [否决] 按钮}`。stage 按前缀用 token 染色（按"stage 命名规范"表）。**键盘快捷键（O7）**：↑/↓ 切换 selectedEventId（联动左栏帧切换 + 右栏字段高亮）、Enter 跳到对应帧、X 否决当前事件。**双维过滤（O5）**：URL 参数支持 `?stage_filter=1A.*&time_range=6.0-7.0`，stage 与时间区间正交组合。
+    - **右栏 `WorkbenchIRPane.tsx`**：实时拼接的 TemplateIR/ProjectIR 树，**用 `react-arborist` 做 virtualized 树**（避免长视频 ProjectIR 几千 segments 全展开导致 React 卡死，S5/O7）；状态用 `immer` produce + `lodash.set(draftIr, event.ir_target.path, event.ir_value)` 做增量写入。`ir_target` 命中的字段做 200ms 高亮闪烁动画（accent-primary 边框淡入淡出），自动展开命中子树。
+  - 底部 bar：累计事件数 + 累计 VLM token 数 + 任务总耗时
+- **新增** `frontend/src/components/workbench/`：上面三个 pane 组件
+- **新增** `frontend/src/components/workbench/EventBadge.tsx`：stage 染色徽章
+- **新增** `frontend/src/components/workbench/BboxOverlay.tsx`：在视频帧 img 上画 bbox + 气泡的 SVG overlay
+- **扩展** `frontend/src/main.tsx`：路由表加 `/workbench/:taskId`
+- **扩展** `frontend/src/api/index.ts`：导出 `events` 模块
 
 ### 渲染服务改动
-- **扩展** `renderer/src/types/ir.ts`：跑 `pnpm gen:types` 重生成（含 TemplateIR / StyleRule / CaptionStyle 等完整 schema）。
-- **扩展** `renderer/src/compositions/Caption.tsx`：实现完整 CaptionStyle：
-  - 多行布局（按 `max_chars_per_line` 切行）
-  - anim_in 全套：逐字弹入（中文按字符 stagger，英文按词）/ 整句滑入 / 淡入 / 打字机
-  - anim_emphasis：关键词高亮（emphasis_words 数组的字符给特殊颜色）/ 抖动 / 放大
-  - 字体加载：从 `data/system/fonts/` 解析 `font_family` → CSS @font-face
-- **扩展** `renderer/src/compositions/Project.tsx`：消费 ProjectIR 的 Caption 列表（多个时段），渲染时按 `start/end` 决定显隐。
+- 无（工作台不涉及渲染）。
 
-### 前端改动
-- **扩展** `frontend/src/pages/SampleExtract.tsx`：上传后展示样例基础信息（时长、镜头数、BGM 有无、字幕数预览、**封面缩略图**、骨架三段标注）；**支持一次上传 2–3 条样例**，各自独立提取；"提取模板"按钮触发 extract → TaskProgress 显示 stage（"切点检测中..."、"OCR..."、"BGM 分离..."、"VLM 标签..."）→ 完成后展示提取出的骨架/风格摘要。
-- **新增** `frontend/src/pages/TemplateLibrary.tsx`：列表展示 KB 所有模板（名称/标签/来源缩略图）；点击查看详情页（骨架可视化 + StyleRule 详情 + sanity check 结果 + 人工改 Tags）。
+### 工作区与 CI 改动
+- **扩展** `.env.example`：加 `MODEL_PROVIDER`（openai|anthropic|mixed）、`ANTHROPIC_API_KEY`、`ENABLE_DEV_MOCK`
+- **扩展** `.github/workflows/ci.yml`：python job 跑 `pytest backend/tests/unit/test_event_bus.py`；frontend job 跑 `pnpm -F frontend test`（含工作台组件 unit test）
 
 ### 验证方式
-1. **测试集**：3 个 fixtures 样例（`sample_basic_15s` / `sample_with_sticker_12s` / `sample_fast_pace_8s` / `sample_no_bgm_10s` 中至少 3 个），事先人工标注（切点数 ±1、字幕首现时刻、归一化位置、BGM 有无、骨架三段、贴纸 bbox）。
-2. **指标基线**（`pytest backend/tests/integration/test_extract.py --baseline`，写入 `tests/baselines.json`）：
-   - 切点 F1 ≥ 0.80（容差 ±0.2s）
-   - 字幕首现时刻 median 误差 < 0.3s
-   - 字幕位置 median 误差 < 5%（归一化坐标）
-   - 字幕多行判定：测试样本中至少 1 个多行 case 被正确识别
-   - 骨架三段：3/3 与人工一致
-   - BGM 有/无：3/3 正确
-   - 贴纸位置 IoU ≥ 0.5（如样例有贴纸）；描述与人工标注 LLM 评 ≥ 3/5
-   - VLM sanity check：3/3 返回 `pass=true`（如不通过应有可读 notes）
-3. **IR round-trip**：`save_template(ir)` → `get_template(id)` 各字段一致（`pytest backend/tests/unit/test_kb.py`）。
-4. **VLM 调用预算**：单次 extract 调 VLM ≤ 8 次（pytest 监控 `llm.client` call counter）。
-5. **端到端**：UI 上传 `sample_basic_15s/source.mp4` → extract → 模板库看到该模板的标签 + 骨架 + 缩略图 + sanity check 状态。
-6. **失败降级**：故意删 `LLM_API_KEY` → extract 应在 VLM 步骤 fallback 到 "unknown" 描述/默认标签 → 仍能产出可入库的 TemplateIR（标 `degraded=true`）。
+1. **mock 流端到端**：浏览器 `pnpm dev` → 打开 `/workbench/test-task-001` → curl `POST /api/dev/workbench/mock-stream {"task_id":"test-task-001","scenario":"captions_demo"}` → 工作台页面在 ≤ 1s 内开始出事件、左栏切帧、中栏滚动、右栏字段填充动画触发。
+2. `pytest backend/tests/unit/test_event_bus.py`：
+   - 三个订阅者同时 subscribe → publish 一条事件 → 三个 queue 各收到一份
+   - 写入持久化 jsonl 后 unsubscribe → 重新 subscribe + 带 last_event_id → 从断点续推
+   - 持久化 jsonl 每行可被 `VisionEvent.model_validate_json` 解析
+3. **SSE 断线重连**：浏览器开 `/workbench/test-task-001` → 后端 kill 重启 → 前端 EventSource 自动重连 → 续推从 last_event_id 起的事件，不丢、不重。
+4. **设计 token 走查**：访问 `/workbench/test-task-001` 主观检查色彩 / 字体 / 留白 / 卡片样式与"前端设计语言"章节定义一致；用 axe DevTools 检查对比度（正文 ≥ 4.5:1，次级文字 ≥ 3:1）。
+5. **CI 绿灯**：push → Actions 全 job 通过；故意删除 `chat_vision` 签名里的 `task_id` 参数 → 单测 mock 实现 fail（约束 D13 被触发）。
+6. **持久化文件格式**：用 dev_workbench 创建一个 dummy sample task → `data/samples/{dummy_sid}/extracted/events_{task_id}.jsonl` 存在 + 每行可被 `jq` 解析为合法 VisionEvent + 每行的 task_id 字段一致。
+
+---
+
+## 阶段 1A: 视觉理解能力单点验证（v3 重写）📋
+
+### 前置条件
+- 阶段 0.5 的 SSE 事件总线 + VisionEvent IR + 工作台三栏页面骨架可独立运行（阶段 0.5 验证 1+3+5 通过）。
+- 阶段 0 的 `render_project()` 可将最小 ProjectIR 渲成 mp4。
+- Python venv 已切 3.11/3.12，可装 Demucs / PySceneDetect / opencv-python / librosa / whisperx（**不再装 PaddleOCR**——v3 已删）。
+- `.env` 已配 `MODEL_PROVIDER`、`LLM_BASE_URL`、`LLM_API_KEY`、`ANTHROPIC_API_KEY`、`MODEL_VLM`、`MODEL_TEXT`、`MODEL_TEXT_CHEAP`。
+- `data/system/fonts/` 已放入至少 2 个中文字体；`data/system/luts/` 已放入 5–10 个调色预设（v3 新增）。
+- 测试 fixtures 准备见下方"fixtures 矩阵"。
+
+### 目标
+逐个交付视觉理解能力，每个能力**独立 fixture + 独立指标基线 + 独立工作台事件流验证**通过后才允许进 1B 的端到端集成。本阶段不产出 TemplateIR，只产出可独立调用的子能力函数 + 它们的指标基线写入 `tests/baselines.json`。
+
+> **方法论**：拒绝"大整合 → 集成测试失败 → 不知道是哪个子能力拖后腿"的失败模式。每个子能力都先单点完工，再 1B 集成。
+
+### 设计约束（本阶段必守）
+- 每个子能力函数对外暴露统一签名 `def detect_X(normalized_path, frames_dir, task_id, stage) -> tuple[X_Result, list[VisionEvent]]`，由 `llm.client.chat_vision` 客户端层强制发射 VisionEvent。
+- 每个 VLM 调用必须传 `stage="1A.<能力名>"`、`task_id`、`ir_target_template`；未传 CI 红（D13）。
+- 不要在 1A 出现 `extract_template()` 这种串联函数——那是 1B 的事。
+- VLM 坐标使用 0-999 归一化系统；客户端层负责映射到 0-1 写入 IR。
+- 单点验证可在 `pnpm dev` 起服务后通过工作台 `/workbench/{task_id}` 实时观察事件流。
+
+### Fixtures 矩阵（用户准备 / 一次性补齐）
+
+**路径约定（v3 统一 · S12）**：开发期 fixtures 放 `tests/fixtures/{sample_id}/source.mp4`（仓库内 git-tracked，便于 CI）；运行时通过 `python -m app.cli ingest-sample tests/fixtures/{sample_id}/source.mp4 --name {sample_id}` 把它 ingest 到 `data/samples/{sid}/source.mp4`（已 normalized）。Phase 1A/1B/2 的 fixture 引用都用 `sample_id`（不带前缀路径），实际加载时由 `tasks_store.get_sample_path(sample_id)` 路由到 `data/samples/{sid}/normalized.mp4`。
+
+| Fixture | 用途 | 关键人工标注 |
+|---------|------|------------|
+| `sample_basic_15s` | 字幕样式 + 缩放方向 + BGM | 字幕首现时刻、字幕 bbox 归一化、缩放方向、BGM 有无 |
+| `sample_with_sticker_12s` | 贴纸 + 字幕功能 | 贴纸 bbox、贴纸类型、字幕功能（CTA/标题/regular） |
+| `sample_fast_pace_8s` | 切点 + 节奏 + 转场 | 切点时间戳、转场类型（硬切/叠化/滑入/推拉） |
+| `sample_no_bgm_10s` | 无 BGM 负例 + 字幕动画细节 | 字幕动画类型（逐字弹入/滑入/淡入）、是否纯人声 |
+| `sample_with_mask_10s`（v3 新增） | 几何蒙版 | 蒙版类型（圆/线分屏/矩形）+ 归一化几何参数 |
+| `sample_warm_lut_10s`（v3 新增） | 调色语义 | 主观色调标签（暖/冷/电影感）+ 直方图均值范围 |
+| `sample_title_bar_8s`（v3 新增，Phase 4 复用） | 标题条 | 标题条 bbox + 颜色 + 文字结构 |
+
+> **fixtures 不齐时的降级**：缺哪个 fixture，对应子能力的指标基线临时跳过，但子能力函数本身必须完工、可被 mock fixture 单测覆盖。
+
+### 后端改动（按子能力分组，每组独立可交付）
+
+#### LLM/VLM 客户端正式实现（升级 0.5 占位）
+- **重写** `backend/app/llm/client.py`：
+  - `OpenAICompatClient`：实现真实 OpenAI-compatible API 调用（Qwen-VL-Max / GPT-4o），含 temperature=0 + seed 控制
+  - `AnthropicClient`：实现真实 Anthropic API 调用（Claude Sonnet 4.6 / Opus 4.7）
+  - `chat_vision()`：实现 v3 协议——发请求 → schema 校验返回 → 自动构造 VisionEvent 列表（一个识别到的实体一个事件）→ `event_bus.publish` → 返回 `(result, events)`
+  - `chat_vision_dual()` 关键决策可启用：同时调两 provider → 两者一致才写入 IR，否则 `confidence_warning=True` 让用户在工作台 review
+  - 重试策略：指数退避 3 次；最终失败发一个 `severity=error` 的 VisionEvent 让用户看见
+- **新增** `backend/app/llm/prompts/`：
+  - `1a_captions.md` / `1a_stickers.md` / `1a_zoom_direction.md` / `1a_transition.md` / `1a_mask.md` / `1a_color_lut.md` / `1a_caption_function.md`
+  - 每个 prompt 含：任务描述 + 输出 JSON Schema 示例 + 0-999 坐标系明确约束 + 要求附 `reasoning` 中文解释（≤200 字，用作 VisionEvent.reasoning）
+
+#### 1A-T1 切点检测（CV 沿用）
+- **新增** `backend/app/extract/scenes.py`：`detect_scenes(normalized_path, task_id) -> tuple[list[Scene], list[VisionEvent]]`，PySceneDetect `ContentDetector(threshold=27)`，每个切点发一条 `source="cv"` 的 VisionEvent（stage="1A.scenes"，bbox=None，semantic_label="切点 #N"）。
+- **指标基线**：切点 F1 ≥ 0.80（容差 ±0.2s）
+
+#### 1A-T2 关键帧抽样器
+- **新增** `backend/app/extract/frame_sampler.py`：`sample_frames(normalized_path, scenes, fps_global=1, around_scene_cut=True) -> list[FrameRef]`，写帧到 `extracted/frames/{ts}.jpg`，返回 `[{ts, url, scene_idx}]`。后续所有 VLM 调用都从这个 frames_dir 取输入。
+
+#### 1A-V1 字幕（VLM 主路径 · v3 OCR 退场）
+- **新增** `backend/app/extract/captions.py`：`detect_captions(normalized_path, frames, task_id) -> tuple[list[CaptionEvent], list[VisionEvent]]`
+  > **CaptionEvent vs CaptionStyle 命名澄清（v3 · S10）**：`CaptionEvent` 是 extract 阶段的中间产物（含 `style: CaptionStyle + start: float + end: float + frames_appeared: list[int]`），1B 集成时拆出 `style` 写入对应 `Slot.style.caption`，并由 Caption 列表（ProjectIR）按 start/end 渲染。CaptionEvent 在 `backend/app/extract/captions.py` 内定义为 dataclass，不入 IR（不导出 JSON Schema），区分于 ledger 里的 Unit 与 ProjectIR 里的 Caption。
+  - 用 VLM 看采样帧，prompt `1a_captions.md` 要求一次返回：每个字幕的 `{position_norm_0_999, size_norm, color_hex, stroke_color_hex, stroke_width_px, size_px_estimate, anim_in_type, placeholder_text, length_constraint, semantic_purpose, frames_appeared, confidence, reasoning}`
+  - 跨帧追踪同一字幕（IoU > 0.5 + semantic_purpose 一致）→ 合并为 CaptionEvent
+  - 不识别字幕文本字符；`placeholder_text` 由 VLM 描述给出（"4-6 字 CTA 强调短语"或具象示例"立即抢购"）
+- **指标基线**：字幕首现时刻 median 误差 < 0.3s；字幕位置 median 误差 < 5%（归一化）；多行布局判定正确率 ≥ 80%；`semantic_purpose` 与人工标注一致率 ≥ 80%
+
+#### 1A-V2 字幕动画细节验证（CV）
+- **新增** `backend/app/extract/captions_anim.py`：`verify_caption_anim(caption_event, normalized_path) -> AnimDetail`，在 VLM 给的字幕时间区间内 5fps 采样 + 帧差 + Lucas-Kanade 光流跟踪字符 / bbox 顶点，判：
+  - 逐字弹入：bbox 宽度逐帧增长 + 字符 stagger ≥ 50ms
+  - 整句滑入：bbox 整体 Y 位移 > 5% + alpha 不变
+  - 淡入：alpha 0→1 + bbox 位置不变
+  - 打字机：bbox 宽度阶梯增长 + 每步 stagger ≈ 100-200ms
+- 输出 `AnimDetail{verified_anim_in, stagger_ms, confidence}`，覆盖或确认 VLM 给的 `anim_in` 字段；每次校正发一条 `source="cv"` 的 VisionEvent
+- **指标基线**：动画类型与人工标注一致率 ≥ 85%；stagger_ms 误差 < 30ms
+
+#### 1A-V3 贴纸（VLM 主路径）
+- **新增** `backend/app/extract/stickers.py`：`detect_stickers(normalized_path, frames, scenes, task_id) -> tuple[list[StickerEvent], list[VisionEvent]]`
+  - 步骤 1：在 scene 切点前后额外采样 1 帧（贴纸常在切点出现）
+  - 步骤 2：每 4–6 帧合成 2×2 或 2×3 网格图（带帧号水印），一次 VLM 调用，prompt `1a_stickers.md` 要求 JSON：`[{description, semantic_category: "强调提示"|"装饰"|"信息标签"|"情绪表达", frames_appeared, position_norm_0_999, size_norm, confidence, reasoning}]`
+  - 步骤 3：每个候选 → CV 帧差 + Canny 在 ±10% 范围内精化 bbox 到 ±5px
+  - 步骤 4：跨帧合并（IoU > 0.5 或描述余弦相似度 > 0.8）→ 写 `extracted/stickers_crops/{n}/`
+- **指标基线**：贴纸位置 IoU ≥ 0.6；描述与人工标注 LLM 评 ≥ 3/5；semantic_category 一致率 ≥ 75%
+
+#### 1A-V4 缩放方向粗判（VLM）+ 1A-V5 缩放曲线精化（CV）
+- **新增** `backend/app/extract/motion.py`：
+  - `judge_zoom_direction(scenes, frames, task_id) -> dict[scene_idx, direction]`：每 scene 取首/中/末三帧合成 1×3 网格 → VLM 判 `direction ∈ {推进, 拉远, 稳定, 抖动}`，每 scene 发一条 VisionEvent
+  - `estimate_zoom_curve(scene, normalized_path) -> list[ZoomKeyframe]`：仅在非稳定 scene 跑，OpenCV `goodFeaturesToTrack` + Lucas-Kanade，5 个 ZoomKeyframe；scale 变化 > 3.0 视为抖动
+- **指标基线**：方向判定正确率 ≥ 85%；非稳定 scene 的 scale 曲线相对峰值误差 < 20%
+
+#### 1A-V6 转场分类（VLM ★ v3 从 D3 前置）
+- **新增** `backend/app/extract/transitions.py`：`classify_transitions(scenes, normalized_path, task_id) -> list[TransitionType]`，对每对相邻 scene 取边界各 1 帧 + 中间过渡帧 1 帧 → VLM 判 `{硬切, 叠化, 滑入, 推拉, unknown}` + reasoning。
+- **指标基线**：转场类型一致率 ≥ 80%
+
+#### 1A-V7 几何蒙版（VLM ★ v3 从 D3 前置）
+- **新增** `backend/app/extract/masks.py`：`detect_masks(scenes, frames, task_id) -> list[MaskParams]`：
+  - 步骤 1：每 scene 取中间一帧 → VLM 判"有无几何蒙版"（圆/线分屏/矩形/none），无则跳过
+  - 步骤 2：有蒙版 → VLM 给参数（圆心+半径归一化 / 分屏线起止点 / 矩形 bbox）
+  - 步骤 3：复杂场景 fallback SAM2（仅 confidence < 0.5 时触发）
+- **指标基线**：有无判定正确率 ≥ 90%；参数 IoU ≥ 0.6（有蒙版样本）
+
+#### 1A-V8 调色语义（VLM ★ v3 从 D3 前置）
+- **新增** `backend/app/extract/color.py`：`classify_color_lut(scenes, frames, task_id) -> ColorStyle`：
+  - VLM 看 3 张采样帧 → 给主观标签 `{暖色, 冷色, 高饱和, 低饱和, 电影感, 平淡}` 多选 + dominant_lut_id（匹配 `data/system/luts/` 库 ID）
+  - 配合 OpenCV 算 HSV 均值 + 直方图，作为 VLM 标签的数值微调
+- **指标基线**：主观标签 top-1 一致率 ≥ 60%；LUT 匹配 top-3 命中 ≥ 80%
+
+#### 1A-A1 BGM（Demucs + librosa 沿用）
+- **新增** `backend/app/extract/audio.py`：`extract_bgm(normalized_path, save_stem, task_id) -> AudioStyle`，逻辑同 v2.4；每个关键判定（has_bgm / is_instrumental / bpm / mood）各发一条 `source="audio"` 的 VisionEvent。
+- **指标基线**：BGM 有/无 100% 正确；BPM 误差 ≤ 5；mood top-1 ≥ 70%
+
+#### 字幕功能分类（VLM，沿用 v2.4）
+- **新增** `backend/app/understand/vision.py`：`classify_caption_function(caption_event, frame, task_id) -> str`，VLM 送字幕区域裁图 + placeholder + 语境 → 返回 `regular|标题|强调|卖点|CTA`，发 VisionEvent。
+- **指标基线**：与人工标注一致率 ≥ 80%
+
+#### SubcapabilityLab 后端入口（v3 新增 · H5）
+- **新增** `backend/app/api/lab.py`：仅 `ENABLE_DEV_MOCK=true` 时挂载
+  - `GET /api/lab/subcaps` 返回所有可单点跑的子能力列表 `[{name, fixtures: [...], baseline_path}]`
+  - `POST /api/lab/run-subcap/{name}` body `{fixture_id, dry_run?}` → 创建 task（resource_kind=sample, resource_id=fixture_id）→ BackgroundTask 调对应 `detect_X(...)` → 返回 `{task_id, workbench_url}`
+  - `GET /api/lab/baselines/{name}` 返回 `tests/baselines.json/subcap.<name>` 当前基线数值
+
+### 渲染服务改动
+- 无（1A 不渲染，只识别）。
+
+### 前端改动
+- **新增** `frontend/src/pages/SubcapabilityLab.tsx`（v3 关键页 · S11：`import.meta.env.DEV` 守卫，生产 build 时该路由 404 不挂载）：单点验证工作台
+  - 左侧：fixture 下拉 + 子能力下拉（"VLM 字幕"/"CV 字幕动画"/"VLM 贴纸"/…）
+  - 中央：「跑此子能力」按钮 → 调对应 `POST /api/lab/run-subcap/{name}` → 跳转 `/workbench/{generated_task_id}`
+  - 右侧：上次跑的指标基线 + 当前结果对比（绿/红判定）
+- **扩展** `frontend/src/pages/SampleExtract.tsx`：上传后展示样例基础信息，**新增"打开工作台看 AI 工作过程"按钮** → 直接跳 `/workbench/{task_id}`
+
+### 验证方式
+1. **每个子能力独立单测**（`pytest backend/tests/integration/test_subcap_<name>.py`）：
+   - 用 fixture 跑该子能力 → 与人工标注比对 → 写指标到 `tests/baselines.json/subcap.<name>`
+   - 调用计数器：单次跑只调对应 VLM 路径，不允许触发其他子能力（隔离性验证）
+   - VisionEvent 校验：返回的 events 列表非空 + 每条 schema 合法 + 都已通过 event_bus 发布
+2. **工作台事件流人工走查**（每个子能力一次）：浏览器 `/sublab` → 选 fixture + 子能力 → 「跑」→ `/workbench/{task_id}` → 左栏看到帧 + bbox 高亮、中栏看到 reasoning 中文解释、右栏看到该子能力对应 IR 字段填充动画。
+3. **指标基线集成判定**（`pytest backend/tests/integration/test_1a_baselines.py`）：跑全部子能力的 baseline 比对，所有指标达标 → 1A 视为 ready，可进 1B；任一未达标 → 列出未达标项 + fail。
+4. **VLM 模型切换冒烟**：设 `MODEL_PROVIDER=anthropic` → 跑 `sample_basic_15s` 的字幕子能力 → 同样通过指标基线（Claude 与 Qwen 在 0-999 坐标系上等价）。
+5. **D13 约束验证**（v3.1 拓宽）：CI 脚本 `scripts/check_event_emission.py` 扫所有 AI 客户端方法（`chat_vision` / `chat_text` / ASR / VAD / Demucs 调用点）是否都在返回前调过 `event_bus.publish`；故意删任一处的 publish → CI 红。验证方式：人为把 `chat_text()` 内的 publish 注释掉 → 期望 CI 报告"chat_text at backend/app/llm/client.py:LXX missing event_bus.publish"。
+
+---
+
+## 阶段 1B: 模板提取集成 → KB（v3 重写）📋
+
+### 前置条件
+- 阶段 1A 全部子能力指标基线达标（1A 验证 3 通过）。
+- 阶段 0.5 工作台可正常订阅事件流。
+
+### 目标
+串联 1A 各子能力 → 完整 `TemplateIR`（含 D2-core + D2-extended：切点 + 字幕样式含 placeholder 三件套含多行 + 缩放 + BGM + 贴纸 + 转场 + 几何蒙版 + 调色 + 骨架三段 + 字幕功能分类 + 标签 + sanity check）→ 存入 KB，工作台可观察全链路。
+
+### 设计约束（本阶段必守）
+- 只提"怎么剪"，不判断样例说了什么（D2）。
+- 骨架按位置阈值发现（D5）；material_req 按字幕/贴纸/缩放有无标。
+- 槽位时长输出 `{min, nominal, max}` 区间（D8）。
+- 整个 extract pipeline 的所有 VLM 调用都通过工作台事件流可观察（D13）。
+- 任一子能力失败时不阻塞整个 pipeline；该字段标 `degraded=true` 并发 `severity=warning` 的 VisionEvent。
+
+### 后端改动
+- **新增** `backend/app/extract/skeleton.py`：`build_skeleton(scenes, captions, stickers, masks, duration) -> list[Slot]`；位置阈值 `start/duration < 0.30` → 开头、`> 0.70` → 结尾、其余 → 主体；槽位时长 `{min=slot_duration*0.7, nominal=slot_duration, max=slot_duration*1.5}`；`material_req`：有字幕=人物口播，无字幕但有缩放/贴纸/蒙版=B-roll/包装，二者皆无=待定。每个 Slot 推断发一条 VisionEvent。
+- **新增** `backend/app/extract/pipeline.py`：`extract_template(sample_id, task_id) -> TemplateIR`，按下方 DAG 调度（不能再说"并发跑各子能力"，要明确 DAG）。**绝不重写 1A 子能力**——pipeline 是组合层。
+
+  **子能力依赖 DAG（v3 明确 · H4）**：
+
+  ```
+  normalize ──▶ scenes ──┬──▶ frame_sampler ──┬──▶ captions ──▶ captions_anim
+                         │                    ├──▶ stickers
+                         │                    ├──▶ zoom_direction ──▶ zoom_curve (仅非稳定 scene)
+                         │                    ├──▶ transitions
+                         │                    ├──▶ masks
+                         │                    └──▶ color_lut
+                         └──▶ (audio 与上方独立) ──▶ extract_bgm
+
+  上述全部完成后：
+  ──▶ skeleton (用 scenes + captions + stickers + masks + duration)
+  ──▶ caption_function (按 captions 调 VLM 综合判)
+  ──▶ tagging (综合骨架+style+音频)
+  ──▶ sanity_check (整体 VLM 复查)
+  ──▶ save_template ──▶ KB
+  ```
+
+  实现用 `asyncio.gather()` 并发同层节点；上层节点 `await` 所有依赖完成后启动；任一子能力 raise 时该节点的下游链路标 `degraded=true` 不阻塞其他子树。
+- **新增** `backend/app/kb/store.py`：SQLite `templates` 表（`id, name, source_sample, ir_json, tags_json, thumbnail_path, last_extract_task_id, created_at`）+ `save_template` / `get_template` / `list_templates` / `init_db` WAL 模式。**v3 注意**：events 文件不直接挂模板表——它跟随 sample 资源存（`samples/{sid}/extracted/events_{task_id}.jsonl`），模板表只记录 `last_extract_task_id` 反查最近一次提取的事件流路径，避免重复存储。
+- **新增** `backend/app/kb/tagging.py`：`suggest_tags(ir, sample_frames, task_id) -> Tags`，VLM 综合判 → 发 VisionEvent。
+- **新增** `backend/app/kb/select.py`：`select_template(query_tags, kb) -> template_id`，标签精确匹配 + LLM 重排；1B 占位（Phase 3 完整）。
+- **新增** `backend/app/agent/aigc.py`：v0 占位空函数（Phase 5 填）。
+- **扩展** `backend/app/api/samples.py`：`POST /samples/{id}/extract` 触发 `extract_template()` BackgroundTask → 入 KB → 返回 `{task_id, workbench_url: "/workbench/{task_id}"}`。批量：同批次多个 sample_id 独立 extract。
+- **新增** `backend/app/api/templates.py`：`GET /templates` / `GET /templates/{id}` / `PATCH /templates/{id}/tags` / `PATCH /templates/{id}/caption-placeholder`（v3 新增：手工改 placeholder_text）/ `DELETE /templates/{id}` / `GET /templates/{id}/events`（事件回放）
+
+### 渲染服务改动
+- **扩展** `renderer/src/types/ir.ts`：跑 `pnpm gen:types` 重生成（含 VisionEvent / TemplateIR / 扩展后的 CaptionStyle / StickerEvent 等完整 schema）。
+- **扩展** `renderer/src/compositions/Caption.tsx`：双模式渲染（v3 明确 · S9）
+  - **模板预览模式**（TemplateLibrary 详情页 / Phase 0.5 dev_workbench）：渲染 `placeholder_text[0]` 作为示例字幕
+  - **应用产物模式**（Phase 2 渲染 ProjectIR）：渲染 ProjectIR.captions[i].text（来自用户素材的 Unit.text）
+  - 模式由调用方传 `renderMode: "template_preview" | "project_output"` props 区分，不在组件内自动判断
+  - anim_in 全套实现；多行布局；字体加载从 `data/system/fonts/`
+- **扩展** `renderer/src/compositions/Project.tsx`：消费 ProjectIR 的 Caption 列表，按 start/end 显隐。
+- **新增** `renderer/src/compositions/Mask.tsx`：渲染几何蒙版（v3 从 Phase 4 前置）—— SVG clipPath 实现圆 / 线分屏 / 矩形蒙版
+- **新增** `renderer/src/compositions/ColorLayer.tsx`：调色层（v3 从 Phase 4 前置）—— 按 dominant_lut_id 应用 CSS filter（hue-rotate / saturate / brightness 组合）
+
+### 前端改动
+- **扩展** `frontend/src/pages/SampleExtract.tsx`：上传后展示样例基础信息（时长、镜头数、BGM 有无、字幕数预览、封面缩略图、骨架三段标注、转场/蒙版/调色摘要）；支持一次上传 2–3 条样例独立提取；「提取模板」按钮触发 extract → 顶部 banner 提示「正在提取，[打开 AI 工作台]」→ 完成后展示提取出的骨架/风格摘要。
+- **新增** `frontend/src/pages/TemplateLibrary.tsx`：列表展示 KB 所有模板（名称/标签/来源缩略图）；点击查看详情页（骨架可视化 + StyleRule 详情 + placeholder_text 编辑入口 + sanity check 结果 + 「回放工作台事件流」按钮 → 历史事件回放页）
+
+### 验证方式
+1. **测试集**：3+ fixtures 样例（`sample_basic_15s` / `sample_with_sticker_12s` / `sample_fast_pace_8s` / `sample_no_bgm_10s` / `sample_with_mask_10s` 中至少 4 个）。
+2. **集成基线**（`pytest backend/tests/integration/test_extract_1b.py --baseline`，写入 `tests/baselines.json/1b`）：
+   - 全 1A 子能力基线达标 → 集成跑通 → 产出 TemplateIR 通过 pydantic 校验
+   - 骨架三段：4/4 与人工一致
+   - 字幕含 placeholder_text + length_constraint + semantic_purpose 三字段都非空
+   - VLM sanity check 通过 ≥ 75%（含 v3 新增的"placeholder 描述是否合理"维度）
+   - 工作台事件总数 ≥ 30 条（v3 调 VLM 次数提升）；每条事件可被 `model_validate_json` 解析
+3. **IR round-trip**：`save_template(ir)` → `get_template(id)` 各字段一致（含 VisionEvent IR、placeholder 三件套）。
+4. **VLM 调用延迟**：单次 extract 端到端 ≤ 5 分钟（含工作台 SSE 推送延迟 ≤ 1s/event）；远高于 v2.4 的"≤ 30s + ≤ 8 次 VLM"约束，但工作台让用户全程不焦虑。
+5. **端到端**：UI 上传 `sample_basic_15s` → extract → 工作台看完整识别过程（≥ 30 条事件）→ 模板库看到模板（含 placeholder、转场、蒙版、调色字段）+ 缩略图 + sanity check 状态。
+6. **失败降级**：故意删 `LLM_API_KEY` → extract 在 VLM 步骤 发 `severity=error` 事件 → 该字段标 `degraded=true` → pipeline 不阻塞，产出可入库 TemplateIR + degraded warning。
+7. **课题对齐验证**：打开任一模板的工作台事件回放 → 评审能看到"从样例中抽取了什么"（事件流）+ "为什么这么抽"（reasoning）+ "写入了 IR 哪里"（字段填充动画）——直接满足评分项 7。
 
 ---
 
 ## 阶段 2: ★MVP 应用闭环（短素材 + 指定模板） 📋
 
 ### 前置条件
-- 阶段 1 的 `extract_template()` 可产出完整 TemplateIR 入 KB（阶段 1 验证 2+3+5 通过）。
-- KB 中至少存在 2 个带 Tags 的模板（fixtures 提前 extract 准备）。
+- 阶段 1B 的 `extract_template()` 可产出完整 TemplateIR 入 KB（阶段 1B 验证 2+3+5 通过）。
+- KB 中至少存在 2 个带 Tags + placeholder 三件套的模板（fixtures 提前 extract 准备）。
 - `render_project()` 已能处理多 PlacedSegment + Caption 列表 + 缩放层（阶段 0 基础上 + 本阶段渲染端扩展）。
 - `data/system/bgm_pool/` 已放至少 5 首免版权曲 + `bgm_index.json`。
+- 阶段 0.5 工作台可订阅事件流（推荐 + apply 全程都发 VisionEvent）。
 
 ### 目标
-用户传 10–20s 一镜到底口播短素材 + 从 KB 指定一个模板 → ASR 对齐 → 映射到模板骨架 → 套字幕风格（含多行）+ 缩放 + BGM（features 或 original）+ 贴纸（占位）→ 渲染 MP4 返回。**MVP 闭环在此完成。**
+用户传 10–20s 一镜到底口播短素材 + 从 KB 指定一个模板 → ASR 对齐 → 映射到模板骨架 → 套字幕风格（含多行 + placeholder 引导）+ 缩放 + BGM（features 或 original）+ 贴纸（占位）→ 渲染 MP4 返回；推荐 + apply 全过程在工作台可见。**MVP 闭环在此完成。**
 
 ### 设计约束（本阶段必守）
 - 短素材场景下天然保序（D3）；账本仍要建，为 Caption 精确时间戳服务。
@@ -979,19 +1588,22 @@ class Patch(BaseModel):
 - 缺口补全只用 MVP 三法（D10：不引入 AIGC）。
 - 渲染走 Remotion + FFmpeg，输出 MP4（D7）。
 - 用户素材若 canvas 与模板不匹配，走 letterbox + 模糊背景，**不裁切用户脸**。
+- **D13 v3 强化**：模板推荐 / 缺口补全决策 / 字幕填充时 LLM 用 placeholder 做参考的过程，全部发 VisionEvent → 工作台第二栏展示"为什么推荐这个模板"、"为什么填这个字幕"。
 
 ### 后端改动
 - **新增** `backend/app/understand/asr.py`：`transcribe(normalized_path) -> TranscriptLedger`，WhisperX `large-v3` + language=zh + word_timestamps + forced alignment；按停顿（>0.3s gap）合并 Unit 到句级；`avg_logprob` 写入 Unit。
-- **新增** `backend/app/kb/recommend.py`：`recommend_templates(material_path, ledger, kb, k=3) -> list[{template_id, score, reason}]`，**模板智能推荐**（B1）：
+- **新增** `backend/app/kb/recommend.py`：`recommend_templates(material_path, ledger, kb, task_id, k=3) -> tuple[list[Recommendation], list[VisionEvent]]`，**模板智能推荐**（B1）：
   - 从 user material 取 3 帧采样（首 / 中 / 末）+ ASR 摘要（前 200 字）
-  - VLM 接收：采样帧 + ASR 摘要 + KB 中所有模板的 Tags 概要
-  - prompt 要求 VLM 输出 top-k 推荐及理由（中文）
-  - 前端 Editor 在上传素材后立即调，预填模板下拉；用户可采纳推荐或手动浏览全库
+  - VLM 接收：采样帧 + ASR 摘要 + KB 中所有模板的 Tags 概要 + 每个模板的 caption.placeholder/semantic_purpose 摘要
+  - prompt 要求 VLM 输出 top-k 推荐及理由（中文），每个推荐发一条 VisionEvent（stage="2.recommend"，ir_target 指向 Editor 的推荐区）
+  - 前端 Editor 在上传素材后立即调，预填模板下拉；用户可采纳推荐或手动浏览全库；工作台同步展示推荐推理过程
 - **新增** `backend/app/apply/mapping.py`：`map_short_to_template(ledger, template) -> list[PlacedSegment]`；策略：按 Unit 时间顺序对应到模板骨架槽位（10–20s 短素材通常对应 1–3 个槽）；时长不足时按比例拉伸槽位 nominal（速度调整 ≤ ±20%）；时长超出时裁切尾部或顺延到下一槽（保序）；记录 `src_timerange` 和 `timeline_start`；**用户素材槽位是否完全等于模板骨架**：MVP 假设是（用户被引导上传与模板长度相近的素材），不等时打 warning。
 - **新增** `backend/app/apply/gaps.py`：`detect_gaps(segments, template) -> list[Gap]`，槽位 `material_req` 无对应用户片段 → Gap；MVP 通常 Gap 数 ≤ 1（用户口播覆盖人物口播槽，B-roll/包装槽可能 Gap）。
 - **新增** `backend/app/apply/fill.py`：`fill_gap(gap, ledger, style, allow_aigc=False) -> str`，三法：① 文案补全（Text LLM 按上下文生成字幕文案，标 `is_fill=True`）；② 包装补全（生成标题条/卖点卡片占位文字 + StyleRule 填色）；③ 素材复用（裁取相邻片段 zoom-in 0.5–1s 重复）；`allow_aigc=True` 时增加 AIGC 占位（Phase 5 实现）。
-- **新增** `backend/app/apply/style.py`：`apply_style(segments, template, ledger) -> tuple[list[PlacedSegment], list[Caption], str|None]`；
-  - 按 `StyleRule.caption` 生成 Caption 列表（text/start/end 来自账本，style 来自模板，emphasis_words 用 Text LLM 从 Unit.text 选取 1–3 个）
+- **新增** `backend/app/apply/style.py`：`apply_style(segments, template, ledger, task_id) -> tuple[list[PlacedSegment], list[Caption], str|None]`；
+  - 按 `StyleRule.caption` 生成 Caption 列表（text/start/end 来自账本 Unit；style 来自模板）
+    - **v3 字幕填充策略**：Caption.text 来自用户 Unit.text；但 LLM 选取 `emphasis_words`、生成补充字幕（Gap 场景）时，prompt 注入模板 caption 的 `placeholder_text` + `length_constraint` + `semantic_purpose` 作为视觉锚点，例如 `"模板这个槽位期望 4-6 字 CTA 强调短语，如'立即抢购'。请从用户素材这段 Unit 中选 1-3 个最相关字符作 emphasis"`
+    - 每次 LLM 决策发 VisionEvent（stage="2.style.caption"）
   - 按 `StyleRule.visual.zoom_keyframes` 写入 PlacedSegment.applied_style
   - 按 `StyleRule.stickers` 复制到 PlacedSegment.applied_style（generated_image=None 走占位渲染）
   - BGM 选择：`features` 策略 → 从 `bgm_index.json` 找 BPM/mood 最近的曲（欧氏距离）；`original` 策略 → 直接用 `template.audio.bgm_path`
@@ -1048,27 +1660,31 @@ class Patch(BaseModel):
 7. **渲染验收**（手动）：播放输出 mp4 → 字幕颜色/字体/位置/入场动画/多行布局与模板一致；缩放推进/拉远幅度与模板一致；BGM 节奏与模板特征一致；贴纸占位块出现在模板指定位置和时间；ducking 时人声清晰。
 8. **失败重试**：渲染中途 kill renderer 进程 → 任务标 error → 前端显示"点击重试" → 重试成功。
 9. **端到端**：浏览器（`pnpm dev`）上传 `test_short_15s/source.mp4` → 选模板 → Player 实时预览（看到字幕动画、缩放）→ 点渲染 → 进度 100% → 拿 mp4 → 播放确认。
+10. **v3 工作台端到端**：上传素材后点「打开 AI 工作台」→ 看到模板推荐推理（top-3 + 中文 reason）→ 选模板后看到 apply 全程事件流（ASR → 映射 → 缺口 → 字幕填充 LLM 看 placeholder 后选词）→ 总事件数 ≥ 15 条；右栏 ProjectIR 字段实时填充。
+11. **placeholder 利用验证**：构造一个用户 Unit text 长度远超模板 length_constraint.max_chars 的 case → LLM 应基于 placeholder 截取或选取关键字符，不直接灌长文 → Caption.text 字符数落在约束内。
 
 ---
 
-## 阶段 2.5: NL 编辑 + 参数面板 + 迁移可视化 📋
+## 阶段 2.5: NL 编辑 + 参数面板 + 工作台事件回放 📋
 
 ### 前置条件
 - 阶段 2 的 `apply_short()` 可产出 ProjectIR 并渲染出 mp4（阶段 2 验证 7+9 通过）。
+- 阶段 0.5 工作台 events.jsonl 持久化文件已稳定可读。
 
 ### 目标
-用户用自然语言或参数面板改 ProjectIR → 重渲染拿新 mp4；前端 Visualize 页清晰展示"抽取→映射→缺口→补全→风格套用"全链路。
+用户用自然语言或参数面板改 ProjectIR → 重渲染拿新 mp4；前端 Visualize 页升级为**工作台事件回放器**——从 `events.jsonl` 读历史按时间顺序重放整个识别 + 应用过程，可作为答辩 demo 录屏素材库。
 
 ### 设计约束（本阶段必守）
 - NL 编辑/参数面板修改都只改 IR 结构，不改像素；patch 可回滚（D3 / 核心原则）。
 - 参数面板 = NL 的等价表单入口，二者都经统一 patch 路径（D11）。
 - 高频编辑节流：300ms debounce 后再 trigger 重渲染；用户连续编辑时取消正在排队的旧渲染任务。
+- **v3 新增**：NL 编辑产生的 patch 也发 VisionEvent（source="workbench"，stage="2.5.nl_edit"），让工作台能展示"用户说了什么 → LLM 翻译成什么 patch → 写入了 IR 哪个字段"。
 
 ### 后端改动
 - **新增** `backend/app/agent/nl_edit.py`：
-  - `nl_edit(project_ir, instruction, context) -> list[Patch]`：Text LLM 把自然语言指令翻成 Patch 列表（按 Patch op 枚举约束 JSON 输出）；prompt 提供当前 ProjectIR 摘要 + 模板骨架 + 可用 op 清单
+  - `nl_edit(project_ir, instruction, context, task_id) -> tuple[list[Patch], list[VisionEvent]]`：Text LLM 把自然语言指令翻成 Patch 列表（按 Patch op 枚举约束 JSON 输出）；prompt 提供当前 ProjectIR 摘要 + 模板骨架 + 可用 op 清单 + 模板 caption.placeholder/length_constraint（让 LLM 知道字幕长度/语气约束）；每个生成的 Patch 同时发一条 VisionEvent
   - `apply_patches(project_ir, patches) -> ProjectIR`：按 op 调度处理函数；版本号 +1 用于乐观锁
-  - `panel_to_patches(field, old_value, new_value) -> list[Patch]`：参数面板改字段 → 生成等价 Patch
+  - `panel_to_patches(field, old_value, new_value) -> list[Patch]`：参数面板改字段 → 生成等价 Patch（不发 VisionEvent，因为参数面板本身已经是可见操作）
   - 维护 `patch_history.jsonl` 追加写
   - `undo(project_id) -> ProjectIR`：读最后一条 patch 反操作
 - **新增** `backend/app/api/edit.py`：
@@ -1076,6 +1692,12 @@ class Patch(BaseModel):
   - `POST /projects/{id}/panel-edit` body `{field, old, new}` → 等价路径
   - `POST /projects/{id}/undo` 回滚
   - `GET /projects/{id}/history` 返回 patch 列表
+- **新增** `backend/app/api/replay.py`（v3 新增 · 路径方案 B）：
+  - `GET /projects/{id}/replay/events?task_id=<tid>` 返回指定 task 的 `events_{task_id}.jsonl` 全部事件 + 按 sequence 重建的 IR 快照序列。`task_id` 不传时默认返回 `tasks` 表 `WHERE resource_kind="project" AND resource_id={id} ORDER BY created_at DESC LIMIT 1` 的最近一次 task。
+  - `GET /projects/{id}/replay/tasks` 返回该 project 历史所有 task 的列表（task_id + kind + status + created_at），供用户选哪次回放。
+  - `POST /projects/{id}/replay/snapshot` body `{task_id, sequence}` 把项目 IR 临时回退到指定事件点状态（不持久化、仅录屏预览）。
+  - **样例 extract 回放**同理走 `GET /samples/{id}/replay/events?task_id=...`（在 `api/samples.py` 加对称接口）。
+  - Workbench 的"回放/否决事件"是 UI 操作不是 IR Patch（S6 修订）：UI 直接调 replay API + reject API（`POST /workbench/{task_id}/reject-event/{event_id}` 产出 `reject_vision_event` Patch 并触发子步重跑）。
 - **扩展** `backend/app/api/projects.py`：`GET /projects/{id}/lineage` 返回迁移可视化数据（template 骨架 + 用户 Unit → Slot 映射表 + Gap 列表 + 各 Gap 的 fill_result + 当前 ProjectIR vs 初始 ProjectIR 的差异摘要）。
 - **新增** `backend/app/agent/render_queue.py`：项目级渲染节流（同 project_id 的新渲染请求 cancel 之前未完成的）。
 
@@ -1085,15 +1707,16 @@ class Patch(BaseModel):
 ### 前端改动
 - **扩展** `frontend/src/pages/Editor.tsx`：
   - 增加底部 `NLBar.tsx`（发送 instruction → 调 `/edit`）
-  - 增加左侧 `ParamPanel.tsx`：字幕颜色 / 字号 / 位置 / 入场动画下拉、缩放强度滑块、节奏快慢滑块、BGM 选择 dropdown、模板替换 dropdown、强调词输入；改任何参数都生成对应 patch 调 `/panel-edit`；参数面板**双向 sync**：每次 ProjectIR 更新后回填表单当前值
-  - 增加右侧 patch 历史 + Undo 按钮
+  - 增加左侧 `ParamPanel.tsx`：字幕颜色 / 字号 / 位置 / 入场动画下拉、缩放强度滑块、节奏快慢滑块、BGM 选择 dropdown、模板替换 dropdown、强调词输入、**placeholder_text 编辑器**（v3 新增）；改任何参数都生成对应 patch 调 `/panel-edit`；参数面板**双向 sync**：每次 ProjectIR 更新后回填表单当前值
+  - 增加右侧 patch 历史 + Undo 按钮 + **「打开工作台看 NL 编辑解析过程」按钮**（v3 新增）
   - 编辑后 Player 实时反映新 ProjectIR；渲染按钮触发完整出片
-- **新增** `frontend/src/pages/Visualize.tsx`：四步链路
-  1. **抽取**：模板 slot 列表 + StyleRule 摘要 + sanity check 状态
-  2. **映射**：用户 Unit → 模板 Slot 的表格 + 时间轴对照（横轴=时间，上轴=用户段，下轴=Slot 占位，连线展示对应关系）
-  3. **缺口**：高亮标记被识别为 Gap 的 Slot（红框 + 原因）
-  4. **补全**：per Gap 展示 fill_strategy + fill_result（文案/包装/素材复用）
-  - 整体作为可滚动长页，便于截图作课题展示材料
+- **重写** `frontend/src/pages/Visualize.tsx` 为 **工作台事件回放页**（v3 重大改动）：
+  - URL：`/projects/:id/replay`
+  - 顶部：时间线进度条（按 events 时间均匀分布，可拖拽、可暂停、播放速度 0.5x / 1x / 2x / 4x）
+  - 中央：复用 `Workbench` 三栏页面布局（VisionPane + EventStream + IRPane），但事件源换成 `/projects/{id}/replay/events` 的历史数据，IRPane 按事件 sequence 重建 IR 快照
+  - 顶部右上：「导出录屏」按钮（用 MediaRecorder API 录中央栏 30-60s 片段，输出 webm/vp9；Chromium/Firefox 原生支持；**Safari 已知不兼容 webm**（S8）→ Safari 用户提示"请用 Chrome/Edge/Firefox"，不做服务端转码 fallback（demo 阶段不值）
+  - 底部：四步链路摘要（抽取 / 映射 / 缺口 / 补全）作为静态卡片，每张卡片可点击「跳到该步对应的事件区间」
+- **扩展** `frontend/src/api/events.ts`：加 `fetchReplayEvents(projectId)` 与 `snapshotAtSequence(projectId, sequence)`
 
 ### 验证方式
 1. `pytest backend/tests/integration/test_nl_edit.py`：固定 ProjectIR 测典型指令：
@@ -1102,11 +1725,12 @@ class Patch(BaseModel):
    - `"换成模板 B 风格"` → patches 含 `{"op":"swap_template","value":{"template_id":"B"}}`
    - `"开头第一句强调'独家'"` → patches 含 `{"op":"set_emphasis","value":{"words":["独家"],"section_idx":0}}`
    - 非法指令 `"把视频翻转"` → 返回可读报错，ProjectIR 不变
+   - 每条 patch 都对应一条 VisionEvent 发到 event_bus
 2. `pytest backend/tests/integration/test_undo.py`：apply 3 patch → undo 2 次 → ProjectIR 回到第 1 patch 后状态、版本号正确。
 3. 参数面板 ↔ NL 等价性：在 Editor 用面板改字幕色 → 看到 Player 更新；NL "字幕改红色" → 应得到相同 ProjectIR；二者 patch_history 内容等价。
 4. 重渲染 cancel：连续 3 次 NL 编辑（每次间隔 100ms）→ 后台应只完成最后一次渲染。
-5. 可视化人工走查：四步链路全部有内容展示，无空白面板。
-6. 端到端：浏览器在 Editor 输入"字幕换成黄色"→ 看到预览字幕变色 → 点渲染 → mp4 字幕变色。
+5. **工作台事件回放**（v3 新验证）：访问 `/projects/{id}/replay` → 时间线从 0% 走到 100% → 三栏与原始任务跑时一致 → IRPane 字段填充顺序与 sequence 严格对应 → 导出 30s 录屏 webm 文件存在。
+6. 端到端：浏览器在 Editor 输入"字幕换成黄色"→ 看到预览字幕变色 → 点渲染 → mp4 字幕变色 → 工作台第二栏出现"NL 解析：字幕颜色改 #FFD400"事件。
 
 ---
 
@@ -1175,6 +1799,7 @@ class Patch(BaseModel):
 - D3：默认保序（Step 06 保序占位，重排归 Phase 7）。
 - D6：自动选模板用标签匹配 + LLM 重排，提供 top-3 候选。
 - 每 step 失败可单独重跑，不影响其他 step 已产出。
+- **D13 v3 强化**：每个 step 的 LLM/VLM/audio/CV 调用使用专属 stage 前缀（`3.step01.asr` / `3.step02.vad` / `3.step03.dedup` / `3.step04.segment` / `3.step05.select` / `3.step08.quality` / `3.step09.render`），事件流按方案 B 落 `projects/{pid}/pipeline/events_{task_id}.jsonl`；工作台支持按 stage 过滤，每个 step 的 review UI 加「打开工作台看本 step 决策过程」按钮直接深链跳转 `/workbench/{task_id}?stage_filter=3.step{n}`。Step rerun 时按 task_id 软关闭旧 events 文件 + 新建新文件（事件不残留、不混淆）。
 
 ### 后端改动
 
@@ -1284,6 +1909,7 @@ class Patch(BaseModel):
    - Step 08 quality 无 error → 自动通过
    - Step 09 渲染 → mp4 体现以上修改
 6. **回退**：走完 Step 05 → Rollback to Step 03 → Step 04/05 状态重置，重跑生效。
+7. **v3 工作台 per-step 验证**：完成完整 9 step 跑通后访问 `/workbench/{task_id}?stage_filter=3.step03` → 只看到 dedup 相关 VisionEvent；切换 `?stage_filter=3.step05` → 只看到 select_template 相关事件；Rollback to Step 03 后 stage_filter=3.step03 之后的事件应已清除（不出现幽灵事件）。
 
 ### 课题对齐
 - 任务 2 结构拆解（段落 + 节奏 + 包装）→ Step 02-04 直接产出
@@ -1292,58 +1918,65 @@ class Patch(BaseModel):
 
 ---
 
-## 阶段 4: 保真度升级到 D3（Tier B） 📝
+## 阶段 4: 标题条 + 音效预设注入（v3 大幅瘦身）📝
 
 ### 目标
-在 D2 已稳定基础上，**有选择地**扩展到 D3：转场分类 + 几何蒙版 + 调色 LUT + 标题条 + **音效预设注入（新增功能，非识别）**。砍掉：音效识别 / 高潮位置 / 画面缩放出框 / 变速识别（详见"已砍项"）。
+在 1A 已把蒙版 / 调色 / 转场识别前置消化掉之后，Phase 4 只剩两件事：① 标题条 / 卖点卡片识别——口播视频里出现频率最高、价值最大的视觉包装元素；② 音效**预设注入**（不识别样例音效，用户手工配）。所有 D3 字段在 1A 已能产出，TemplateIR 不再有"D2 vs D3"的字段层级。
 
 ### 前置条件
-- 阶段 1 的 D2 提取稳定（验证 2 指标稳定通过 ≥ 1 个月，或测试集覆盖 5+ 样例）。
+- 阶段 1A 的转场分类 / 几何蒙版 / 调色语义三项子能力指标基线达标且 1B 集成稳定 ≥ 1 个月，或 5+ 样例 fixture 覆盖。
+- `data/system/sfx_pool/`（音效池）已放置 5–10 个常用音效（whoosh / ding / pop / 打字音 / swoosh / impact / …）+ `sfx_index.json` 元数据。
 
 ### 设计约束
-- 每个子模块单独可启停（feature flag），不破坏 D2 基线。
-- D2 baseline 指标不退步。
+- 标题条识别延续 v3 风格：VLM 主路径——VLM 看采样帧给「位置 + 颜色 + 文字结构（不识别文字字符）+ 出现时段」，发 VisionEvent；不再走 OCR 长矩形检测。
 - 音效**只做注入**，不做识别（口播样例里基本没有可学的音效）。
+- D2 基线指标不退步。
 
-### 初步构想（按价值/工作量排序，由高到低）
+### 子能力 4-1 标题条识别（VLM）
+- **新增** `backend/app/extract/title_bar.py`：`detect_title_bars(scenes, frames, task_id) -> list[TitleBarEvent]`
+  - VLM 看采样帧 → 判"是否有屏幕顶/底的彩色长矩形带"，有则给 `{position_norm_0_999, height_norm, bg_color_hex, text_color_hex, text_layout: "single"|"multi", placeholder_text, semantic_purpose, time_range_within_scene, reasoning}`
+  - 跨帧追踪同一标题条（IoU > 0.6）→ 合并
+  - 每次识别发 VisionEvent（stage="4.title_bar"）
+- **数据结构**：在 `TemplateIR.global_style` 或 `StyleRule` 加 `title_bars: list[TitleBarEvent]` 字段
+- **指标基线**：bbox IoU ≥ 0.7；颜色 hex 与人工标注 ΔE < 10；存在/不存在判定 ≥ 90%
+- **渲染**：`renderer/src/compositions/TitleBar.tsx` 按 placeholder_text + 用户素材对应字幕渲染
 
-**核心 3 项（建议必做）**：
-1. `extract/title_bar.py`（新增）：标题条/卖点卡片识别——屏幕顶/底带文字彩色长条 → 位置 + 颜色 + 文字 + 出现时段。这是口播视频里出现频率最高、价值最大的视觉包装元素。
-2. `extract/scenes.py` 扩展：转场分类（硬切 / 叠化 / 滑入 / 推拉），基于相邻帧相似度 + 像素位移；模糊时 VLM 兜底。Phase 7 重排断点需要它做平滑。
-3. `extract/color.py`（新增）：调色风格识别——颜色直方图 + 帧间色调一致性 → 匹配预设 LUT 库（暖色 / 冷色 / 高饱和 / 低饱和 / 电影感）+ 微调参数（不做 1:1 LUT 提取）。
+### 子能力 4-2 音效预设注入（用户手工配 + FFmpeg 混入）
+- **新增** `backend/app/agent/sfx_preset.py`：
+  - `list_sfx_presets() -> list[SFXPreset]`：读 `data/system/sfx_pool/sfx_index.json`，返回 `[{id, name, file_path, category: "whoosh"|"ding"|"pop"|...}]`
+  - `assign_sfx_to_template(template_id, slot_idx, time_within_slot, sfx_id, gain_db) -> TemplateIR`：用户在模板编辑界面手工标"在 Slot N 的 t 秒触发音效 X"
+  - `mix_sfx_into_audio(voice_track, bgm_track, sfx_events, output) -> str`：FFmpeg 滤波器 `amix` 把音效叠加到合并轨上
+- **API**：`PATCH /templates/{id}/sfx` body `{slot_idx, time, sfx_id, gain_db}` 添加/修改音效配置
+- **前端**：TemplateLibrary 详情页加「音效配置」面板（每个 Slot 一行可加音效），可在 RemotionPlayer 预览试听
+- **验证**：模板配 3 个音效（开头 whoosh + 中间 ding + 结尾 pop）→ 渲染输出 mp4 → 音轨可听到三个音效准确出现在指定时间点
 
-**音效预设（用户手工配，新增功能）**：
-4. `agent/sfx_preset.py`（新增）：模板编辑界面允许用户在 Slot 上手工标注"在此时机触发 X 类音效"，X 来自 `data/system/sfx_pool/`（whoosh / ding / pop / 打字音 …）。**不识别样例音效**——用户主动选。渲染时 FFmpeg 在指定时间混入对应音效。
-
-**保留但可选（用户已表态保留几何蒙版）**：
-5. `extract/masks.py`（新增）：帧级几何蒙版识别（圆 / 线性分屏 / 矩形）→ 归一化参数。复杂场景调 SAM2。**实施建议**：先 VLM 看采样帧判"有无蒙版"，无 → 跳过整步；有 → 详细分析。
-
-### 已砍项（不在 D3 范围）
-
-| 项 | 砍掉原因 |
-|----|---------|
-| 音效**识别**（从样例提取） | 口播视频里基本没用音效，识别准确率 < 50%；改为"预设注入"（条目 4） |
-| 高潮位置 | 我之前定义为"BPM+能量+切点频率"——这是音乐视频的高潮。口播视频是**语义高潮**（讲到 climax 的内容），已合并到 Phase 7 `narrative.score.energy` 维度。 |
-| 画面缩放出框 | 横屏→竖屏的格式适配，不是风格；用户素材直接走 canvas 归一化处理。 |
-| 变速**识别**（从样例提取） | 变速识别准确率 < 70%；口播变速会扭曲语音。**应用端的主动变速**保留（D8 时长自适应 ≤±20%）。 |
-
-### 渲染服务改动
-- 对应 Remotion 组件：`Transition.tsx`、`TitleBar.tsx`、`ColorLayer.tsx`、`Mask.tsx`
-- FFmpeg 端：`mix_sfx(timeline, sfx_events, output)` 在时间点叠加音效（与 BGM ducking 合并）
+### 已砍项（不在 v3 Phase 4 范围）
+| 项 | v3 状态 |
+|----|--------|
+| 转场分类 / 几何蒙版 / 调色 LUT | **v3 已前置到 Phase 1A**（VLM 主路径直接给参数，不再属于 Tier B 升级范围）|
+| 音效**识别**（从样例提取） | 沿用 v2.3 决策：不识别，改为预设注入 |
+| 高潮位置 | 沿用 v2.3 决策：合并到 Phase 7 `narrative.energy` |
+| 画面缩放出框 | 沿用 v2.3 决策：canvas 归一化处理 |
+| 变速**识别**（从样例提取） | 沿用 v2.3 决策：应用端 D8 时长自适应保留主动变速 |
 
 ### 验证方式
-1. `pytest backend/tests/integration/test_extract_tierB.py`：
-   - 标题条识别：3 个含标题条样例的 IoU ≥ 0.7 + 文字正确率 ≥ 0.9
-   - 转场分类：3 个不同转场类型样例的分类正确率 ≥ 0.8
-   - 调色匹配：预设 5 个色调样例 → top-1 命中 ≥ 0.6
-   - 蒙版识别（如有蒙版样例）：IoU ≥ 0.5
-2. D2 基线回归：跑 Phase 1 测试集，指标退步 ≤ 5%。
-3. 端到端：1 个含标题条 + 1 个转场分类的样例 → 应用到用户素材 → mp4 体现标题条 + 转场。
+1. `pytest backend/tests/integration/test_title_bar.py`：3 个含标题条 fixtures → bbox IoU ≥ 0.7 + 颜色 ΔE < 10
+2. D2-extended 基线回归：跑 Phase 1A 全套测试集，指标退步 ≤ 5%（v3 把蒙版/调色/转场前置后，1A 已涵盖原 Phase 4 的核心）
+3. 音效端到端：模板编辑界面给 `sample_basic_15s` 配 2 个音效 → 应用到 `test_short_15s` → 渲染 mp4 → 主观验收音效准时出现 + 不盖人声
+4. 工作台验证：标题条识别过程在工作台可见（stage="4.title_bar"）
 
 ### 待讨论的问题
-- 调色 LUT 的预设库怎么建（5–10 个手工标注 LUT 起步？）
-- 蒙版羽化参数与 CSS mask 精度映射
-- 音效池规模与音效 ID schema
+- 音效 gain 自动 ducking 策略（当音效与人声重叠时是否需要 sidechaincompress）
+
+**SFX schema 明确（v3 · S13）**：`data/system/sfx_pool/sfx_index.json` 格式：
+```json
+[
+  {"id": "whoosh_01", "name": "Whoosh 短", "file_path": "whoosh_01.mp3",
+   "category": "whoosh", "duration_ms": 350, "loudness_lufs": -16.0, "license": "CC0"},
+  ...
+]
+```
+category 取值：`whoosh | ding | pop | typing | swoosh | impact | bell | transition_woosh`（v3 初始集合，扩展时直接加新值，前端按 category 分组下拉）。
 
 ---
 
@@ -1353,7 +1986,7 @@ class Patch(BaseModel):
 接入第三方生图 API（生成**贴纸图形** + **封面**）+ 视频生成 API（生成 B-roll 画面），由用户主动触发；产物明确披露 AI 内容；强缓存避免重复成本。
 
 ### 前置条件
-- 阶段 1 已稳定输出 StickerEvent.description；阶段 2 已稳定运行单段闭环；阶段 2.5 NL 编辑已支持 `mark_aigc` patch。
+- 阶段 1B 已稳定输出 StickerEvent.description；阶段 2 已稳定运行单段闭环；阶段 2.5 NL 编辑已支持 `mark_aigc` patch。
 
 ### 设计约束
 - D10：绝不自动启用 AIGC；所有调用都有用户显式确认。
@@ -1361,6 +1994,7 @@ class Patch(BaseModel):
 - 缓存：按内容 hash 全局复用，避免重复支付。
 - 安全：prompt 注入防御 + 内容审查（API 自带或调 moderation endpoint）。
 - 成本追踪：每次调用记 `tasks.aigc_cost` 字段；UI 显示项目总成本。
+- **v3 D13 强化**：每次 AIGC 调用前发 VisionEvent（stage="5.aigc.{kind}"，semantic_label="生成请求"，reasoning 含 prompt 摘要 + 风格 hint）；生成完成后再发一条（含产物 url + 缓存命中 true/false + 耗时）。工作台第二栏可看到每次 AIGC "为什么生成 / 生成了什么"。
 
 ### 初步构想
 - `agent/aigc.py`：
@@ -1390,7 +2024,7 @@ class Patch(BaseModel):
 基于 Phase 3 长视频分步审核管线，把 Step 06（重排建议）从占位升级为完整能力：**叙事角色识别 + 代词依赖检测 + 多版本重排建议 + 用户双时间轴对照编辑确认** → 让最终输出从"按原序"升级到"按叙事范式优化"。
 
 ### 前置条件
-- Phase 3 长视频分步审核管线稳定（除 Step 06 之外的 8 个 step 均能跑通，Phase 3 6 项验证全过）。
+- Phase 3 长视频分步审核管线稳定（除 Step 06 之外的 8 个 step 均能跑通，Phase 3 **7 项验证全过**——v3.1 加了第 7 项"工作台 per-step 验证"）。
 - Phase 2.5 NL 编辑稳定，Patch 数据结构稳定（含 `reorder_sections` op）。
 - Phase 3 的 `pipeline_state` 基础设施可复用（本阶段不新建管线）。
 - （强化项，非阻塞）Phase 4 提供过渡分类用于重排断点平滑；Phase 5 提供 AIGC 补缺口能力。
@@ -1402,6 +2036,7 @@ class Patch(BaseModel):
 - **多版本不强制 N**：勾选启用时默认 3 版本（保序 / Hook 优先 / CTA 优先）；用户可一键选保序 baseline 跳过整个 Phase 7。
 - 每个版本 = 一个原子 ReorderPlan = 一个 mega-Patch，可一键回退。
 - 代词/指代依赖打破时优先告警而非强行重排（保守策略）。
+- **v3 D13 强化**：narrative score 每段评分 + dependency 检测 + 每个 reorder plan 生成都发 VisionEvent，**stage 命名按"stage 命名规范"表归在 Phase 3 命名空间下**：`3.step06.reorder.score` / `3.step06.reorder.deps` / `3.step06.reorder.plan`（不用 `7.narrative.*`，避免 stage 前缀与 phase 号交叉冲突；Phase 7 是 Step 06 的实现升级，事件仍属于长视频 step 06 命名空间）。每个 Plan 的 rationale + role_assignments 在工作台第三栏渲染为可视化"叙事角色染色"动画。
 
 ### 后端改动
 
@@ -1435,8 +2070,8 @@ class Patch(BaseModel):
 
 **叙事分析模块**
 - **新增** `backend/app/agent/narrative.py`：
-  - `score_sections(sections, ledger) -> list[NarrativeScore]`：Text LLM（推理模型 `MODEL_TEXT`）输入 = 每 section 的 unit_ids 对应 ASR 文本 + 时长 + 模板标签；prompt 要求按 hook/卖点/CTA/过渡四维打分并给中文 reasoning；JSON mode 输出。
-  - `detect_dependencies(sections, ledger) -> list[Dependency]`：Text LLM 检测代词/指代（"刚刚说的"、"这个"、"上面提到的"、"前面"），输出依赖图；标 `can_break=false` 表示打破后语义无法理解。
+  - `score_sections(sections, ledger, task_id) -> tuple[list[NarrativeScore], list[VisionEvent]]`：Text LLM（推理模型 `MODEL_TEXT`）输入 = 每 section 的 unit_ids 对应 ASR 文本 + 时长 + 模板标签；prompt 要求按 hook/卖点/CTA/过渡四维打分并给中文 reasoning；JSON mode 输出。每段评分一条 VisionEvent（stage="3.step06.reorder.score"，source="text_llm"，ir_target 指向 `pipeline.step06.scores[section_id]`）。
+  - `detect_dependencies(sections, ledger, task_id) -> tuple[list[Dependency], list[VisionEvent]]`：Text LLM 检测代词/指代（"刚刚说的"、"这个"、"上面提到的"、"前面"），输出依赖图；标 `can_break=false` 表示打破后语义无法理解。每条依赖一条 VisionEvent（stage="3.step06.reorder.deps"）。
   - `generate_reorder_plans(scored, deps, n=3) -> list[ReorderPlan]`：固定策略集生成：
     - `baseline`：原序恒等映射
     - `hook_first`：hook_score 最高 → 位置 0；cta_score 最高 → 最后；中间按 energy 降序
@@ -1512,15 +2147,127 @@ class Patch(BaseModel):
 - **视频产物 case**：覆盖不同模板风格 × 不同用户素材的组合结果（建议 ≥ 6 对）。
 - **OpenAPI spec**：从 FastAPI 自动生成 `docs/openapi.json`，前端 / 测试可消费。
 - **项目说明文档**，须含：
-  - 整体 AI 架构图（含 Python/Node/前端 三服务关系 + 数据流）
-  - 工具协议 IO schema（Agent 工具协议章节列举的所有 tool 的 JSON schema）
-  - **AI 工具使用披露**（课题要求）：① 使用了哪些 AI 工具（WhisperX / PaddleOCR / Demucs / Text LLM / VLM / 生图 API / 视频生成 API …）；② 各工具用于哪个环节；③ 哪些部分属于自主设计与实现（IR schema、账本机制、骨架发现算法、apply/render 管线、NL 编辑 patch 协议、AIGC 触发协议、渲染队列、跨服务 IR 同步管线）
+  - 整体 AI 架构图（含 Python/Node/前端 三服务关系 + 数据流 + AI 透明工作台事件总线）
+  - 工具协议 IO schema（Agent 工具协议章节列举的所有 tool 的 JSON schema + VisionEvent schema）
+  - **AI 工具使用披露**（课题要求）：① 使用了哪些 AI 工具（WhisperX / Demucs / silero-VAD / Text LLM（Claude / Qwen）/ VLM（Qwen-VL-Max / Claude Sonnet / GPT-4o）/ 生图 API / 视频生成 API）；② 各工具用于哪个环节（v3：VLM 主路径覆盖视觉理解任务，CV 守动画细节/缩放曲线，专用模型守时间/音频）；③ 哪些部分属于自主设计与实现（IR schema、账本机制、**AI 透明工作台事件流机制**、骨架发现算法、apply/render 管线、NL 编辑 patch 协议、AIGC 触发协议、渲染队列、跨服务 IR 同步管线、**VLM 客户端 v3 协议与 VisionEvent 强约束**）
   - **安全边界**：AIGC 内容审查 + 披露；BGM features vs original 双策略 + 版权说明；用户上传内容合规审核；prompt 注入防御；ASR 错误降级；服务故障降级；数据生命周期与清理。
-  - **第一性原理：视频理解技术选型**（本 plan "视频理解技术选型" 章节的精简版）：解释为何 hybrid 而非全 VLM / 全 classical。
+  - **第一性原理：视频理解技术选型**（本 plan "视频理解技术选型 v3 重审" 章节的精简版）：解释为何 VLM 主路径化 + 时间/音频/动画微观精度由专用工具守底。
 
 ---
 
 ## 改动点总结
+
+### v3.1（2026-06-07）：核查修复 — 18 处硬错误 + 15 处优化 + D13 拓宽
+
+v3 第二轮通读核查后修订。改动分三类：硬错误修复（破坏可执行性）、明确性优化（不影响执行但减少新工程师歧义）、架构层拔高（D13 扩边界）。
+
+**架构层拔高**：
+- **D13 拓宽 · "VLM 调用必发事件" → "所有 AI 决策必发事件"**：原 D13 仅约束 VLM 调用，v3.1 扩到所有 AI 决策（Text LLM 去重/分段/NL→Patch、ASR、VAD、Demucs、audio 判定都强制发 VisionEvent）。`VisionEvent.source` 枚举扩展为 `{vlm, cv, asr, audio, text_llm, system}`。这把"VLM 透明工作台"升级为"AI 整体决策工作台"，覆盖项目所有 AI 黑盒环节。
+
+**硬错误修复（H1-H18）**：
+
+1. **H1 events 持久化路径错误** → 改方案 B：events 按资源 kind 分支，`samples/{sid}/extracted/events_{task_id}.jsonl` / `projects/{pid}/pipeline/events_{task_id}.jsonl`；`event_bus.resolve_events_path()` 工具函数路由；同资源多次任务用 task_id 后缀区分；删资源时事件级联清理。
+2. **H2 stage 命名三套不兼容** → 新增"VLM 调用协议·stage 命名规范"小节，集中表格列出所有合法 stage 取值（`0.5.mock` / `1A.*` / `1B.*` / `2.*` / `2.5.*` / `3.step{NN}.{kind}` / `4.*` / `5.aigc.*`）；Phase 7 narrative stage 归到 `3.step06.reorder.*` 不用 `7.*`；CI 加 `scripts/check_stage_naming.py` grep 校验。
+3. **H3 SSE 重连缺服务端 id 字段约定** → VLM 调用协议章节加"SSE 服务端约定"小节，明确每条 event 必须三行格式 `id: {event_id}\nevent: vision\ndata: {json}\n\n`；浏览器原生 EventSource 自动用 Last-Event-ID header 续推；服务端按 from_event_id 调 replay。
+4. **H4 Phase 1B 子能力依赖图缺失** → 在 `extract/pipeline.py` 描述里加完整依赖 DAG（normalize→scenes→frame_sampler→{captions→captions_anim, stickers, zoom_direction→zoom_curve, transitions, masks, color_lut} + audio 独立支线）；明确 asyncio.gather 同层并发 + 上层 await 依赖。
+5. **H5 `/api/lab/run-subcap/{name}` 端点缺后端** → Phase 1A 加 `backend/app/api/lab.py`：3 个端点（subcaps 列表 / run-subcap / baselines）；项目结构图补 `api/lab.py`。
+6. **H6 Phase 5 引用过时"阶段 1"** → 改为 "阶段 1B"。
+7. **H7 Phase 4/5 之间缺分隔符** → 补 `---`。
+8. **H8 data/system/models 残留 `paddleocr/`** → 删除（v3 OCR 已退场）。
+9. **H9 config.py 没同步加 v3 env** → Phase 0.5 后端改动追加"扩展 config.py Settings"加 `model_provider` / `anthropic_api_key` / `enable_dev_mock` / `dual_check_stages` 四字段。
+10. **H10 异步任务进度上报段过时** → 改为 SSE 主路径，事件类型 `progress`/`vision`/`stage`；tasks 表加 `resource_kind` / `resource_id` / `events_jsonl_path` / `last_event_sequence` 四列。
+11. **H11 错误处理段残留 OCR** → "OCR 无字幕识别 fallback" 改为 "VLM 字幕识别失败 fallback"。
+12. **H12 术语表 Tier B / D2/D3 描述过时** → Tier B 改为"标题条 + 音效预设注入"；D2-core / D2-extended / D3 三层定义按 v3 Phase 拆分。
+13. **H13 术语表缺 v3 核心术语** → 加 VisionEvent / IRTarget / AI 透明工作台 / 0-999 归一化坐标系 / placeholder 三件套 / stage 前缀 / SubcapabilityLab 共 7 条。
+14. **H14 总体数据流图缺工作台** → 重画数据流图，明示 VisionEvent stream → event_bus → SSE → 工作台三栏 + 事件回放页。
+15. **H15 项目结构图大幅过时** → 补 15+ 个 v3 新模块：后端 `event_bus.py` / `tasks_store.py` 扩展 / `ir/vision_event.py` / `api/{events,replay,dev_workbench,lab}.py` / `extract/{frame_sampler,captions_anim,transitions,masks,color}.py` / `llm/prompts/scenarios/`；前端 `pages/{Workbench,SubcapabilityLab}.tsx` / `components/workbench/*` / `state/workbench.ts` / `styles/tokens.css` / `tailwind.config.ts`；data 加 `luts/` `sfx_pool/` `frames/` `events_{tid}.jsonl` `golden_runs/`。
+16. **H16 D 约定排序乱** → D11 → D12 → D13 数字顺序复原。
+17. **H17 环境变量列表没列 v3 新 env** → 补 MODEL_PROVIDER / ANTHROPIC_API_KEY / ENABLE_DEV_MOCK / DUAL_CHECK_STAGES / BACKEND_URL。
+18. **H18 Phase 4 待讨论自相矛盾** → 删除"标题条 placeholder 是否需要"（描述里已明示必有），保留音效 ducking 待讨论项。
+
+**明确性优化（S1-S15）**：
+
+1. **S1 VisionEvent.sequence 并发分配** → event_bus 内部 `dict[task_id, AtomicCounter]`，publish 原子分配，同 task_id 全局递增；跨 task 不可比较。
+2. **S2 event_bus 单进程约束** → "工作台事件流"章节加"水平扩展约束"小节，明确 MVP 单实例 OK，多 worker 需 Redis pub/sub 替换，demo 不阻塞。
+3. **S3 chat_vision_dual 启用规则** → 默认关闭；通过 `.env DUAL_CHECK_STAGES="..."` 列出需双模的具体 stage；命中即并发双调，结构化字段一致才写 IR，否则 `confidence_warning=True`。
+4. **S4 tasks 表 schema 缺事件字段** → 已与 H10 合并修订（4 列）。
+5. **S5 Workbench IRPane 增量重建策略不清** → 明确用 `react-arborist` virtualized 树（避免长视频几千 segments 卡死）+ `immer + lodash.set` 增量写入。
+6. **S6 Patch op `replay_vision_event` 语义错位** → 从 Patch 列表移除（UI 操作，不修 IR）；保留 `reject_vision_event`（清除该 event 写入并触发子步重跑，真实修 IR）；replay 改为 Workbench API（`POST /workbench/{task_id}/reject-event/{event_id}`）。
+7. **S7 dev_workbench mock scenarios 路径** → 明确 `backend/app/llm/prompts/scenarios/{scenario}.json`；内置 3 个 scenario：captions_demo / stickers_demo / full_extract_demo，用户在动手前一次性补齐。
+8. **S8 Phase 2.5 录屏 webm 浏览器兼容** → 明示 Chromium/Firefox 支持，Safari 不兼容时提示用户换浏览器，不做服务端转码。
+9. **S9 Caption.tsx 双模式渲染** → 明确 `renderMode: "template_preview" | "project_output"` props 区分；模板预览用 `placeholder_text[0]`，应用产物用 `Caption.text`（来自用户素材 Unit.text）。
+10. **S10 CaptionEvent vs CaptionStyle 命名澄清** → 加注释说明 CaptionEvent 是 extract 阶段中间产物（dataclass，不入 IR），CaptionStyle 是 IR 字段。
+11. **S11 SubcapabilityLab dev 模式守卫** → 明确用 `import.meta.env.DEV` 守卫，生产 build 该路由 404 不挂载。
+12. **S12 fixtures 路径不一致** → 统一开发期 `tests/fixtures/{sample_id}/source.mp4`（git tracked）+ 运行时通过 CLI ingest 到 `data/samples/{sid}/`；Phase 1A/1B/2 引用都用 `sample_id`。
+13. **S13 sfx_index.json schema 缺规范** → Phase 4 加完整 JSON schema 示例 + category 初始集合（whoosh/ding/pop/typing/swoosh/impact/bell/transition_woosh）。
+14. **S14 IRTarget.path 用 lodash 风格说明** → 明确不是 JSONPath，是 `lodash.set(state.ir, path, value)` 的点+方括号路径。
+15. **S15 placeholder_text 改 list[str]** → CaptionStyle.placeholder_text 改为 `list[str]`，VLM 按推荐顺序给多种选择（"4-6 字 CTA 短语" + "立即抢购" + "促销+数字"），应用阶段 LLM 拿到整个列表作引导。
+
+**这一轮工作量**：18 处硬错误 + 15 处优化 = 33 处修订，未引入任何新功能，全部是清理 + 明确化。架构层第一性原理拔高（O1-O10，含"工作台升级为甘特图视图"）拆出独立提案文档 `docs/proposals/001-ai-decision-workbench-v4.md`，等下一轮单独决策。
+
+### v3（2026-06-07）：第一性原理重审 — VLM 主路径化 + AI 透明工作台 + 单点验证方法论
+
+v3 的立场重写：项目处于 demo 阶段，API 成本与延迟不构成约束，所有"为成本而牺牲识别效果"的旧决策被允许重审。基于此立场推翻 v2.4 的几条核心约定。
+
+**重新出发的五条主轴**：
+1. **VLM 升级为视觉理解主路径**。原 plan 第 112–117 行"为什么不 VLM 一把梭"的五条理由中，第 2 条"像素位置模糊"被推翻——参考 Open-AutoGLM 在生产中跑通的 0-999 归一化坐标系（`x = coord / 1000 * width`），通用 VLM 同样能给出 ±5–10% 精度的归一化 bbox，足以覆盖字幕/贴纸/标题条/几何蒙版的"识别 + 复用"需求。仅保留两条物理上限：①切点级时间精度（±0.04s）；②音频信号处理。
+2. **OCR（字符识别）整体退场**。模板提取不需要原文，只需要"长什么样、怎么动"。CaptionStyle 新增 `placeholder_text` / `length_constraint` / `semantic_purpose` 三字段由 VLM 同步给出，作为应用阶段填字幕的视觉锚点。
+3. **新增"AI 透明工作台"为第一产品页**。SSE 事件总线 + VisionEvent IR 把所有 VLM 决策实时推送到前端 `/workbench/{task_id}` 三栏页面（左：VLM 看到什么 / 中：怎么想的 / 右：决定了什么）。直接对应课题评分项 7（迁移过程可视化，10 分）+ 加分项"结构迁移可解释性"。
+4. **Phase 1 拆 1A（单点验证）+ 1B（集成）**。每个识别能力（字幕样式/贴纸/缩放方向/转场/调色/蒙版/动画细节）独立 fixture + 指标基线 + 工作台事件流三件套；单点全过后才允许 1B 端到端集成。避免"大整合崩塌、找不到拖后腿的子能力"。
+5. **Tier B 部分项目前置到 1A**。几何蒙版 / 调色语义 / 转场分类的 VLM 实现成本骤降，从 Phase 4 前置到 Phase 1A。Phase 4 显著瘦身，只剩标题条 + 音效预设注入。
+
+**核心数据结构变更**：
+1. 新增 `VisionEvent` + `IRTarget`：AI 工作台事件总线的核心 IR。`source ∈ {vlm, cv, asr, audio, system}`，含 `frame_url / bbox_norm / semantic_label / reasoning / confidence / ir_target / ir_value / cost_tokens` 等字段。生命周期 = 内存广播 + `projects/{id}/pipeline/events.jsonl` 持久化。**（v3.1 修订：source 已扩展为 6 个含 `text_llm`；持久化路径已改方案 B，详见 v3.1 改动总结 H1）**
+2. `CaptionStyle` 加三字段：`placeholder_text` / `length_constraint` / `semantic_purpose`，由 VLM 在判断字幕样式时同步返回。
+3. `StickerEvent` 加 `semantic_category` + `coord_system`。
+4. `Patch` 加 4 个 op：`set_placeholder_text` / `set_length_constraint` / `set_semantic_purpose` / `reject_vision_event`；加 `triggered_by_event_id` 与 `source="workbench"` 字段追溯。（v3.1 修订：`replay_vision_event` 已从 Patch 移除，改为 Workbench API `POST /workbench/{task_id}/reject-event/{event_id}`——因为它本质是 UI 操作不修 IR，详见 v3.1 S6 修订）
+5. 全局约定加 `D13 VLM 调用必发射 VisionEvent`（CI grep 强制校验）。**（v3.1 拓宽：D13 已从 VLM 调用扩到所有 AI 调用，详见 v3.1 改动总结"架构层拔高"）**
+6. `D4` 保真度分层调整：D2-core（Phase 1B）+ D2-extended（1A 单点+1B 集成）+ D3（Phase 4 标题条/音效）。
+7. `D11` 补充：placeholder_text 不属于"改写文本"，是 VLM 的语义占位描述。
+
+**新增阶段与重大重写**：
+1. **Phase 0.5 AI 工作台骨架**：SSE 端点 + VisionEvent IR + 前端三栏页面骨架 + mock 事件流验证机制。`llm.client.chat_vision()` 强制契约。
+2. **Phase 1A 视觉理解能力单点验证**：每个识别子能力独立验证。配 SubcapabilityLab 前端单测页 + per-subcap 指标基线写入 `tests/baselines.json/subcap.<name>`。
+3. **Phase 1B 模板提取集成 → KB**：串联 1A 各能力，extract 全程在工作台可见。OCR 删除，Tier B 部分前置项随 1B 一起入 KB。
+4. **Phase 4 大幅瘦身**：蒙版 / 调色 / 转场全部前置到 1A 后，Phase 4 只剩标题条 + 音效预设注入。
+
+**前后端架构补强**：
+1. 后端加 `backend/app/event_bus.py`（asyncio 内存广播 + jsonl 持久化）、`backend/app/ir/vision_event.py`、`backend/app/api/events.py`（SSE）、`backend/app/api/replay.py`（Phase 2.5 回放）、`backend/app/api/dev_workbench.py`（mock 流）。
+2. `LLMClient` 重构为 `OpenAICompatClient` + `AnthropicClient` 双协议适配器，按 `MODEL_PROVIDER` env 切换，关键决策可启用 `chat_vision_dual()` 双 provider cross-check。
+3. 前端加 `frontend/src/pages/Workbench.tsx` + `frontend/src/pages/SubcapabilityLab.tsx` + 三栏组件 `WorkbenchVisionPane` / `WorkbenchEventStream` / `WorkbenchIRPane` + `BboxOverlay` SVG + `EventBadge`；`Visualize` 页升级为工作台事件回放器。
+4. 前端 design tokens 章节落地 Anthropic 风格（米白底 + 暖橙强调 + 衬线/无衬线/mono 三体 + 细线条卡片 + 极少阴影）；Tailwind + Radix UI primitives + lucide-react，明确不引入 MUI / Ant / Chakra。
+
+**Phase 2/2.5/3/5/7 的工作台对接修订**：
+- Phase 2：模板推荐 + apply 全程发 VisionEvent；style.py 填字幕时利用 placeholder_text + length_constraint 引导 LLM。
+- Phase 2.5：`Visualize` 页重写为工作台事件回放器（支持时间轴拖拽、变速回放、录屏导出）；NL 编辑生成的 patch 也发 VisionEvent（source="workbench"）。
+- Phase 3：每个 step 自己的 stage 前缀（`3.step02` / `3.step03` / ...），工作台支持按 stage 过滤；rerun 时清除对应 stage 历史事件。
+- Phase 5：AIGC 调用发 VisionEvent（生成请求 + 完成回执，含 prompt 摘要 + 缓存命中状态）。
+- Phase 7：narrative score / dependency detection / reorder plan 各自发 VisionEvent；plan 的角色染色在工作台第三栏可视化。
+
+**技术栈调整**：
+- 删除：PaddleOCR（模板提取不需要文本字符识别）
+- 新增：sse-starlette（SSE 端点）、Anthropic SDK（双协议适配器）、Tailwind CSS + Radix UI primitives + lucide-react（Anthropic 风格 UI 落地）
+- 调整：Phase 4 SAM2 从主路径降级为仅复杂场景 fallback；调色 LUT 从"颜色直方图匹配"主升级为"VLM 语义 + 直方图微调"
+
+**已砍项（v3 进一步细化）**：
+- 同次调用结果可变性问题（原 v2.4 第 115 行第 3 条）：通过 temperature=0 + seed + 双 provider cross-check 解决
+- 失败定位困难（原第 117 行第 5 条）：通过 VisionEvent 的 reasoning + IRTarget 完全白盒化解决
+- OCR 字符识别：模板提取不需要原文
+- 字幕动画的逐帧位移启发式：升级为 VLM 语义判 + CV 5fps 帧差/光流验证细节
+
+**对应课题评分加成**：
+- 评分项 7（迁移过程可视化 10 分）：AI 透明工作台 + 事件回放器 = 直接拿满
+- 评分项 6（迁移过程可视化展示 10 分）：每个 VLM 决策有 reasoning + bbox 高亮 + IR 填充动画
+- 加分项"对'结构迁移'有较强的可解释性展示"：工作台是该项的最强证据
+- 加分项"有较好的工程质量、交互细节或视觉完成度"：Anthropic 风格 design tokens 落地
+- 加分项"支持自然语言改片"：v2.4 已有，v3 让 NL 解析过程也可见
+
+**v3 已知代价 / 待讨论**：
+- 单样例 extract 端到端从 ≤ 30s 涨到 ≤ 5 分钟（VLM 调用从 ≤8 次到 15–30 次）。代价已知并接受，因为工作台让用户全程不焦虑。
+- VLM 模型选型需实测：Qwen-VL-Max / Claude Sonnet 4.6 / GPT-4o 三者在 0-999 坐标系上的实际精度需要在 1A 启动前用 sample_basic_15s 跑一遍 prereq 测试。
+- Phase 0.5 工作台骨架的 fake event scenarios（`scenarios/captions_demo.json` 等）需要在动手实现前用户先帮忙编几个典型样本（一次性工作）。
+- 标题条文字是否需要 VLM 给 placeholder（倾向需要，待 Phase 4 启动前确认）。
+- AI 工作台录屏导出格式（webm vs gif）的浏览器兼容性。
 
 ### v2.4（2026-06-06）：一致性核查修复
 
@@ -1660,9 +2407,11 @@ class Patch(BaseModel):
 - **Tier C 特效**（任意特效 1:1 还原）：研究级，只做白名单近似。
 - **精确 BGM 曲目识别**：Demucs 特征 + 情绪标签够用；曲目指纹识别 = Future。
 - **多样例融合建模**：MVP 单样例学习；多样例聚类 / 风格 averaging = Future。
-- **VLM 一把梭视频理解**：放弃，原因见"视频理解技术选型"章节。
+- **VLM 一把梭视频理解**：v3 修订——视觉理解 VLM 主路径化，时间精度（切点 / WhisperX）+ 音频信号处理（Demucs / librosa）+ 动画微观位移（CV 5fps 帧差光流）仍由专用工具把守。详见"视频理解技术选型"章节 v3 版。
 - **样例端音效/高潮/变速/缩放出框识别**：v2.3 砍掉（详见 Phase 4 已砍项）。
 - **句级任意重排**：Phase 7 重排粒度恒为主题段级，不做句级（拼贴感、逻辑断裂）。
+- **模板端 OCR 字符识别**（v3 新增）：不识别字幕的具体文本，只识别"字幕长什么样、动效是什么"。用户素材的字幕文本来自用户自己的录音，模板复用的是样式而非文字。
+- **AI 静默调用**（v3 新增 · v3.1 拓宽）：所有 AI 客户端方法（`chat_vision` / `chat_text` / ASR / Demucs 等）必发射 VisionEvent；不发事件的调用视为 bug，CI `scripts/check_event_emission.py` 强制扫源码。`silent=True` 模式仅用于背景 sanity check 等明确不需要在工作台展示的辅助调用（详见"AI 调用协议·silent 模式"小节）。
 
 ### 关键设计决策（后人重新提出方向时先查 docs/decisions/）
 
@@ -1672,5 +2421,7 @@ class Patch(BaseModel):
 - **D11 LLM 决策 ≠ 文本改写** —— 保证时间戳不丢、字幕同步精确、NL 编辑精确定位。
 - **Python + Node 双服务** —— Python 占 ML 生态优势，Node 占 Remotion 生态唯一性，混合最务实。
 - **D10 AIGC 用户主动触发** —— 避免"AI 决定一切"导致的版权/可控性问题。
-- **Hybrid CV + VLM** —— 见"视频理解技术选型"章节，第一性原理推导。
+- **VLM 主路径 + CV 守底（v3 修订）** —— 视觉理解 VLM 主、CV 守时间/音频/动画微观精度。详见"视频理解技术选型"v3 章节。
+- **D13 所有 AI 调用必发射 VisionEvent（v3 新增 · v3.1 拓宽）** —— 不只 VLM，含 Text LLM / ASR / audio / CV 所有 AI 决策。AI 透明工作台的可观测性底座，CI 强制约束。
+- **0-999 归一化坐标系（v3 新增）** —— VLM 输出坐标统一用 0-999 系统（参考 Open-AutoGLM 在生产中跑通的方案），客户端层映射到 0-1 写入 IR。
 - **BGM 双策略** —— 满足"个人 demo"vs"公开发布"两种使用场景。
