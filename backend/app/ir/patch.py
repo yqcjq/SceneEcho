@@ -1,4 +1,5 @@
 """Patch — unified edit op for NL / panel / review / timeline sources."""
+
 from __future__ import annotations
 
 from typing import Literal

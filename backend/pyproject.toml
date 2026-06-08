@@ -24,6 +24,20 @@ dev = [
     "pytest-asyncio>=0.24.0",
     "ruff>=0.7.0",
 ]
+# Heavy ML libraries used only by Phase 1A subcapability modules. Lazy-imported
+# inside each module so the base install / unit tests don't pay the install
+# tax. CI integration jobs install with ``pip install -e .[dev,extract]``.
+extract = [
+    "scenedetect>=0.6.4",
+    "opencv-python-headless>=4.10.0",
+    "numpy>=1.26.0",
+    "librosa>=0.10.2",
+    "soundfile>=0.12.1",
+    "demucs>=4.0.1",
+    "torch>=2.1.0",
+    "torchaudio>=2.1.0",
+    "Pillow>=10.4.0",
+]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

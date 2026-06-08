@@ -2,6 +2,7 @@
 
 Consumed by renderer/frontend codegen scripts (json-schema-to-zod).
 """
+
 from __future__ import annotations
 
 import json

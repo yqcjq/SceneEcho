@@ -1,4 +1,5 @@
 """FFmpeg / ffprobe wrappers. Uses imageio-ffmpeg's bundled binaries as fallback."""
+
 from __future__ import annotations
 
 import json
@@ -26,8 +27,10 @@ def get_media_info(path: str | Path) -> dict:
     """Run ffprobe and return parsed format+streams info."""
     cmd = [
         ffprobe_bin(),
-        "-v", "error",
-        "-print_format", "json",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
         "-show_format",
         "-show_streams",
         str(path),
@@ -64,14 +67,22 @@ def normalize(
     cmd = [
         ffmpeg_bin(),
         "-y",
-        "-i", str(src_path),
-        "-vf", vf,
-        "-c:v", "libx264",
-        "-profile:v", "baseline",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-ar", "44100",
-        "-movflags", "+faststart",
+        "-i",
+        str(src_path),
+        "-vf",
+        vf,
+        "-c:v",
+        "libx264",
+        "-profile:v",
+        "baseline",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-movflags",
+        "+faststart",
         str(dst),
     ]
     log.info("ffmpeg_normalize", src=str(src_path), dst=str(dst))
@@ -85,10 +96,14 @@ def extract_thumbnail(src_path: str | Path, dst_path: str | Path, at: float = 0.
     cmd = [
         ffmpeg_bin(),
         "-y",
-        "-ss", f"{at:.2f}",
-        "-i", str(src_path),
-        "-frames:v", "1",
-        "-q:v", "2",
+        "-ss",
+        f"{at:.2f}",
+        "-i",
+        str(src_path),
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
         str(dst),
     ]
     subprocess.run(cmd, capture_output=True, text=True, check=True)

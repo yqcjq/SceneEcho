@@ -1,4 +1,5 @@
 """Verify IR JSON Schema export produces a valid document with expected top-level defs."""
+
 from __future__ import annotations
 
 import json

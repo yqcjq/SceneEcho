@@ -1,4 +1,5 @@
 """structlog setup. JSON output, task_id context binding."""
+
 from __future__ import annotations
 
 import logging

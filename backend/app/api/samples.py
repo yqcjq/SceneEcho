@@ -1,4 +1,5 @@
 """Sample upload + Phase 0 render-demo endpoint."""
+
 from __future__ import annotations
 
 import shutil
@@ -53,7 +54,17 @@ async def upload_sample(file: UploadFile) -> dict:
         "info": {
             "format": info.get("format", {}),
             "streams": [
-                {k: s.get(k) for k in ("codec_type", "codec_name", "width", "height", "r_frame_rate", "duration")}
+                {
+                    k: s.get(k)
+                    for k in (
+                        "codec_type",
+                        "codec_name",
+                        "width",
+                        "height",
+                        "r_frame_rate",
+                        "duration",
+                    )
+                }
                 for s in info.get("streams", [])
             ],
         },
@@ -117,12 +128,8 @@ async def render_demo(sample_id: str, background_tasks: BackgroundTasks) -> dict
         canvas={"width": 1080, "height": 1920, "fps": 30},
     )
 
-    (project_dir / "project.json").write_text(
-        ir.model_dump_json(indent=2), encoding="utf-8"
-    )
+    (project_dir / "project.json").write_text(ir.model_dump_json(indent=2), encoding="utf-8")
 
-    task_id = tasks_store.create_task(
-        "render", resource_kind="project", resource_id=project_id
-    )
+    task_id = tasks_store.create_task("render", resource_kind="project", resource_id=project_id)
     background_tasks.add_task(_run_render, task_id, ir)
     return {"task_id": task_id, "project_id": project_id}

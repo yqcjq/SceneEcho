@@ -2,6 +2,7 @@
 
 Gated by ENABLE_CLI_INGEST=true to avoid exposing arbitrary file reads.
 """
+
 from __future__ import annotations
 
 import shutil

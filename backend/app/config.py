@@ -1,4 +1,5 @@
 """Environment-driven settings. Single source of truth for paths and external endpoints."""
+
 from __future__ import annotations
 
 from functools import lru_cache

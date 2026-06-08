@@ -9,7 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import tasks_store
-from app.api import dev_workbench, events, projects, samples, tasks
+from app.api import dev_workbench, events, lab, projects, samples, tasks
 from app.config import get_settings
 from app.event_bus import get_event_bus
 from app.logging import configure_logging, get_logger
@@ -30,6 +30,7 @@ def _init_data_tree() -> None:
         "system/bgm_pool",
         "system/fonts",
         "system/stickers_reference",
+        "system/luts",
         "system/models",
         "system/dev_events",
         "aigc/stickers",
@@ -74,6 +75,7 @@ app.include_router(events.router, prefix="/api", tags=["events"])
 
 if settings.enable_dev_mock:
     app.include_router(dev_workbench.router, prefix="/api", tags=["dev"])
+    app.include_router(lab.router, prefix="/api", tags=["lab"])
 
 
 @app.get("/health")

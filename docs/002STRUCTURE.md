@@ -31,7 +31,10 @@ SceneEcho/
 │  └─ ir.schema.json                        # 生成产物：pydantic IR 导出的 JSON Schema（gitignored）
 │
 ├─ scripts/
-│  └─ gen_schema.py                         # Pydantic → shared/ir.schema.json 的薄入口
+│  ├─ gen_schema.py                         # Pydantic → shared/ir.schema.json 的薄入口
+│  ├─ check_stage_naming.py                 # CI 守卫：VisionEvent 的 stage 字面量必匹配 PLAN.md 命名表
+│  ├─ check_event_emission.py               # CI 守卫（D13）：标记的 AI 客户端方法必发 event_bus.publish
+│  └─ check_parent_event_id.py              # CI 守卫：*_refine / *_phase2 / *_classify 函数必传 parent_event_id=
 │
 ├─ tests/
 │  └─ fixtures/                             # 用户手动放置的测试视频（不入 backend/data）
@@ -66,7 +69,8 @@ SceneEcho/
 │  │  │  ├─ projects.py                     # POST /projects 上传占位
 │  │  │  ├─ tasks.py                        # GET /tasks/{id}；POST /internal/task-progress
 │  │  │  ├─ events.py                       # GET /tasks/{id}/events SSE + /events/history
-│  │  │  └─ dev_workbench.py                # ENABLE_DEV_MOCK gated：mock-stream / scenarios 列表
+│  │  │  ├─ dev_workbench.py                # ENABLE_DEV_MOCK gated：mock-stream / scenarios 列表
+│  │  │  └─ lab.py                          # ENABLE_DEV_MOCK gated：SubcapabilityLab 子能力 registry / run / baselines
 │  │  ├─ ir/
 │  │  │  ├─ __init__.py                     # 顶层 IR 类型聚合 export
 │  │  │  ├─ ledger.py                       # TranscriptLedger / Unit
@@ -78,13 +82,35 @@ SceneEcho/
 │  │  │  └─ export.py                       # pydantic → JSON Schema 聚合导出
 │  │  ├─ llm/
 │  │  │  ├─ __init__.py
-│  │  │  ├─ client.py                       # LLMClient ABC + OpenAICompat/Anthropic 占位（chat_vision/chat_text）
+│  │  │  ├─ client.py                       # 真实双适配器：OpenAI-compat + Anthropic native + retry + dual-check + parent_event_id + 缺凭据 fallback
 │  │  │  └─ prompts/
-│  │  │     ├─ __init__.py
+│  │  │     ├─ __init__.py                  # load_prompt / render_prompt（lru_cache）
+│  │  │     ├─ 1a_captions.md               # Phase 1A 字幕样式 + 位置 + placeholder 三件套 prompt
+│  │  │     ├─ 1a_stickers.md               # Phase 1A 贴纸网格抽帧 + semantic_category prompt
+│  │  │     ├─ 1a_zoom_direction.md         # Phase 1A 缩放方向粗判 prompt（首/中/末三帧）
+│  │  │     ├─ 1a_transitions.md            # Phase 1A 转场分类（硬切/叠化/滑入/推拉）prompt
+│  │  │     ├─ 1a_masks.md                  # Phase 1A 几何蒙版有无 + 参数 prompt
+│  │  │     ├─ 1a_color_lut.md              # Phase 1A 调色语义标签 + dominant_lut_id prompt
+│  │  │     ├─ 1a_caption_function.md       # Phase 1A 字幕功能分类 prompt（标题/强调/卖点/CTA/regular/过渡）
 │  │  │     └─ scenarios/                   # Phase 0.5 mock 事件脚本（dev_workbench 消费）
 │  │  │        ├─ captions_demo.json
 │  │  │        ├─ stickers_demo.json
 │  │  │        └─ full_extract_demo.json
+│  │  ├─ extract/                           # Phase 1A 视觉理解子能力（按需签名 + STAGE 模块常量 + lazy import 缺包降级）
+│  │  │  ├─ __init__.py
+│  │  │  ├─ scenes.py                       # 1A-T1 切点检测（PySceneDetect）
+│  │  │  ├─ frame_sampler.py                # 1A-T2 关键帧抽样器（1fps + scene 边界 ±0.2s + 中点）
+│  │  │  ├─ captions.py                     # 1A-V1 字幕样式 + 位置（VLM 主路径，跨帧 IoU 合并）
+│  │  │  ├─ captions_anim.py                # 1A-V2 字幕动画细节验证（OpenCV 5fps 帧差 + 光流）
+│  │  │  ├─ stickers.py                     # 1A-V3 贴纸两阶段（VLM 网格 → CV refine bbox 至 ±5px）
+│  │  │  ├─ motion.py                       # 1A-V4 缩放方向粗判（VLM）+ 1A-V5 缩放曲线（CV 光流）
+│  │  │  ├─ transitions.py                  # 1A-V6 转场分类（VLM）
+│  │  │  ├─ masks.py                        # 1A-V7 几何蒙版（VLM 一次拿判定 + 参数）
+│  │  │  ├─ color.py                        # 1A-V8 调色语义（VLM 标签 + OpenCV HSV 直方图微调）
+│  │  │  └─ audio.py                        # 1A-A1 BGM（Demucs htdemucs 分离 + librosa BPM/能量/情绪）
+│  │  ├─ understand/                        # Phase 1A 语义层分类器
+│  │  │  ├─ __init__.py
+│  │  │  └─ vision.py                       # caption_function 分类（VLM, two-stage 命名 *_classify）
 │  │  └─ render/
 │  │     ├─ __init__.py
 │  │     ├─ client.py                       # httpx 调 renderer /render；renderer_health 探活
@@ -97,7 +123,11 @@ SceneEcho/
 │        ├─ test_ir_models.py               # ProjectIR 最小构造 + JSON round-trip
 │        ├─ test_ir_schema.py               # IR JSON Schema 导出含期望 $defs
 │        ├─ test_event_bus.py               # 多订阅 / replay / snapshot 切分 / jsonl tail 续起 / silent
-│        └─ test_scenarios.py               # mock JSON 解析 + ir_target.path 命中真实 IR + parent 顺序
+│        ├─ test_scenarios.py               # mock JSON 解析 + ir_target.path 命中真实 IR + parent 顺序
+│        ├─ test_llm_client.py              # _extract_json / 双 provider fallback / silent / dual-check / 路由
+│        ├─ test_extract_subcaps.py         # 1A 子能力 fallback 形状（缺包 / 空输入 / 缺帧）
+│        ├─ test_lab_api.py                 # SubcapabilityLab API 行为（registry / 403 / 404 / dry_run）
+│        └─ test_check_scripts.py           # 三脚本 grep 守卫在仓库自有代码上跑过
 │
 ├─ renderer/                                 # Node Remotion 渲染服务
 │  ├─ package.json                          # pnpm @sceneecho/renderer 依赖与脚本
@@ -139,7 +169,8 @@ SceneEcho/
       │  └─ global.css                      # @tailwind 注入 + 基础排版 + se-* 组件类（卡片/按钮/动画）
       ├─ api/
       │  ├─ index.ts                        # axios 封装：uploadSample / renderDemo / pollTask / dataUrl + 转出 events 模块
-      │  └─ events.ts                       # subscribeEvents (EventSource) / fetchEventHistory / mock-stream / scenarios
+      │  ├─ events.ts                       # subscribeEvents (EventSource) / fetchEventHistory / mock-stream / scenarios
+      │  └─ lab.ts                          # SubcapabilityLab API：listSubcaps / runSubcap / getBaseline
       ├─ state/
       │  ├─ index.ts                        # Zustand store：currentTask
       │  └─ workbench.ts                    # 工作台 store：events / irSnapshot (immer + lodash.set) / childIndex / vetoedIds / autoFollow / 选中 / 过滤
@@ -152,9 +183,11 @@ SceneEcho/
       │     ├─ EventBadge.tsx               # stage 前缀染色徽章（badgeColor 导出）
       │     └─ BboxOverlay.tsx              # 0-999 → 像素的 SVG bbox + 标签气泡（bboxToRect 导出）
       ├─ pages/
-      │  ├─ SampleExtract.tsx               # 阶段 0 上传 + 渲染 demo + 内嵌 <video> 播放
+      │  ├─ SampleExtract.tsx               # 阶段 0 上传 + 渲染 demo + 内嵌 <video> 播放 + 工作台 / Lab 跳转链接
       │  ├─ Workbench.tsx                   # /workbench/:taskId 三栏页面：SSE 订阅 + history 预填
-      │  └─ WorkbenchLauncher.tsx           # /workbench/dev：列出 mock scenarios + 启动按钮
+      │  ├─ WorkbenchLauncher.tsx           # /workbench/dev：列出 mock scenarios + 启动按钮
+      │  └─ SubcapabilityLab.tsx            # /lab：DEV-only Phase 1A 子能力 × fixture 单点验证
+      ├─ vite-env.d.ts                      # /// <reference types="vite/client" /> 让 import.meta.env 可解析
       └─ types/
          ├─ ir.ts                           # 生成产物（gitignored）
          └─ workbench.ts                    # 本地 VisionEvent / IRTarget / ScenarioListItem 类型镜像

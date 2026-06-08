@@ -5,6 +5,7 @@ Mounted only when ``ENABLE_DEV_MOCK=true``. Lets the browser open
 AI client — useful for design-token review, three-pane UI iteration, and
 SSE reconnect testing.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,8 +29,12 @@ SCENARIO_DIR = Path(__file__).resolve().parents[1] / "llm" / "prompts" / "scenar
 
 
 class MockStreamRequest(BaseModel):
-    scenario: str = Field(..., description="One of captions_demo / stickers_demo / full_extract_demo")
-    task_id: str | None = Field(default=None, description="Reuse an existing task id; otherwise auto-create.")
+    scenario: str = Field(
+        ..., description="One of captions_demo / stickers_demo / full_extract_demo"
+    )
+    task_id: str | None = Field(
+        default=None, description="Reuse an existing task id; otherwise auto-create."
+    )
 
 
 def _scenario_path(name: str) -> Path:

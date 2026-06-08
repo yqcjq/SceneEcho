@@ -1,4 +1,5 @@
 """Projects API — Phase 0 placeholder upload."""
+
 from __future__ import annotations
 
 import shutil

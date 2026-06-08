@@ -1,4 +1,5 @@
 """Smoke test: build a minimal ProjectIR + round-trip through model_dump_json."""
+
 from __future__ import annotations
 
 from app.ir.project import Caption, PlacedSegment, ProjectIR, Section

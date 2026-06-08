@@ -46,9 +46,13 @@
 └──────────────────────────────────────────────┘
                          ↓
 ┌──────────────────────────────────────────────┐
-│ 能力层（backend/app/{render, ir, llm}）       │
+│ 能力层（backend/app/{render, ir, llm,         │
+│        extract, understand}）                 │
 │ FFmpeg 归一化 / IR 校验 / 渲染客户端 /        │
-│ LLMClient 占位（chat_vision / chat_text）    │
+│ LLMClient（OpenAI-compat + Anthropic 双适配  │
+│ 器，缺凭据 fallback）+ Phase 1A 11 个视觉子 │
+│ 能力（按需签名 + STAGE 模块常量 + lazy ML  │
+│ import）                                       │
 └──────────────────────────────────────────────┘
                          ↓
 ┌──────────────────────────────────────────────┐
@@ -64,12 +68,15 @@ IR（pydantic 模型）位于 `backend/app/ir/`，作为「人 / AI / 渲染器�
 ## 3. 调用方向约束
 
 - 前端只调 `/api/*`；不直连 renderer。
-- 后端 `api/` 只 import `app/{ir,render,tasks_store,config,logging,event_bus,llm}`；不反向依赖 frontend / renderer 进程。
+- 后端 `api/` 只 import `app/{ir,render,tasks_store,config,logging,event_bus,llm,extract,understand}`；不反向依赖 frontend / renderer 进程。
 - renderer 不调后端业务 API，仅通过 `POST /api/internal/task-progress` 上报进度，并通过 `GET {BACKEND_URL}/data/*` 拉取用户素材字节。
 - IR 类型方向：pydantic（唯一真相源）→ JSON Schema → 两端 zod/TS；CI 的 `type-sync` job 阻塞反向修改。
 - 跨服务文件传递只用相对 `DATA_ROOT` 的 POSIX 路径字符串，禁止绝对路径。
 - AI 客户端（`app.llm.client`）只通过 `event_bus.publish` 广播事件；调用方不得绕过客户端层直接发事件。
 - `event_bus` 不依赖 `tasks_store`：`main.py` lifespan 注入 `tasks_store.get_task` 作为 lookup callback；`tasks_store.create_task` 仅静态调用 `EventBus.resolve_events_path` 计算路径，不引入运行时反向依赖。
+- `extract/*` 子能力模块只 import `app/{ir,event_bus,llm,extract,logging,config,render}`；不反向依赖 `api/` 或 `understand/`，调度 / 编排在 `api/lab.py`（dev）以及未来 1B 的 `extract/pipeline.py`（待建）里。
+- `understand/vision.py` 是语义层，依赖 `extract/captions.py` 的 `CaptionEvent` dataclass + `llm/client.py` 的 `chat_vision`；caption_function 之类的"phase2 分类"由调用方在拿到 `extract` 输出后再调，并通过 `parent_event_id` 把事件挂到对应的 caption 实体事件下。
+- 重 ML 依赖（PySceneDetect / opencv-python-headless / librosa / Demucs / torch）放在 `pip install -e ".[extract]"` 可选 extras；每个 `extract/*` 模块在用前 `try: import ... except ImportError`，缺包时返回 fallback 形状 + 发 `severity="warning"` VisionEvent，不阻塞 pipeline。
 
 ---
 
@@ -130,6 +137,24 @@ python -m app.cli ingest-sample /local/path.mp4
   → render.ffmpeg.normalize → normalized.mp4 + thumbnail.jpg
 ```
 
+**链路 D：Phase 1A SubcapabilityLab 单点验证（`ENABLE_DEV_MOCK=true` 时启用）**
+```
+浏览器 /lab
+  → GET /api/lab/subcaps → 列出 11 个子能力 + 各自兼容 fixture
+  → 用户选 subcap × fixture，点「跑此子能力」
+浏览器 → POST /api/lab/run-subcap/{name} {fixture_id, dry_run:false}
+  → backend.api.lab.run_subcap：
+     → tasks_store.create_task("lab_<name>", resource_kind="sample", resource_id=fixture_id)
+        路径方案 B → events_jsonl_path = samples/{fixture_id}/extracted/events_{task_id}.jsonl
+     → BackgroundTask: REGISTRY[name].runner(normalized_path, task_id)
+        runner 是 extract/* 子能力的薄编排（先 detect_scenes → frame_sampler → 该 subcap）
+        每一步 chat_vision/chat_text 由 llm.client 自动 publish 事件 + 缺依赖时 fallback warning
+     → 完成后 tasks_store.update_task(status=...) + bus.close_task → SSE done
+  ← 返回 {task_id, workbench_url}
+浏览器 navigate 到 /workbench/{task_id}
+  → SSE 订阅同链路 C，看到该 subcap 的事件流（含 parent_event_id 因果链）
+```
+
 **链路 C：AI 透明工作台 mock 流（`ENABLE_DEV_MOCK=true` 时启用）**
 ```
 浏览器打开 /workbench/dev
@@ -171,3 +196,7 @@ python -m app.cli ingest-sample /local/path.mp4
 - **D10 事件持久化按资源 kind 路由**：`event_bus.publish` 按 `tasks.resource_kind + resource_id` 落 jsonl 文件——sample → `samples/{sid}/extracted/events_{task_id}.jsonl`，project → `projects/{pid}/pipeline/events_{task_id}.jsonl`，未知或 template 在 KB 接入前回退到 `system/dev_events/`。jsonl 同时是 EventBus 的 sequence high-water mark 真理源。
 - **D11 SSE 流通过 snapshot 切分**：浏览器 `EventSource` 自动维护 `Last-Event-ID`；后端 `/api/tasks/{id}/events` 在 `event_bus` 的 task lock 内原子拿 (queue, snapshot)，调 `replay(from_event_id=..., until_seq=snapshot)` 推历史，再从队列推 live 事件（sequence > snapshot）。两段集合不重叠，无须客户端 dedup。每条 SSE 三行格式（`id` / `event` / `data`），`id` 字段不可省略。
 - **D12 任务表含资源回链**：`tasks` 表自 Phase 0.5 起新增 `resource_kind` / `resource_id` / `events_jsonl_path` 三列；老库通过 `init_db` 内置 idempotent ALTER 自动迁移。`last_event_sequence` 列在 0.5 二核审计后被移除（jsonl 已是真理源），老库残留该列不影响读写。
+- **D13 LLM 客户端真实双适配器**：`OpenAICompatClient` 走 `/v1/chat/completions`，`AnthropicClient` 走 `/v1/messages`，共享 `_RealClientBase` 的重试 + 缺凭据 / 4xx / 重试耗尽时回退 stub + `severity="warning"` 事件。重试只在 5xx / 超时 / 连接错误 / JSON 解析失败时发生；4xx 立即回退。
+- **D14 dual-check 并发 + 跳过 fallback**：`chat_vision_dual` 通过 `asyncio.gather` 并发调主备模型；任一侧返回 `severity=warning` 事件（fallback）时跳过结构对比，避免「真结果 vs 默认 schema」误报为 cross-check 异议。
+- **D15 子能力按需签名 + STAGE 常量**：`extract/*` 与 `understand/*` 每个函数只取它真实需要的参数 + `task_id` + 可选 `parent_event_id`，stage 在模块顶部硬编码常量。重 ML 依赖在 `[extract]` extras 内 lazy import，缺包返默认形状 + warning 事件不阻塞。
+- **D16 Phase 1A CI 守卫**：`scripts/check_stage_naming.py` AST-aware 检查 VisionEvent / chat_vision / chat_text / chat_vision_dual / `STAGE` 常量字面量；`check_event_emission.py` 检查 AI 客户端方法体必发 `event_bus.publish`；`check_parent_event_id.py` 检查 `*_refine` / `*_phase2` / `*_classify` 函数必传 `parent_event_id=` kwarg。三脚本跳 site-packages，CI python job 跑完单测后串行执行。

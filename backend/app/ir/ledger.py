@@ -1,4 +1,5 @@
 """TranscriptLedger — WhisperX word-level timestamps. Immutable text, LLM-only id ops."""
+
 from __future__ import annotations
 
 from pydantic import BaseModel, Field

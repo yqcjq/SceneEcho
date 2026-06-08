@@ -1,3 +1,97 @@
+## [2026-06-08-2] feat(phase1a): visual understanding subcapabilities + real LLM clients + lab
+
+Phase 1A 整体交付：把 Phase 0.5 的占位 `chat_vision` / `chat_text` 替换为真实 OpenAI-compatible + Anthropic 双适配器，加 11 个独立可调用的视觉理解子能力（切点 / 字幕 / 字幕动画 / 贴纸 / 缩放方向 / 缩放曲线 / 转场 / 蒙版 / 调色 / BGM / 字幕功能），后端开 SubcapabilityLab API，前端开 `/lab` 单点验证页，CI 加 3 条 grep 守卫。子能力都遵循「按需签名 + STAGE 模块常量 + 缺依赖必发 severity=warning 事件不阻塞 pipeline」的统一契约。本条目反映最终落地状态，含二次核查中并入的全部修复。
+
+### 改动
+
+**LLM/VLM 客户端真实实现**
+- 重写 `backend/app/llm/client.py`：双协议适配器（`OpenAICompatClient` 走 `/v1/chat/completions`、`AnthropicClient` 走 `/v1/messages`）共享 `_RealClientBase`；3 次指数退避重试；缺 API key 或重试耗尽时自动 fallback 到 deterministic stub + `severity=warning` 事件，CI / 单测无需联网即可跑过 D13 契约
+- 加 `parent_event_id` 关键字到 `chat_vision` / `chat_text` 协议，客户端层在发出事件时回填，让 Phase 2.6 因果链直接消费
+- 加 `chat_vision_dual` 跨模 cross-check：并发调主 / 备模型，结构字段不一致时把备模结果作 `confidence_warning=True` 的 warning 事件挂到主模事件下；`should_dual_check(stage)` 读 `DUAL_CHECK_STAGES` 决定哪些 stage 启用
+- `_extract_json` 容错代码块 / 嵌套大括号 / 数组顶层 / 多余前后缀文本（LLM 真实输出常带 chat boilerplate）
+- `PROVIDER_ROUTING_TABLE` 实现 `MODEL_PROVIDER=mixed` 的按 stage 前缀路由，最长匹配优先
+- `__workbench_label__` 协议：让 schema 自报展示标签，兜底用首个 list 字段长度生成
+
+**Phase 1A 11 个子能力**
+- `app/extract/scenes.py`：PySceneDetect ContentDetector(threshold=27)；缺包时 fallback 单 scene
+- `app/extract/frame_sampler.py`：1 fps 全局 + scene 边界 ±0.2s + scene 中点抽样到 `extracted/frames/{ts}.jpg`，所有下游 VLM 与工作台共享
+- `app/extract/captions.py`：VLM 主路径，`CaptionsRawResult` schema（pydantic 校验 0-999 坐标 + placeholder 三件套），跨帧 IoU > 0.5 合并 → `CaptionEvent`（dataclass，不入 IR；1B 集成项）；每条合并后字幕发独立 entity 事件供右栏 IR 树字段闪烁
+- `app/extract/captions_anim.py`：CV 验证（OpenCV 5fps 帧差 + 字符 stagger 步进 + 整段 Y 偏移 + alpha 增长），覆盖 / 确认 VLM 给的 anim_in；缺 OpenCV 时 fallback 沿用 VLM 判定
+- `app/extract/stickers.py`：两阶段——VLM 网格抽帧给位置 + semantic_category；CV `refine_sticker_bbox`（命名匹配 `*_refine`）用 Canny 在 ±10% 范围精化 bbox 至 ±5px，强制传 `parent_event_id` 满足 Phase 2.6 因果链 CI 校验
+- `app/extract/motion.py`：`judge_zoom_direction` 看每 scene 首/中/末三帧判推进/拉远/稳定/抖动；`estimate_zoom_curve` 仅非稳定 scene 上跑 goodFeaturesToTrack + Lucas-Kanade 光流估算 scale 比率
+- `app/extract/transitions.py`：相邻 scene 边界三帧 → 硬切/叠化/滑入/推拉/unknown 分类
+- `app/extract/masks.py`：每 scene 中间帧判有无几何蒙版 + 圆/矩形/线分屏参数（一次 VLM 调用同时拿判定 + 参数）
+- `app/extract/color.py`：VLM 给暖/冷/高饱和/低饱和/电影感/平淡多选 + dominant_lut_id；OpenCV HSV 均值作直方图微调事件（命名匹配 `*_refine` 链上 parent_event_id）；luts 库读 `data/system/luts/luts_index.json` 缺时降级
+- `app/extract/audio.py`：librosa load → 每秒 RMS 能量 + beat_track BPM；Demucs htdemucs 分离 vocals / accompaniment 判 has_bgm / is_instrumental；规则映射 mood_tag；每个判定一条独立事件方便工作台甘特图按"音频"lane 展开
+- `app/understand/vision.py`：`classify_caption_function`（命名匹配 `*_classify`，必传 parent_event_id）综合字幕 style + placeholder + bbox + 锚定帧判 标题/强调/卖点/CTA/regular/过渡
+
+**SubcapabilityLab**
+- `backend/app/api/lab.py`：`ENABLE_DEV_MOCK=true` 才 mount。`SubcapDef` registry 把 11 子能力（含 zoom 把方向 + 曲线合到一项）声明出来，每条含 `runner` / `fixtures` / `baseline_key`。`POST /api/lab/run-subcap/{name}` body `{fixture_id, dry_run}` 创建 task → BackgroundTask 跑 runner → close_task → SSE 自动收尾；`GET /lab/baselines/{name}` 读 `tests/baselines.json` 对应 key
+- `frontend/src/pages/SubcapabilityLab.tsx`：dev-only（`import.meta.env.DEV` gate），左栏子能力列表 + 右栏 fixture / 基线 / 「跑」按钮 → 跳工作台
+- `frontend/src/api/lab.ts`：listSubcaps / runSubcap / getBaseline 三 API
+- `frontend/src/main.tsx`：路由 `/lab` 仅在 DEV 时挂载；Shell 顶 nav 加 Lab 链接（同样 DEV-only）
+- `frontend/src/pages/SampleExtract.tsx`：上传后增加「打开工作台看 AI 工作过程」链接 + 「打开 SubcapabilityLab」链接
+- `backend/app/main.py`：dev_mock gated 路由块加 `lab.router`，`_init_data_tree` 加 `system/luts`
+
+**Prompt assets（VLM 子能力必备）**
+- `backend/app/llm/prompts/__init__.py` 加 `load_prompt(name)` / `render_prompt(name, **subs)`，`@lru_cache` 一次加载
+- `backend/app/llm/prompts/1a_captions.md / 1a_stickers.md / 1a_zoom_direction.md / 1a_transitions.md / 1a_masks.md / 1a_color_lut.md / 1a_caption_function.md`：每条声明任务、JSON Schema、关键约束 + 0-999 坐标系 + reasoning 字数限制
+
+**CI 守卫脚本**
+- `scripts/check_stage_naming.py`：AST-aware 仅检查 `VisionEvent(stage=...)` / `chat_vision(stage=...)` / `chat_text(stage=...)` / `chat_vision_dual` / `classify_caption_function` / 模块级 `STAGE = "..."` 字面量，不再误伤 `tasks_store.update_task(stage="render")` 等任务进度标签
+- `scripts/check_event_emission.py`：D13 守卫——AST 检查标记的 AI 客户端方法体内是否调用 `event_bus.publish` 或委托给同样发事件的 `chat_vision/_invoke` 之类
+- `scripts/check_parent_event_id.py`：phase 2.6 准备——名字匹配 `*_refine` / `*_phase2` / `*_classify` 的函数体内必传 `parent_event_id=` kwarg
+- 三脚本统一通过 `_is_in_venv()` 跳 site-packages，CI 跑只覆盖项目自有代码
+- `.github/workflows/ci.yml` python job 在 unit 测试后追加这三脚本步骤
+
+**测试**
+- `backend/tests/unit/test_llm_client.py`：14 条单测覆盖 `_extract_json` 边界（裸 JSON / 代码块 / 数组 / 嵌套大括号 / 噪声）、`_structurally_equal`、Anthropic + OpenAI 缺凭据 fallback 路径、silent 模式、provider 路由（默认 / 显式 / mixed by stage）、`should_dual_check`、`chat_vision_dual` 双 fallback 不报警
+- `backend/tests/unit/test_extract_subcaps.py`：5 条覆盖 scenes / captions / stickers / audio / caption_function 在缺依赖或空输入时的 fallback 形状
+- `backend/tests/unit/test_lab_api.py`：5 条覆盖 SubcapabilityLab API（subcaps 列表完整性、403 when dev disabled、404 unknown / missing fixture、dry_run 走通）
+- `backend/tests/unit/test_check_scripts.py`：5 条覆盖三脚本能在仓库自有代码上跑过 + 预期 allow / reject 列表逻辑
+
+**依赖与配置**
+- `backend/pyproject.toml`：新增 `[project.optional-dependencies] extract` 把 scenedetect / opencv-python-headless / numpy / librosa / soundfile / demucs / torch / torchaudio / Pillow 列为可选，base 安装走 `pip install -e ".[dev]"` 不付安装税；CI integration 阶段才装 `.[dev,extract]`；所有子能力模块用 `try: import ...` lazy import，缺时降级到 fallback path 并发 warning 事件
+- `frontend/package.json`：加 `@types/node` 让 tsconfig 的 `types: ["node", "vitest/globals"]` 真正可解析；新增 `frontend/src/vite-env.d.ts` 引入 Vite 客户端类型供 `import.meta.env.DEV` 编译
+
+### 二次核查修复（按第一性原理重构，并入本次实现）
+
+- **`chat_vision_dual` "false disagreement"**：原方案 secondary 走 fallback 时返回默认 schema，与 primary 真实结果对比恒不等 → 误报 cross-check 异议。改为读两侧 `events[0].severity == "warning"`，任一侧 fallback 即跳过结构对比，cross-check 警告只在两侧都成功且确实不一致时发。
+- **`chat_vision_dual` 串行调用**：原方案先 `await primary` 再 `await secondary`，wall-clock = 主+备，违背 PLAN「并发调」要求。改为 `asyncio.gather(primary_task, secondary_task)` 并发，wall-clock = max(主, 备)。
+- **`_invoke` 重试不区分错误类型**：原方案 `except (httpx.HTTPError, ValueError)` 一律 3 次退避，401/403/404 也白白重试 8 秒。新增 `_is_retryable(exc)` 分类——5xx / 超时 / 连接错误 / JSON 解析失败 → 重试；4xx 与未知异常 → 立即 break 进 fallback。
+- **`verify_caption_anim` 硬编码 1080×1920 canvas**：原方案在所有视频上都假设 SceneEcho 标准画布，bbox 像素映射在其他分辨率素材上错位。改为读 `cv2.CAP_PROP_FRAME_WIDTH/HEIGHT`，probe 失败才退回 1080×1920。
+- **`detect_scenes` 退化时长**：原方案 `_video_duration` 返回 0 时仍发 `{min:0.5, nominal:0, max:0}` 的 IR 写入，min > max 违反下游槽位约束。改为 `length > 0` 才挂 `ir_target` / `ir_value`，scene 边界事件仍发但不污染 Slot.duration（留给 1B skeleton 填）。
+- **ARCHITECTURE.md D13–D15 文风过冗**：原方案 2-3 句解释实现细节，与 D1-D12 的 1 行陈述句风格不齐。改为 1 行陈述事实，加 D16 拆出 CI 守卫单列。
+
+新增测试覆盖核查修复：`test_dual_check_skips_when_either_side_falls_back`、`test_is_retryable_*`（5xx/4xx/timeout/value-error/unknown）、`test_scenes_zero_length_skips_duration_write`。
+
+### 涉及文件
+- `backend/app/llm/client.py`：完全重写——双 provider 真实实现 + retry + dual-check + parent_event_id + fallback
+- `backend/app/llm/prompts/__init__.py`：扩展 — load_prompt / render_prompt
+- `backend/app/llm/prompts/1a_*.md`：新建 — 7 个子能力 prompt
+- `backend/app/extract/__init__.py`：新建 — Phase 1A 子能力包入口
+- `backend/app/extract/scenes.py / frame_sampler.py / captions.py / captions_anim.py / stickers.py / motion.py / transitions.py / masks.py / color.py / audio.py`：新建 — 10 个 extract 子能力
+- `backend/app/understand/__init__.py`、`backend/app/understand/vision.py`：新建 — caption_function 分类（phase2 命名）
+- `backend/app/api/lab.py`：新建 — SubcapabilityLab API + 子能力 registry
+- `backend/app/main.py`：扩展 — lab 路由（dev gated）+ data tree 加 system/luts
+- `backend/pyproject.toml`：扩展 — `[extract]` optional deps
+- `scripts/check_stage_naming.py / check_event_emission.py / check_parent_event_id.py`：新建 — CI 守卫
+- `.github/workflows/ci.yml`：扩展 — python job 加 3 条守卫步骤
+- `backend/tests/unit/test_llm_client.py / test_extract_subcaps.py / test_lab_api.py / test_check_scripts.py`：新建 — Phase 1A 单测
+- `frontend/src/api/lab.ts`：新建 — Lab API 封装
+- `frontend/src/pages/SubcapabilityLab.tsx`：新建 — `/lab` 页面（dev gated）
+- `frontend/src/main.tsx`：扩展 — Lab 路由 / nav，DEV-only
+- `frontend/src/pages/SampleExtract.tsx`：扩展 — 工作台跳转链接 + Lab 链接
+- `frontend/src/vite-env.d.ts`：新建 — Vite 客户端类型
+- `frontend/package.json`：扩展 — 加 @types/node 让 tsconfig types 解析
+- `docs/001ARCHITECTURE.md`、`docs/002STRUCTURE.md`：扩展 — 同步 Phase 1A 子能力 / Lab API / CI 守卫 / 新约定
+
+### 关联
+-> PLAN.md 阶段 1A（1349-1492 行）
+-> ISS-006
+
+---
+
 ## [2026-06-08-1] feat(phase0.5): ai workbench skeleton — sse event bus, mock streams, three-pane viewer
 
 Phase 0.5 整体交付：可观测性底座 + AI 透明工作台前端骨架。本条目反映 0.5 阶段最终落地状态，涵盖初始实现 + 两轮深度自审中识别并并入的全部修复。

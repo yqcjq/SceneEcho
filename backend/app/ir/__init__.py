@@ -3,6 +3,7 @@
 Exports JSON Schema via app.ir.export.export_json_schema() so renderer + frontend
 can codegen aligned zod/TS types.
 """
+
 from app.ir.ledger import TranscriptLedger, Unit
 from app.ir.patch import Patch
 from app.ir.project import Caption, Gap, PlacedSegment, ProjectIR, Section

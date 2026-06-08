@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import { BrowserRouter, Link, Navigate, Route, Routes } from "react-router-dom";
 import "./styles/global.css";
 import { SampleExtract } from "./pages/SampleExtract.js";
+import { SubcapabilityLab } from "./pages/SubcapabilityLab.js";
 import { Workbench } from "./pages/Workbench.js";
 import { WorkbenchLauncher } from "./pages/WorkbenchLauncher.js";
 
@@ -20,6 +21,9 @@ const Shell: React.FC<{ children: React.ReactNode }> = ({ children }) => (
         <nav className="flex gap-6 text-sm text-secondary">
           <Link to="/sample-extract" className="hover:text-primary">样例</Link>
           <Link to="/workbench/dev" className="hover:text-primary">工作台</Link>
+          {import.meta.env.DEV && (
+            <Link to="/lab" className="hover:text-primary">Lab</Link>
+          )}
         </nav>
       </div>
     </header>
@@ -56,6 +60,16 @@ ReactDOM.createRoot(root).render(
             </Shell>
           }
         />
+        {import.meta.env.DEV && (
+          <Route
+            path="/lab"
+            element={
+              <Shell>
+                <SubcapabilityLab />
+              </Shell>
+            }
+          />
+        )}
       </Routes>
     </BrowserRouter>
   </React.StrictMode>,

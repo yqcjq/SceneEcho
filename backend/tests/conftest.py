@@ -1,4 +1,5 @@
 """Test fixtures. Copies fixture media into a temp DATA_ROOT per session."""
+
 from __future__ import annotations
 
 import os
@@ -50,9 +51,7 @@ def task_with_events(temp_data_root, fresh_event_bus):
     tasks_store.init_db()
     sample_id = "evt_test_sample"
     (temp_data_root / "samples" / sample_id / "extracted").mkdir(parents=True, exist_ok=True)
-    task_id = tasks_store.create_task(
-        "test", resource_kind="sample", resource_id=sample_id
-    )
+    task_id = tasks_store.create_task("test", resource_kind="sample", resource_id=sample_id)
     fresh_event_bus.register_path(
         task_id, fresh_event_bus.resolve_events_path("sample", sample_id, task_id)
     )

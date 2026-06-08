@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { Link } from "react-router-dom";
 import { dataUrl, renderDemo, uploadSample } from "../api/index.js";
 import { TaskProgress } from "../components/TaskProgress.js";
 
@@ -52,9 +53,27 @@ export const SampleExtract: React.FC = () => {
       {sampleId && (
         <div style={{ marginTop: 16 }}>
           <div>样例 ID：<code>{sampleId}</code></div>
-          <button onClick={onRender} style={{ marginTop: 8 }} disabled={!!taskId && !outputPath}>
-            渲染 demo
-          </button>
+          <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={onRender} disabled={!!taskId && !outputPath}>
+              渲染 demo
+            </button>
+            {taskId && (
+              <Link
+                to={`/workbench/${taskId}`}
+                style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: 4 }}
+              >
+                打开工作台看 AI 工作过程
+              </Link>
+            )}
+            {import.meta.env.DEV && (
+              <Link
+                to="/lab"
+                style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: 4 }}
+              >
+                打开 SubcapabilityLab
+              </Link>
+            )}
+          </div>
         </div>
       )}
 

@@ -1,4 +1,5 @@
 """HTTP client to the Node renderer service."""
+
 from __future__ import annotations
 
 import httpx

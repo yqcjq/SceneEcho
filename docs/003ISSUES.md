@@ -141,3 +141,26 @@
 **解决方案**：
 renderer 把 IR 里的 `user_material` 相对路径拼成 `{BACKEND_URL}/data/<rel>`（每段 `encodeURIComponent`）后作为 `inputProps.userMaterialUrl` 传入 `<OffthreadVideo>`；`BACKEND_URL` 通过 env 注入，本地默认 `http://localhost:18521`。后端早已在 `main.py` `app.mount("/data", StaticFiles(...))`，无新增依赖。
 
+
+---
+
+## [ISS-006] BGM stem 落盘路径与 events.jsonl 路径方案 B 不齐
+
+**状态**：[发现]
+**优先级**：[P3 轻微]
+**类型**：[技术债]
+**发现日期**：2026-06-08
+
+**现象**：
+`backend/app/extract/audio.py::_demucs_separate` 在 BGM 有人声且 `save_stem=true` 时把 stem 写到 `normalized_path.parent / "audio" / "bgm_stem.wav"`，对样例素材展开为 `samples/{sid}/audio/bgm_stem.wav`。Phase 0.5 已经把所有派生产物（events / frames / extracted）统一收到 `samples/{sid}/extracted/`（路径方案 B），audio stem 单独散在 `audio/` 子目录里。
+
+**后果**：
+不影响功能，但 1B 集成时 KB store 与 cleanup cron 需要为 `audio/` 多写一条扫描规则；用户从 SubcapabilityLab `audio` 跑完 → 工作台第三栏 IR 树字段填充时若想链到 stem 文件，路径不在派生产物 root 下不直观。
+
+**初步判断**：
+已确认。Phase 1A 的优先级是子能力本身能跑通且 fallback 完整；目录归位作为 1B 集成期的小整理项。
+
+**关联**：
+-> backend/app/extract/audio.py:_demucs_separate
+-> docs/001ARCHITECTURE.md（约定 D10）
+
