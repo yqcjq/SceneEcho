@@ -28,7 +28,7 @@ class IRTarget(BaseModel):
     frontend (e.g. ``"skeleton.slots[1].style.caption"``).
     """
 
-    ir_type: Literal["TemplateIR", "ProjectIR", "TranscriptLedger"]
+    ir_type: Literal["TemplateIR", "ProjectIR", "TranscriptLedger", "Phase1AReport"]
     path: str
     field: str | None = None
     op: Literal["set", "append", "remove"] = "set"

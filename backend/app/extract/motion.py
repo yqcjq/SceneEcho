@@ -4,27 +4,29 @@ The two stages live in one module because they share one Scene-level
 plan: the VLM judgement is the parent event, the CV refinement is the
 child. Order of calls:
 
-1. ``judge_zoom_direction(scenes, frames, ...)`` — one VLM call per Scene
-   over its first/mid/last frames → ``推进 / 拉远 / 稳定 / 抖动``.
-2. ``estimate_zoom_curve(scene, ...)`` — only for non-stable Scenes,
+1. ``judge_zoom_direction(ctx, ...)`` — one VLM call per Scene over its
+   first/mid/last frames → ``推进 / 拉远 / 稳定 / 抖动``. Each per-scene
+   judgement writes ``Phase1AReport.zoom_directions[<scene_idx>]``.
+2. ``estimate_zoom_curve(ctx, scene, ...)`` — only for non-stable Scenes,
    sample 5 points and run Lucas-Kanade optical flow on
-   ``goodFeaturesToTrack`` keypoints → list of ``ZoomKeyframe``.
+   ``goodFeaturesToTrack`` keypoints → list of ``ZoomKeyframe`` written
+   to ``Phase1AReport.zoom_curves[<scene_idx>]``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from pathlib import Path
 
 from pydantic import BaseModel
 
 from app.config import get_settings
 from app.event_bus import get_event_bus
+from app.extract.context import Phase1AContext
 from app.extract.frame_sampler import FrameSample
 from app.extract.scenes import Scene
 from app.ir.template import ZoomKeyframe
 from app.ir.vision_event import IRTarget, VisionEvent
-from app.llm.client import FrameRef, LLMClient, get_llm_client
+from app.llm.client import FrameRef
 from app.llm.prompts import load_prompt
 from app.logging import get_logger
 
@@ -43,16 +45,15 @@ class _ZoomDirection(BaseModel):
 
 
 async def judge_zoom_direction(
-    scenes: Sequence[Scene],
-    frames: Sequence[FrameSample],
+    ctx: Phase1AContext,
     *,
-    task_id: str,
     parent_event_id: str | None = None,
-    client: LLMClient | None = None,
 ) -> tuple[dict[int, _ZoomDirection], list[VisionEvent]]:
     """One VLM call per scene, looking at its first/mid/last frames."""
     settings = get_settings()
-    cl = client or get_llm_client(stage=STAGE_DIRECTION)
+    cl = ctx.client(STAGE_DIRECTION)
+    scenes = await ctx.scenes()
+    frames = await ctx.frames()
     out: dict[int, _ZoomDirection] = {}
     events: list[VisionEvent] = []
     for sc in scenes:
@@ -73,24 +74,26 @@ async def judge_zoom_direction(
             messages,
             model=settings.model_vlm,
             stage=STAGE_DIRECTION,
-            task_id=task_id,
+            task_id=ctx.task_id,
             frames=refs,
             ir_target_template=IRTarget(
-                ir_type="TemplateIR", path=f"skeleton[{sc.idx}].style.visual"
+                ir_type="Phase1AReport", path=f"zoom_directions.{sc.idx}"
             ),
             schema=_ZoomDirection,
             parent_event_id=parent_event_id,
         )
+        # Ensure the IR write is the direction string, not the whole schema dump.
+        if evs:
+            evs[0].ir_value = result.direction
         out[sc.idx] = result
         events.extend(evs)
     return out, events
 
 
 async def estimate_zoom_curve(
-    normalized_path: Path,
+    ctx: Phase1AContext,
     scene: Scene,
     *,
-    task_id: str,
     parent_event_id: str | None = None,
     sample_count: int = 5,
 ) -> tuple[list[ZoomKeyframe], list[VisionEvent]]:
@@ -105,7 +108,7 @@ async def estimate_zoom_curve(
     except ImportError as e:
         log.warning("motion.curve_dep_missing", error=str(e))
         ev = VisionEvent(
-            task_id=task_id,
+            task_id=ctx.task_id,
             source="cv",
             stage=STAGE_CURVE,
             semantic_label=f"[fallback] scene {scene.idx} 无缩放曲线",
@@ -115,10 +118,10 @@ async def estimate_zoom_curve(
             duration_ms=0,
             severity="warning",
         )
-        await bus.publish(task_id, ev)
+        await bus.publish(ctx.task_id, ev)
         return [], [ev]
 
-    cap = cv2.VideoCapture(str(normalized_path))
+    cap = cv2.VideoCapture(str(ctx.normalized_path))
     if not cap.isOpened():
         return [], []
     try:
@@ -181,21 +184,21 @@ async def estimate_zoom_curve(
         cap.release()
 
     ev = VisionEvent(
-        task_id=task_id,
+        task_id=ctx.task_id,
         source="cv",
         stage=STAGE_CURVE,
         semantic_label=f"缩放曲线 · scene {scene.idx} · {len(keyframes)} 关键帧",
         reasoning="goodFeaturesToTrack + Lucas-Kanade 光流估算 scale 比率。",
         confidence=0.85,
         ir_target=IRTarget(
-            ir_type="TemplateIR",
-            path=f"skeleton[{scene.idx}].style.visual.zoom_keyframes",
+            ir_type="Phase1AReport",
+            path=f"zoom_curves.{scene.idx}",
         ),
         ir_value=[k.model_dump(mode="json") for k in keyframes],
         parent_event_id=parent_event_id,
         duration_ms=0,
     )
-    await bus.publish(task_id, ev)
+    await bus.publish(ctx.task_id, ev)
     return keyframes, [ev]
 
 

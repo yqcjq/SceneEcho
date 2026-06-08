@@ -6,6 +6,14 @@ can codegen aligned zod/TS types.
 
 from app.ir.ledger import TranscriptLedger, Unit
 from app.ir.patch import Patch
+from app.ir.phase1a_report import (
+    Phase1ACaptionEvent,
+    Phase1AColorReport,
+    Phase1AMaskParams,
+    Phase1AReport,
+    Phase1AScene,
+    Phase1AStickerDetection,
+)
 from app.ir.project import Caption, Gap, PlacedSegment, ProjectIR, Section
 from app.ir.template import (
     AudioStyle,
@@ -25,6 +33,12 @@ __all__ = [
     "CaptionStyle",
     "Gap",
     "Patch",
+    "Phase1ACaptionEvent",
+    "Phase1AColorReport",
+    "Phase1AMaskParams",
+    "Phase1AReport",
+    "Phase1AScene",
+    "Phase1AStickerDetection",
     "PlacedSegment",
     "ProjectIR",
     "Section",

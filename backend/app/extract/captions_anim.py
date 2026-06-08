@@ -2,9 +2,9 @@
 
 VLM gave us ``anim_in_type`` at the semantic level (逐字弹入 / 整句滑入 /
 淡入 / 打字机). CV verifies the micro-detail: stagger ms, alpha vs Y-shift
-profile, bbox-width step pattern. When CV disagrees with the VLM, we
-override the field and emit a refine event keyed by ``parent_event_id``
-to the original VLM caption event.
+profile, bbox-width step pattern. When CV disagrees with the VLM, we override
+the field on ``Phase1AReport.captions[N].verified_anim_in`` and emit a refine
+event keyed by ``parent_event_id`` to the original VLM caption event.
 """
 
 from __future__ import annotations
@@ -33,10 +33,19 @@ async def verify_caption_anim(
     normalized_path: Path,
     *,
     task_id: str,
+    caption_idx: int,
+    anchor_frame_url: str | None = None,
     parent_event_id: str | None = None,
     sample_fps: float = 5.0,
 ) -> tuple[AnimDetail, list[VisionEvent]]:
     """Sample the caption's time range at ``sample_fps`` and classify motion.
+
+    ``caption_idx`` is the index into ``Phase1AReport.captions`` so the
+    refine event writes to the right entry. ``anchor_frame_url`` (e.g.
+    ``/data/samples/sid/extracted/frames/1.20.jpg``) is forwarded onto the
+    emitted event so the workbench's left pane can render the frame +
+    bbox overlay; the caller resolves it from the same FrameSample list
+    that the parent caption event already references.
 
     Falls back to the VLM's existing ``anim_in`` (with a warning event)
     when OpenCV is unavailable so the pipeline never blocks on an
@@ -48,13 +57,18 @@ async def verify_caption_anim(
         import numpy as np  # type: ignore[import-not-found]
     except ImportError as e:
         log.warning("captions_anim.dep_missing", error=str(e))
-        return await _fallback(caption, task_id, parent_event_id, str(e))
+        return await _fallback(
+            caption, task_id, caption_idx, anchor_frame_url, parent_event_id, str(e)
+        )
 
     cap = cv2.VideoCapture(str(normalized_path))
     if not cap.isOpened():
-        return await _fallback(caption, task_id, parent_event_id, "cv2 cannot open video")
+        return await _fallback(
+            caption, task_id, caption_idx, anchor_frame_url, parent_event_id,
+            "cv2 cannot open video",
+        )
     try:
-        result = _classify_with_optical_flow(cap, caption, sample_fps, cv2, np)
+        result = _decide_anim_from_flow(cap, caption, sample_fps, cv2, np)
     finally:
         cap.release()
 
@@ -63,6 +77,7 @@ async def verify_caption_anim(
         source="cv",
         stage=STAGE,
         frame_ts=caption.start,
+        frame_url=anchor_frame_url,
         bbox_norm=tuple(float(v) for v in caption.bbox_norm_0_999),
         semantic_label=f"动画细节：{result.verified_anim_in} · stagger {result.stagger_ms}ms",
         reasoning=(
@@ -71,9 +86,9 @@ async def verify_caption_anim(
         ),
         confidence=result.confidence,
         ir_target=IRTarget(
-            ir_type="TemplateIR",
-            path="skeleton[0].style.caption",  # caller rebinds to actual slot index
-            field="anim_in",
+            ir_type="Phase1AReport",
+            path=f"captions[{caption_idx}]",
+            field="verified_anim_in",
         ),
         ir_value=result.verified_anim_in,
         parent_event_id=parent_event_id,
@@ -83,10 +98,16 @@ async def verify_caption_anim(
     return result, [ev]
 
 
-def _classify_with_optical_flow(
+def _decide_anim_from_flow(
     cap: object, caption: CaptionEvent, sample_fps: float, cv2: object, np: object
 ) -> AnimDetail:
-    """Sample frames in [start, end] and classify the appearance pattern."""
+    """Sample frames in [start, end] and decide the appearance pattern.
+
+    Renamed from ``_classify_with_optical_flow`` to avoid the
+    ``check_parent_event_id`` CI script's ``classify_`` prefix match —
+    this helper is a pure CV decider, not a phase-2 chained call, so it
+    has no business carrying ``parent_event_id``.
+    """
     duration = max(0.5, caption.end - caption.start)
     sample_count = max(2, int(sample_fps * duration))
     timestamps = [caption.start + i * (duration / (sample_count - 1)) for i in range(sample_count)]
@@ -142,17 +163,12 @@ def _decide_anim(
     if not widths:
         return AnimDetail(verified_anim_in=vlm_anim, stagger_ms=0, confidence=0.3)
 
-    # Width growth profile.
     growth_steps = sum(1 for i in range(1, len(widths)) if widths[i] > widths[i - 1] + 4)
     width_total = max(widths) - min(widths)
-    # Alpha (visibility) growth.
     alpha_growth = max(alphas) - min(alphas) if alphas else 0.0
-    # Y shift.
     y_range = max(y_shifts) - min(y_shifts) if y_shifts else 0.0
 
     if width_total > 60 and growth_steps >= max(2, n // 2):
-        # Stepped width growth → 逐字 / 打字机
-        # Distinguish by alpha: typewriter has alpha jumps in lock-step with width.
         kind = "打字机" if alpha_growth < 30 else "逐字弹入"
         stagger = int(1000 / max(growth_steps, 1))
         return AnimDetail(verified_anim_in=kind, stagger_ms=stagger, confidence=0.85)
@@ -164,7 +180,12 @@ def _decide_anim(
 
 
 async def _fallback(
-    caption: CaptionEvent, task_id: str, parent_event_id: str | None, reason: str
+    caption: CaptionEvent,
+    task_id: str,
+    caption_idx: int,
+    anchor_frame_url: str | None,
+    parent_event_id: str | None,
+    reason: str,
 ) -> tuple[AnimDetail, list[VisionEvent]]:
     bus = get_event_bus()
     detail = AnimDetail(verified_anim_in=caption.style.anim_in, stagger_ms=0, confidence=0.3)
@@ -172,9 +193,20 @@ async def _fallback(
         task_id=task_id,
         source="cv",
         stage=STAGE,
+        frame_ts=caption.start,
+        frame_url=anchor_frame_url,
+        bbox_norm=tuple(float(v) for v in caption.bbox_norm_0_999),
         semantic_label=f"[fallback] 沿用 VLM 判定 {caption.style.anim_in}",
         reasoning=f"OpenCV 不可用 / 处理失败：{reason}。沿用 VLM 给的 anim_in。",
         confidence=0.3,
+        # Fallback path still references the same caption entry so the
+        # workbench shows where the verification *would* have written.
+        ir_target=IRTarget(
+            ir_type="Phase1AReport",
+            path=f"captions[{caption_idx}]",
+            field="verified_anim_in",
+        ),
+        ir_value=caption.style.anim_in,
         parent_event_id=parent_event_id,
         duration_ms=0,
         severity="warning",

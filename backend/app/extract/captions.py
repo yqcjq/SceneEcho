@@ -1,33 +1,33 @@
 """1A-V1 · Caption style + position detection (VLM main path).
 
-One VLM call per ``CaptionEvent`` group (frames sharing the same visual
-caption). Cross-frame merging is by IoU > 0.5 + style + semantic_purpose.
-The structured output schema enforces the 0-999 normalized coord system;
-client-layer maps to 0-1 when writing into ``CaptionStyle.position``.
+One VLM call per ``detect_captions`` invocation; cross-frame merging by
+IoU > 0.5 + style + semantic_purpose. The structured output schema enforces
+the 0-999 normalized coord system; this module maps to 0-1 when constructing
+the final ``CaptionStyle.position``.
 
-CaptionEvent is a Phase 1A intermediate dataclass — NOT in the IR (S10).
-1B integration projects ``CaptionEvent.style`` into ``Slot.style.caption``
-and emits ``Caption`` rows on ProjectIR at apply time.
+Per-caption events append to ``Phase1AReport.captions`` (pydantic IR
+exported by ``app.ir.phase1a_report``). 1B integration reads
+``Phase1AReport.captions[N].style`` and lifts it into ``Slot.style.caption``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.event_bus import get_event_bus
+from app.extract.context import Phase1AContext
 from app.extract.frame_sampler import FrameSample
+from app.ir.phase1a_report import Phase1ACaptionEvent
 from app.ir.template import CaptionStyle
 from app.ir.vision_event import IRTarget, VisionEvent
 from app.llm.client import (
+    AnthropicClient,
     FrameRef,
-    LLMClient,
+    OpenAICompatClient,
     chat_vision_dual,
-    get_llm_client,
     should_dual_check,
 )
 from app.llm.prompts import load_prompt
@@ -65,50 +65,24 @@ class CaptionsRawResult(BaseModel):
         return f"字幕识别 · {len(self.captions)} 条"
 
 
-# ---------- Domain dataclass (Phase 1A intermediate, not IR) ----------
-
-
-@dataclass
-class CaptionEvent:
-    """Captures one logical caption across the frames it appeared in.
-
-    1B integration drops the bookkeeping fields (frames_appeared, raw bbox)
-    and lifts ``style`` into ``Slot.style.caption``.
-    """
-
-    style: CaptionStyle
-    start: float  # earliest ts where the caption was visible
-    end: float
-    placeholder_text: list[str]
-    length_constraint: dict[str, int]
-    semantic_purpose: str
-    bbox_norm_0_999: tuple[int, int, int, int]
-    frames_appeared: list[float] = field(default_factory=list)
-    confidence: float = 0.0
-
-
 # ---------- Public API ----------
 
 
 async def detect_captions(
-    normalized_path: Path,
-    frames: Sequence[FrameSample],
+    ctx: Phase1AContext,
     *,
-    task_id: str,
     parent_event_id: str | None = None,
-    client: LLMClient | None = None,
-) -> tuple[list[CaptionEvent], list[VisionEvent]]:
-    """Issue one VLM call covering up to 6 sampled frames.
+) -> tuple[list[Phase1ACaptionEvent], list[VisionEvent]]:
+    """Issue one VLM call covering up to 6 sampled frames; return merged captions.
 
-    Phase 1A keeps the caller surface small: feed the sampled frames in,
-    receive consolidated CaptionEvents back. Cross-frame deduplication
-    happens here (IoU + visual style); the workbench sees the call event
-    plus per-CaptionEvent IR-write events.
+    Cross-frame deduplication happens here (IoU + visual style); the workbench
+    sees one call event (no IR write) plus one append-event per merged caption.
     """
+    frames = await ctx.frames()
     if not frames:
         return [], []
     settings = get_settings()
-    cl = client or get_llm_client(stage=STAGE)
+    cl = ctx.client(STAGE)
     bus = get_event_bus()
 
     # Cap frames per call so the prompt stays under context budget.
@@ -117,14 +91,13 @@ async def detect_captions(
     user_prompt = (
         "请按上述 schema 识别这些采样帧中的字幕。"
         f"采样时间戳依次为 {[round(f.ts, 2) for f in limited]}（秒）。"
+        "frames_appeared 用 0-indexed 整数，对应上述时间戳数组的下标。"
     )
     messages = [
         {"role": "system", "content": load_prompt("1a_captions")},
         {"role": "user", "content": user_prompt},
     ]
     if should_dual_check(STAGE):
-        from app.llm.client import AnthropicClient, OpenAICompatClient
-
         primary, secondary = (
             (cl, AnthropicClient())
             if isinstance(cl, OpenAICompatClient)
@@ -137,9 +110,9 @@ async def detect_captions(
             model_primary=settings.model_vlm,
             model_secondary="claude-sonnet-4-6",
             stage=STAGE,
-            task_id=task_id,
+            task_id=ctx.task_id,
             frames=frame_refs,
-            ir_target_template=IRTarget(ir_type="TemplateIR", path="skeleton"),
+            ir_target_template=None,  # call-level event has no IR write
             schema=CaptionsRawResult,
             parent_event_id=parent_event_id,
         )
@@ -148,24 +121,27 @@ async def detect_captions(
             messages,
             model=settings.model_vlm,
             stage=STAGE,
-            task_id=task_id,
+            task_id=ctx.task_id,
             frames=frame_refs,
-            ir_target_template=IRTarget(ir_type="TemplateIR", path="skeleton"),
+            ir_target_template=None,  # call-level event has no IR write
             schema=CaptionsRawResult,
             parent_event_id=parent_event_id,
         )
     # Merge same-caption rows that the model returned per-frame.
     merged = _merge_captions(result.captions)
-    out: list[CaptionEvent] = []
+    out: list[Phase1ACaptionEvent] = []
+    call_ev_id = events[0].event_id if events else parent_event_id
     for cap in merged:
         if not cap.frames_appeared:
             continue
-        ts_appeared = [limited[i].ts for i in cap.frames_appeared if 0 <= i < len(limited)]
-        if not ts_appeared:
+        anchor_idx = next((i for i in cap.frames_appeared if 0 <= i < len(limited)), None)
+        if anchor_idx is None:
             continue
+        anchor = limited[anchor_idx]
+        ts_appeared = [limited[i].ts for i in cap.frames_appeared if 0 <= i < len(limited)]
         bbox = _bbox_from_pos_size(cap.position_norm_0_999, cap.size_norm_0_999)
         style = _to_caption_style(cap, bbox)
-        ev = CaptionEvent(
+        entry = Phase1ACaptionEvent(
             style=style,
             start=min(ts_appeared),
             end=max(ts_appeared) + 0.5,  # tail buffer
@@ -175,60 +151,45 @@ async def detect_captions(
             bbox_norm_0_999=bbox,
             frames_appeared=ts_appeared,
             confidence=cap.confidence,
+            reasoning=cap.reasoning[:200],
+            color_hex_raw=cap.color_hex,
+            anim_in_type_raw=cap.anim_in_type,
+            layout_raw=cap.layout,
         )
-        # Fire one entity-level VisionEvent per merged caption so the
-        # workbench's right pane can flash the destination Slot's
-        # style.caption field as the IR fills in.
+        # Entity-level event: append to Phase1AReport.captions. ``frame_url``
+        # is the anchor frame the caption first appears on so the workbench
+        # left pane can render the frame image + bbox overlay.
         entity_ev = VisionEvent(
-            task_id=task_id,
+            task_id=ctx.task_id,
             source="vlm",
             model_used=settings.model_vlm,
             stage=STAGE,
-            frame_ts=ev.start,
+            frame_ts=anchor.ts,
+            frame_url=f"/data/{anchor.rel_path.lstrip('/')}",
             bbox_norm=tuple(float(v) for v in bbox),
-            semantic_label=f"字幕：{cap.semantic_purpose} · {style.layout}",
+            semantic_label=f"画面字幕：{cap.semantic_purpose} · {style.layout}",
             reasoning=cap.reasoning[:200],
             confidence=cap.confidence,
-            ir_target=IRTarget(
-                ir_type="TemplateIR",
-                path=f"skeleton[{ev_slot_idx(cap.frames_appeared, limited)}].style.caption",
-            ),
-            ir_value=style.model_dump(mode="json"),
-            parent_event_id=events[0].event_id if events else parent_event_id,
+            ir_target=IRTarget(ir_type="Phase1AReport", path="captions", op="append"),
+            ir_value=entry.model_dump(mode="json"),
+            parent_event_id=call_ev_id,
             duration_ms=0,
         )
-        await bus.publish(task_id, entity_ev)
+        await bus.publish(ctx.task_id, entity_ev)
         events.append(entity_ev)
-        out.append(ev)
+        out.append(entry)
     return out, events
 
 
 # ---------- helpers ----------
 
 
-def ev_slot_idx(frames_appeared_indices: list[int], frames: Sequence[FrameSample]) -> int:
-    """Map the frames a caption appeared in to a Slot index (best-guess).
-
-    Phase 1A uses ``scene_idx`` of the median frame the caption appeared in.
-    1B's skeleton.py refines this by re-binding to the discovered slots
-    (开头 / 主体 / 结尾 boundaries).
-    """
-    if not frames_appeared_indices:
-        return 0
-    mid = frames_appeared_indices[len(frames_appeared_indices) // 2]
-    if 0 <= mid < len(frames):
-        idx = frames[mid].scene_idx
-        if idx is not None:
-            return idx
-    return 0
-
-
 def _merge_captions(rows: list[_CaptionRaw]) -> list[_CaptionRaw]:
     """Group rows referring to the same visual caption.
 
-    Heuristic: same ``semantic_purpose`` + bbox IoU > 0.5 + position center
-    within 5% of canvas → merge. Works because the VLM was already asked
-    to consolidate, but providers occasionally return per-frame copies.
+    Heuristic: same ``semantic_purpose`` + bbox IoU > 0.5 → merge. Works
+    because the VLM was already asked to consolidate, but providers
+    occasionally return per-frame copies.
     """
     if not rows:
         return []
@@ -240,7 +201,6 @@ def _merge_captions(rows: list[_CaptionRaw]) -> list[_CaptionRaw]:
                 r.semantic_purpose == g.semantic_purpose
                 and _iou(r.position_norm_0_999, g.position_norm_0_999) > 0.5
             ):
-                # Union the frames_appeared list, keep first row's metadata.
                 g.frames_appeared = sorted(set(g.frames_appeared) | set(r.frames_appeared))
                 if r.confidence > g.confidence:
                     g.placeholder_text = r.placeholder_text or g.placeholder_text
@@ -286,3 +246,25 @@ def _to_caption_style(cap: _CaptionRaw, bbox: tuple[int, int, int, int]) -> Capt
         max_chars_per_line=cap.max_chars_per_line,
         anim_in=cap.anim_in_type,
     )
+
+
+# ---------- legacy alias (back-compat for callers that import the dataclass) ----------
+
+# The pre-二核 implementation exposed ``CaptionEvent`` (a dataclass) as the
+# return-type of detect_captions; downstream code (captions_anim, the lab
+# runner, integration tests) imports it. Map the alias to the new pydantic
+# IR model so existing imports keep working without ABC churn.
+CaptionEvent = Phase1ACaptionEvent
+
+__all__ = [
+    "CaptionEvent",
+    "CaptionsRawResult",
+    "Phase1ACaptionEvent",
+    "STAGE",
+    "detect_captions",
+]
+
+
+def _scene_anchor_frames(frames: Sequence[FrameSample]) -> list[FrameSample]:
+    """Used by older imports — returns frames unchanged. Kept as a no-op."""
+    return list(frames)

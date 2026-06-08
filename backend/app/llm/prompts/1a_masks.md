@@ -5,17 +5,17 @@
 ## 输出 JSON Schema
 
 ```json
-{{
+{
   "has_mask": bool,
   "kind": "circle" | "rectangle" | "line_split" | null,
-  "params_norm_0_999": {{
-    "circle": {{ "cx": int, "cy": int, "radius": int }},
-    "rectangle": {{ "x": int, "y": int, "w": int, "h": int }},
-    "line_split": {{ "x1": int, "y1": int, "x2": int, "y2": int, "side_kept": "left" | "right" | "top" | "bottom" }}
-  }} | null,
+  "params_norm_0_999": {
+    "circle": { "cx": int, "cy": int, "radius": int },
+    "rectangle": { "x": int, "y": int, "w": int, "h": int },
+    "line_split": { "x1": int, "y1": int, "x2": int, "y2": int, "side_kept": "left" | "right" | "top" | "bottom" }
+  } | null,
   "confidence": 0.0-1.0,
   "reasoning": "≤200 字中文解释"
-}}
+}
 ```
 
 ## 判定规则

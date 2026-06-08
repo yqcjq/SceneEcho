@@ -7,10 +7,10 @@ from collections.abc import Sequence
 from pydantic import BaseModel
 
 from app.config import get_settings
+from app.extract.context import Phase1AContext
 from app.extract.frame_sampler import FrameSample
-from app.extract.scenes import Scene
 from app.ir.vision_event import IRTarget, VisionEvent
-from app.llm.client import FrameRef, LLMClient, get_llm_client
+from app.llm.client import FrameRef
 from app.llm.prompts import load_prompt
 
 STAGE = "1A.transitions"
@@ -26,16 +26,19 @@ class _TransitionResult(BaseModel):
 
 
 async def classify_transitions(
-    scenes: Sequence[Scene],
-    frames: Sequence[FrameSample],
+    ctx: Phase1AContext,
     *,
-    task_id: str,
     parent_event_id: str | None = None,
-    client: LLMClient | None = None,
 ) -> tuple[dict[int, _TransitionResult], list[VisionEvent]]:
-    """One VLM call per adjacent scene boundary."""
+    """One VLM call per adjacent scene boundary.
+
+    Each per-boundary judgement writes
+    ``Phase1AReport.transitions[<prev_scene_idx>]``.
+    """
     settings = get_settings()
-    cl = client or get_llm_client(stage=STAGE)
+    cl = ctx.client(STAGE)
+    scenes = await ctx.scenes()
+    frames = await ctx.frames()
     out: dict[int, _TransitionResult] = {}
     events: list[VisionEvent] = []
     for i in range(len(scenes) - 1):
@@ -63,14 +66,16 @@ async def classify_transitions(
             messages,
             model=settings.model_vlm,
             stage=STAGE,
-            task_id=task_id,
+            task_id=ctx.task_id,
             frames=refs,
             ir_target_template=IRTarget(
-                ir_type="TemplateIR", path=f"skeleton[{prev_sc.idx}].style"
+                ir_type="Phase1AReport", path=f"transitions.{prev_sc.idx}"
             ),
             schema=_TransitionResult,
             parent_event_id=parent_event_id,
         )
+        if evs:
+            evs[0].ir_value = result.transition
         out[prev_sc.idx] = result
         events.extend(evs)
     return out, events

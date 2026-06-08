@@ -1,8 +1,11 @@
 """Caption function classification — Phase 1A "phase2" downstream of captions.
 
-This is a `*_classify`-named function so the
+This is a ``*_classify``-named function so the
 ``scripts/check_parent_event_id.py`` CI script enforces the
 ``parent_event_id=`` keyword on the inner ``chat_vision`` call.
+
+Writes ``Phase1AReport.captions[<idx>].function`` so the workbench's
+right pane shows the function field filling in on each merged caption.
 """
 
 from __future__ import annotations
@@ -35,13 +38,14 @@ async def classify_caption_function(
     frame: FrameSample | None,
     *,
     task_id: str,
+    caption_idx: int,
     parent_event_id: str | None = None,
     client: LLMClient | None = None,
 ) -> tuple[_CaptionFunctionResult, list[VisionEvent]]:
     """Run the function-classifier VLM call for a single CaptionEvent.
 
-    The caption's existing style + placeholder + bbox are serialized into
-    the user prompt as JSON; the model returns a single function label.
+    ``caption_idx`` indexes into ``Phase1AReport.captions`` so the resulting
+    event writes to the correct entry's ``function`` field.
     """
     settings = get_settings()
     cl = client or get_llm_client(stage=STAGE)
@@ -63,13 +67,24 @@ async def classify_caption_function(
         {"role": "system", "content": load_prompt("1a_caption_function")},
         {"role": "user", "content": user_prompt},
     ]
-    return await cl.chat_vision(
+    result, events = await cl.chat_vision(
         messages,
         model=settings.model_vlm,
         stage=STAGE,
         task_id=task_id,
         frames=refs or None,
-        ir_target_template=IRTarget(ir_type="TemplateIR", path="skeleton[0].caption_function"),
+        ir_target_template=IRTarget(
+            ir_type="Phase1AReport",
+            path=f"captions[{caption_idx}]",
+            field="function",
+        ),
         schema=_CaptionFunctionResult,
         parent_event_id=parent_event_id,
     )
+    # Override the LLM client's default ir_value (full schema dump) with
+    # just the function string + thread the caption's bbox onto the event
+    # so the workbench shows the bbox overlay alongside the verdict.
+    if events:
+        events[0].ir_value = result.function
+        events[0].bbox_norm = tuple(float(v) for v in caption.bbox_norm_0_999)
+    return result, events

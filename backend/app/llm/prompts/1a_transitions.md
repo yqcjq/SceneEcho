@@ -5,11 +5,11 @@
 ## 输出 JSON Schema
 
 ```json
-{{
+{
   "transition": "硬切" | "叠化" | "滑入" | "推拉" | "unknown",
   "confidence": 0.0-1.0,
   "reasoning": "≤200 字中文解释，引用中间帧的视觉特征"
-}}
+}
 ```
 
 ## 判定规则

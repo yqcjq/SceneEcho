@@ -5,10 +5,10 @@ expose ad-hoc detection endpoints. The lab lets you pick an existing
 sample, run one subcap against it, and watch the resulting VisionEvent
 stream in the workbench.
 
-Each subcap exposes: a ``runner`` async callable, a list of compatible
-fixture sample ids, and a ``baseline`` key to look up under
-``tests/baselines.json``. The registry is the single place to add a new
-subcap to the lab UI.
+Each subcap exposes: a ``runner`` async callable taking a single
+``Phase1AContext`` (which lazily computes scenes/frames once and caches
+them across subcap calls), a list of compatible fixture sample ids, and
+a ``baseline`` key under ``tests/baselines.json``.
 """
 
 from __future__ import annotations
@@ -25,169 +25,121 @@ from pydantic import BaseModel
 from app import tasks_store
 from app.config import get_settings
 from app.event_bus import get_event_bus
+from app.extract.context import Phase1AContext
 from app.logging import get_logger
 
 router = APIRouter()
 log = get_logger(__name__)
 
 
-SubcapRunner = Callable[[Path, str], Awaitable[None]]
+SubcapRunner = Callable[[Phase1AContext], Awaitable[None]]
 
 
 @dataclass(frozen=True)
 class SubcapDef:
-    name: str  # short id, also URL slug
-    label: str  # human-readable Chinese label
-    stage: str  # canonical stage prefix this subcap emits
-    fixtures: tuple[str, ...]  # compatible sample ids
-    baseline_key: str  # path under tests/baselines.json
-    runner: SubcapRunner  # async callable taking (normalized_path, task_id)
+    name: str
+    label: str
+    stage: str
+    fixtures: tuple[str, ...]
+    baseline_key: str
+    runner: SubcapRunner
 
 
 # ---------------------------------------------------------------------------
-# Subcap runners — thin orchestrators that reuse the extract/* implementations.
+# Subcap runners — thin orchestrators that share Phase1AContext.
+# Each runner just calls the underlying detect_X(ctx) — scenes / frames are
+# computed lazily inside the context and cached, so a multi-subcap session
+# pays the detect/sample cost once per fixture.
 # ---------------------------------------------------------------------------
 
 
-async def _run_scenes(normalized: Path, task_id: str) -> None:
-    from app.extract.scenes import detect_scenes
-
-    await detect_scenes(normalized, task_id=task_id)
+async def _run_scenes(ctx: Phase1AContext) -> None:
+    await ctx.scenes()  # publishes scene-cut events as a side effect
 
 
-async def _run_captions(normalized: Path, task_id: str) -> None:
+async def _run_captions(ctx: Phase1AContext) -> None:
     from app.extract.captions import detect_captions
-    from app.extract.frame_sampler import sample_frames
-    from app.extract.scenes import detect_scenes
 
-    scenes, _ = await detect_scenes(normalized, task_id=task_id)
-    sample_id = _sample_id_from_path(normalized)
-    out_dir_rel = f"samples/{sample_id}/extracted/frames"
-    frames, _ = await sample_frames(
-        normalized,
-        out_dir_rel=out_dir_rel,
-        task_id=task_id,
-        scenes=scenes,
-    )
-    await detect_captions(normalized, frames, task_id=task_id)
+    await detect_captions(ctx)
 
 
-async def _run_captions_anim(normalized: Path, task_id: str) -> None:
+async def _run_captions_anim(ctx: Phase1AContext) -> None:
     from app.extract.captions import detect_captions
     from app.extract.captions_anim import verify_caption_anim
-    from app.extract.frame_sampler import sample_frames
-    from app.extract.scenes import detect_scenes
 
-    scenes, _ = await detect_scenes(normalized, task_id=task_id)
-    sample_id = _sample_id_from_path(normalized)
-    out_dir_rel = f"samples/{sample_id}/extracted/frames"
-    frames, _ = await sample_frames(
-        normalized, out_dir_rel=out_dir_rel, task_id=task_id, scenes=scenes
-    )
-    captions, _ = await detect_captions(normalized, frames, task_id=task_id)
-    for cap in captions:
-        await verify_caption_anim(cap, normalized, task_id=task_id)
+    captions, _ = await detect_captions(ctx)
+    frames = await ctx.frames()
+    for idx, cap in enumerate(captions):
+        # Match the same anchor frame the caption entity event used so the
+        # CV refine event lands on the same frame in the workbench.
+        anchor = (
+            min(frames, key=lambda f: abs(f.ts - cap.start)) if frames else None
+        )
+        anchor_url = (
+            f"/data/{anchor.rel_path.lstrip('/')}" if anchor is not None else None
+        )
+        await verify_caption_anim(
+            cap,
+            ctx.normalized_path,
+            task_id=ctx.task_id,
+            caption_idx=idx,
+            anchor_frame_url=anchor_url,
+        )
 
 
-async def _run_stickers(normalized: Path, task_id: str) -> None:
-    from app.extract.frame_sampler import sample_frames
-    from app.extract.scenes import detect_scenes
+async def _run_stickers(ctx: Phase1AContext) -> None:
     from app.extract.stickers import detect_stickers
 
-    scenes, _ = await detect_scenes(normalized, task_id=task_id)
-    sample_id = _sample_id_from_path(normalized)
-    out_dir_rel = f"samples/{sample_id}/extracted/frames"
-    frames, _ = await sample_frames(
-        normalized, out_dir_rel=out_dir_rel, task_id=task_id, scenes=scenes
-    )
-    await detect_stickers(normalized, frames, task_id=task_id)
+    await detect_stickers(ctx)
 
 
-async def _run_zoom(normalized: Path, task_id: str) -> None:
-    from app.extract.frame_sampler import sample_frames
+async def _run_zoom(ctx: Phase1AContext) -> None:
     from app.extract.motion import estimate_zoom_curve, judge_zoom_direction
-    from app.extract.scenes import detect_scenes
 
-    scenes, _ = await detect_scenes(normalized, task_id=task_id)
-    sample_id = _sample_id_from_path(normalized)
-    out_dir_rel = f"samples/{sample_id}/extracted/frames"
-    frames, _ = await sample_frames(
-        normalized, out_dir_rel=out_dir_rel, task_id=task_id, scenes=scenes
-    )
-    directions, _ = await judge_zoom_direction(scenes, frames, task_id=task_id)
+    directions, _ = await judge_zoom_direction(ctx)
+    scenes = await ctx.scenes()
     for sc in scenes:
-        if directions.get(sc.idx) and directions[sc.idx].direction != "稳定":
-            await estimate_zoom_curve(normalized, sc, task_id=task_id)
+        d = directions.get(sc.idx)
+        if d is not None and d.direction != "稳定":
+            await estimate_zoom_curve(ctx, sc)
 
 
-async def _run_transitions(normalized: Path, task_id: str) -> None:
-    from app.extract.frame_sampler import sample_frames
-    from app.extract.scenes import detect_scenes
+async def _run_transitions(ctx: Phase1AContext) -> None:
     from app.extract.transitions import classify_transitions
 
-    scenes, _ = await detect_scenes(normalized, task_id=task_id)
-    sample_id = _sample_id_from_path(normalized)
-    out_dir_rel = f"samples/{sample_id}/extracted/frames"
-    frames, _ = await sample_frames(
-        normalized, out_dir_rel=out_dir_rel, task_id=task_id, scenes=scenes
-    )
-    await classify_transitions(scenes, frames, task_id=task_id)
+    await classify_transitions(ctx)
 
 
-async def _run_masks(normalized: Path, task_id: str) -> None:
-    from app.extract.frame_sampler import sample_frames
+async def _run_masks(ctx: Phase1AContext) -> None:
     from app.extract.masks import detect_masks
-    from app.extract.scenes import detect_scenes
 
-    scenes, _ = await detect_scenes(normalized, task_id=task_id)
-    sample_id = _sample_id_from_path(normalized)
-    out_dir_rel = f"samples/{sample_id}/extracted/frames"
-    frames, _ = await sample_frames(
-        normalized, out_dir_rel=out_dir_rel, task_id=task_id, scenes=scenes
-    )
-    await detect_masks(scenes, frames, task_id=task_id)
+    await detect_masks(ctx)
 
 
-async def _run_color(normalized: Path, task_id: str) -> None:
+async def _run_color(ctx: Phase1AContext) -> None:
     from app.extract.color import classify_color_lut
-    from app.extract.frame_sampler import sample_frames
-    from app.extract.scenes import detect_scenes
 
-    scenes, _ = await detect_scenes(normalized, task_id=task_id)
-    sample_id = _sample_id_from_path(normalized)
-    out_dir_rel = f"samples/{sample_id}/extracted/frames"
-    frames, _ = await sample_frames(
-        normalized, out_dir_rel=out_dir_rel, task_id=task_id, scenes=scenes
-    )
-    await classify_color_lut(normalized, frames, task_id=task_id)
+    await classify_color_lut(ctx)
 
 
-async def _run_audio(normalized: Path, task_id: str) -> None:
+async def _run_audio(ctx: Phase1AContext) -> None:
     from app.extract.audio import extract_bgm
 
-    await extract_bgm(normalized, task_id=task_id)
+    await extract_bgm(ctx)
 
 
-async def _run_caption_function(normalized: Path, task_id: str) -> None:
+async def _run_caption_function(ctx: Phase1AContext) -> None:
     from app.extract.captions import detect_captions
-    from app.extract.frame_sampler import sample_frames
-    from app.extract.scenes import detect_scenes
     from app.understand.vision import classify_caption_function
 
-    scenes, _ = await detect_scenes(normalized, task_id=task_id)
-    sample_id = _sample_id_from_path(normalized)
-    out_dir_rel = f"samples/{sample_id}/extracted/frames"
-    frames, _ = await sample_frames(
-        normalized, out_dir_rel=out_dir_rel, task_id=task_id, scenes=scenes
-    )
-    captions, cap_events = await detect_captions(normalized, frames, task_id=task_id)
-    # Each caption function call's parent_event_id is the original caption
-    # entity event; we passed those through the events list, which doesn't
-    # carry per-caption identity here, so we link to the call event id.
+    captions, cap_events = await detect_captions(ctx)
+    frames = await ctx.frames()
     parent = cap_events[0].event_id if cap_events else None
-    for cap in captions:
-        anchor_frame = next((f for f in frames if cap.start <= f.ts <= cap.end), None)
-        await classify_caption_function(cap, anchor_frame, task_id=task_id, parent_event_id=parent)
+    for idx, cap in enumerate(captions):
+        anchor = next((f for f in frames if cap.start <= f.ts <= cap.end), None)
+        await classify_caption_function(
+            cap, anchor, task_id=ctx.task_id, caption_idx=idx, parent_event_id=parent
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -288,19 +240,6 @@ def _require_dev() -> None:
         raise HTTPException(403, "ENABLE_DEV_MOCK is not set")
 
 
-def _sample_id_from_path(p: Path) -> str:
-    """Derive sample id from ``data/samples/{sid}/normalized.mp4`` style path."""
-    parents = list(p.parents)
-    for parent in parents:
-        if parent.name == "samples":
-            # next deeper component is the sid
-            try:
-                return p.relative_to(parent).parts[0]
-            except ValueError:
-                continue
-    return p.parent.name
-
-
 @router.get("/lab/subcaps")
 def list_subcaps() -> dict:
     _require_dev()
@@ -347,25 +286,30 @@ class RunRequest(BaseModel):
     dry_run: bool = False
 
 
+def _resolve_fixture_path(fixture_id: str) -> Path | None:
+    """Find the runnable mp4 under data/samples/<id>/."""
+    settings = get_settings()
+    sample_dir = settings.data_root / "samples" / fixture_id
+    for name in ("normalized.mp4", "source.mp4"):
+        p = sample_dir / name
+        if p.exists():
+            return p
+    return None
+
+
 @router.post("/lab/run-subcap/{name}")
 async def run_subcap(name: str, req: RunRequest, background_tasks: BackgroundTasks) -> dict:
     _require_dev()
     if name not in REGISTRY:
         raise HTTPException(404, f"unknown subcap: {name}")
     sub = REGISTRY[name]
-    settings = get_settings()
-    sample_dir = settings.data_root / "samples" / req.fixture_id
-    normalized = sample_dir / "normalized.mp4"
-    if not normalized.exists():
-        # Fall back to source.mp4 if user hasn't run the upload-normalize step.
-        if (sample_dir / "source.mp4").exists():
-            normalized = sample_dir / "source.mp4"
-        else:
-            raise HTTPException(
-                404,
-                f"fixture {req.fixture_id} missing normalized.mp4. "
-                "请先通过 /samples 上传或 CLI ingest。",
-            )
+    normalized = _resolve_fixture_path(req.fixture_id)
+    if normalized is None:
+        raise HTTPException(
+            404,
+            f"fixture {req.fixture_id} missing normalized.mp4. "
+            "请先通过 /samples 上传或 CLI ingest。",
+        )
     task_id = tasks_store.create_task(
         f"lab_{name}", resource_kind="sample", resource_id=req.fixture_id
     )
@@ -380,9 +324,14 @@ async def run_subcap(name: str, req: RunRequest, background_tasks: BackgroundTas
         }
 
     async def _runner() -> None:
+        ctx = Phase1AContext(
+            sample_id=req.fixture_id,
+            normalized_path=normalized,
+            task_id=task_id,
+        )
         tasks_store.update_task(task_id, status="running", stage=sub.stage, progress=0.05)
         try:
-            await sub.runner(normalized, task_id)
+            await sub.runner(ctx)
             tasks_store.update_task(
                 task_id, status="completed", progress=1.0, stage=f"{sub.stage}.done"
             )

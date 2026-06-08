@@ -2,22 +2,25 @@
 
 VLM gives subjective tags + ``dominant_lut_id`` from the user-provided
 library; OpenCV computes HSV mean + histogram as a numerical refinement
-event. Refinement is a "phase2" event keyed by parent_event_id.
+event. Refinement is a "phase2" event keyed by parent_event_id, named to
+match the ``check_parent_event_id`` CI script's ``*_refine`` suffix rule.
+Both events write into ``Phase1AReport.color``.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.event_bus import get_event_bus
+from app.extract.context import Phase1AContext
 from app.extract.frame_sampler import FrameSample
+from app.ir.phase1a_report import Phase1AColorReport
 from app.ir.vision_event import IRTarget, VisionEvent
-from app.llm.client import FrameRef, LLMClient, get_llm_client
+from app.llm.client import FrameRef
 from app.llm.prompts import load_prompt
 from app.logging import get_logger
 
@@ -37,19 +40,17 @@ class ColorStyleResult(BaseModel):
 
 
 async def classify_color_lut(
-    normalized_path: Path,
-    frames: Sequence[FrameSample],
+    ctx: Phase1AContext,
     *,
-    task_id: str,
     parent_event_id: str | None = None,
-    client: LLMClient | None = None,
     luts_index_rel: str = "system/luts/luts_index.json",
 ) -> tuple[ColorStyleResult, list[VisionEvent]]:
     """One VLM call over 3 anchor frames + one OpenCV refinement event."""
+    frames = await ctx.frames()
     if not frames:
         return ColorStyleResult(), []
     settings = get_settings()
-    cl = client or get_llm_client(stage=STAGE)
+    cl = ctx.client(STAGE)
 
     anchors = _pick_three(list(frames))
     refs = [FrameRef(ts=f.ts, url=f.rel_path, scene_idx=f.scene_idx) for f in anchors]
@@ -65,17 +66,20 @@ async def classify_color_lut(
         messages,
         model=settings.model_vlm,
         stage=STAGE,
-        task_id=task_id,
+        task_id=ctx.task_id,
         frames=refs,
-        ir_target_template=IRTarget(ir_type="TemplateIR", path="global_style.color"),
+        ir_target_template=IRTarget(ir_type="Phase1AReport", path="color"),
         schema=ColorStyleResult,
         parent_event_id=parent_event_id,
     )
-    refine_ev = await _refine_with_histogram(
-        normalized_path,
+    # The client wrote ir_value=parsed.model_dump(); re-shape into Phase1AColorReport
+    # so the workbench right pane shows the IR-canonical structure.
+    if events:
+        events[0].ir_value = _to_color_report(result).model_dump(mode="json")
+    refine_ev = await _color_histogram_refine(
+        ctx,
         anchors,
         result,
-        task_id=task_id,
         parent_event_id=events[0].event_id if events else parent_event_id,
     )
     if refine_ev is not None:
@@ -83,21 +87,25 @@ async def classify_color_lut(
     return result, events
 
 
-async def _refine_with_histogram(
-    normalized_path: Path,
+async def _color_histogram_refine(
+    ctx: Phase1AContext,
     anchors: list[FrameSample],
     result: ColorStyleResult,
     *,
-    task_id: str,
     parent_event_id: str | None,
 ) -> VisionEvent | None:
+    """CV refine pass: HSV histogram means override the VLM's subjective tags.
+
+    Function name ends in ``_refine`` so ``scripts/check_parent_event_id.py``
+    enforces the ``parent_event_id=`` kwarg on calls within this body.
+    """
     bus = get_event_bus()
     try:
         import cv2  # type: ignore[import-not-found]
     except ImportError:
         return None
 
-    cap = cv2.VideoCapture(str(normalized_path))
+    cap = cv2.VideoCapture(str(ctx.normalized_path))
     if not cap.isOpened():
         return None
     try:
@@ -125,7 +133,7 @@ async def _refine_with_histogram(
 
     result.histogram = hist
     ev = VisionEvent(
-        task_id=task_id,
+        task_id=ctx.task_id,
         source="cv",
         stage=STAGE,
         semantic_label=f"调色直方图 · 色相均值 {hist['hue_mean']:.0f}",
@@ -135,13 +143,26 @@ async def _refine_with_histogram(
             f"{'/'.join(result.tags) or 'unknown'}。"
         ),
         confidence=0.9,
-        ir_target=IRTarget(ir_type="TemplateIR", path="global_style.color", field="histogram"),
+        ir_target=IRTarget(
+            ir_type="Phase1AReport",
+            path="color",
+            field="histogram",
+        ),
         ir_value=hist,
         parent_event_id=parent_event_id,
         duration_ms=0,
     )
-    await bus.publish(task_id, ev)
+    await bus.publish(ctx.task_id, ev)
     return ev
+
+
+def _to_color_report(result: ColorStyleResult) -> Phase1AColorReport:
+    return Phase1AColorReport(
+        tags=result.tags,
+        dominant_lut_id=result.dominant_lut_id,
+        confidence=result.confidence,
+        histogram=result.histogram,
+    )
 
 
 def _pick_three(frames: list[FrameSample]) -> list[FrameSample]:

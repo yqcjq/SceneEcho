@@ -81,6 +81,28 @@ const indexChild = (
   return next;
 };
 
+/**
+ * Kick off a background HTTP fetch for the event's frame image so by the
+ * time autoFollow selects the event, the browser already has the JPEG in
+ * its HTTP cache. Without this, a burst of events during SSE replay causes
+ * the <img> src to change rapidly — every src change cancels the in-flight
+ * request, so only the final event's image actually finishes loading,
+ * which the user perceives as "frames don't appear until I refresh".
+ *
+ * `new Image()` doesn't insert anything into the DOM; the browser fetches
+ * normally, populates its cache, then the eventual <img> on the page
+ * resolves from cache instantly. URL dedup is handled by the browser
+ * (same URL → single request).
+ */
+const preloadFrame = (url: string | null | undefined): void => {
+  if (!url || typeof Image === "undefined") return;
+  const img = new Image();
+  // decoding=async lets the browser decode off the main thread — when the
+  // real <img> later mounts, paint is already ready.
+  img.decoding = "async";
+  img.src = url;
+};
+
 export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   taskId: null,
   events: [],
@@ -96,6 +118,9 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   appendEvent: (event) => {
     const state = get();
     if (state.paused) return;
+    // Preload the frame image off-state so it lands in the browser cache
+    // before autoFollow selects this event. See preloadFrame() docstring.
+    preloadFrame(event.frame_url);
     set({
       events: [...state.events, event],
       irSnapshot: writeIr(state.irSnapshot, event),

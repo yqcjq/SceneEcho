@@ -76,8 +76,9 @@ SceneEcho/
 │  │  │  ├─ ledger.py                       # TranscriptLedger / Unit
 │  │  │  ├─ template.py                     # TemplateIR + Slot/StyleRule/CaptionStyle/...
 │  │  │  ├─ project.py                      # ProjectIR + Section/PlacedSegment/Caption/Gap
+│  │  │  ├─ phase1a_report.py               # Phase1AReport：1A 识别结果聚合 IR（D17，子能力 VisionEvent 写入这棵树）
 │  │  │  ├─ patch.py                        # NL/面板/审核统一编辑 op
-│  │  │  ├─ vision_event.py                 # VisionEvent / IRTarget（AI 决策事件 IR · D9/D10；ir_value: Any）
+│  │  │  ├─ vision_event.py                 # VisionEvent / IRTarget（AI 决策事件 IR · D9/D10；ir_type 含 Phase1AReport；ir_value: Any）
 │  │  │  ├─ path_validator.py               # lodash 风路径校验器（CI 验证 mock JSON 命中真实 IR）
 │  │  │  └─ export.py                       # pydantic → JSON Schema 聚合导出
 │  │  ├─ llm/
@@ -96,21 +97,22 @@ SceneEcho/
 │  │  │        ├─ captions_demo.json
 │  │  │        ├─ stickers_demo.json
 │  │  │        └─ full_extract_demo.json
-│  │  ├─ extract/                           # Phase 1A 视觉理解子能力（按需签名 + STAGE 模块常量 + lazy import 缺包降级）
+│  │  ├─ extract/                           # Phase 1A 视觉理解子能力（统一 ctx 签名 + STAGE 模块常量 + lazy import 缺包降级）
 │  │  │  ├─ __init__.py
-│  │  │  ├─ scenes.py                       # 1A-T1 切点检测（PySceneDetect）
+│  │  │  ├─ context.py                      # Phase1AContext：sample 路径 + scenes/frames lazy 缓存 + client(stage)
+│  │  │  ├─ scenes.py                       # 1A-T1 切点检测（PySceneDetect），写 Phase1AReport.scenes[]
 │  │  │  ├─ frame_sampler.py                # 1A-T2 关键帧抽样器（1fps + scene 边界 ±0.2s + 中点）
-│  │  │  ├─ captions.py                     # 1A-V1 字幕样式 + 位置（VLM 主路径，跨帧 IoU 合并）
-│  │  │  ├─ captions_anim.py                # 1A-V2 字幕动画细节验证（OpenCV 5fps 帧差 + 光流）
-│  │  │  ├─ stickers.py                     # 1A-V3 贴纸两阶段（VLM 网格 → CV refine bbox 至 ±5px）
-│  │  │  ├─ motion.py                       # 1A-V4 缩放方向粗判（VLM）+ 1A-V5 缩放曲线（CV 光流）
-│  │  │  ├─ transitions.py                  # 1A-V6 转场分类（VLM）
-│  │  │  ├─ masks.py                        # 1A-V7 几何蒙版（VLM 一次拿判定 + 参数）
-│  │  │  ├─ color.py                        # 1A-V8 调色语义（VLM 标签 + OpenCV HSV 直方图微调）
-│  │  │  └─ audio.py                        # 1A-A1 BGM（Demucs htdemucs 分离 + librosa BPM/能量/情绪）
+│  │  │  ├─ captions.py                     # 1A-V1 字幕样式 + 位置（VLM，跨帧 IoU 合并），写 Phase1AReport.captions[]
+│  │  │  ├─ captions_anim.py                # 1A-V2 字幕动画细节验证（OpenCV 5fps 帧差 + 光流），写 Phase1AReport.captions[idx].verified_anim_in
+│  │  │  ├─ stickers.py                     # 1A-V3 贴纸两阶段（VLM 网格 → CV refine bbox 至 ±5px），写 Phase1AReport.stickers[]
+│  │  │  ├─ motion.py                       # 1A-V4 缩放方向粗判（VLM）+ 1A-V5 缩放曲线（CV 光流），写 Phase1AReport.zoom_directions/.zoom_curves
+│  │  │  ├─ transitions.py                  # 1A-V6 转场分类（VLM），写 Phase1AReport.transitions
+│  │  │  ├─ masks.py                        # 1A-V7 几何蒙版（CV HoughCircles/Canny/HoughLines 三帧多数决主路径 + VLM 兜底），写 Phase1AReport.masks
+│  │  │  ├─ color.py                        # 1A-V8 调色语义（VLM 标签 + OpenCV HSV 直方图微调），写 Phase1AReport.color
+│  │  │  └─ audio.py                        # 1A-A1 BGM（Demucs htdemucs 分离 + librosa BPM/能量/情绪），写 Phase1AReport.audio.{has_bgm,bpm,mood_tag}
 │  │  ├─ understand/                        # Phase 1A 语义层分类器
 │  │  │  ├─ __init__.py
-│  │  │  └─ vision.py                       # caption_function 分类（VLM, two-stage 命名 *_classify）
+│  │  │  └─ vision.py                       # classify_caption_function（caption_idx 入参，写 Phase1AReport.captions[idx].function；命名匹配 CI classify_ 前缀）
 │  │  └─ render/
 │  │     ├─ __init__.py
 │  │     ├─ client.py                       # httpx 调 renderer /render；renderer_health 探活
@@ -125,9 +127,12 @@ SceneEcho/
 │        ├─ test_event_bus.py               # 多订阅 / replay / snapshot 切分 / jsonl tail 续起 / silent
 │        ├─ test_scenarios.py               # mock JSON 解析 + ir_target.path 命中真实 IR + parent 顺序
 │        ├─ test_llm_client.py              # _extract_json / 双 provider fallback / silent / dual-check / 路由
-│        ├─ test_extract_subcaps.py         # 1A 子能力 fallback 形状（缺包 / 空输入 / 缺帧）
+│        ├─ test_extract_subcaps.py         # 1A 子能力 fallback 形状（缺包 / 空输入 / 缺帧；用 Phase1AContext 直接喂 [] cache）
 │        ├─ test_lab_api.py                 # SubcapabilityLab API 行为（registry / 403 / 404 / dry_run）
 │        └─ test_check_scripts.py           # 三脚本 grep 守卫在仓库自有代码上跑过
+│     └─ integration/
+│        ├─ __init__.py
+│        └─ test_subcap_shapes.py           # 1A mock-level integration：seeded ctx 跑全部 subcap，断言事件结构 + Phase1AReport ir_target + parent 链路 + schema round-trip
 │
 ├─ renderer/                                 # Node Remotion 渲染服务
 │  ├─ package.json                          # pnpm @sceneecho/renderer 依赖与脚本

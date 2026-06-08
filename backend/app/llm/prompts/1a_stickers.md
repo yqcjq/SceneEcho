@@ -12,9 +12,9 @@
 ## 输出 JSON Schema
 
 ```json
-{{
+{
   "stickers": [
-    {{
+    {
       "description": "≤30 字描述外观，不抄文字",
       "semantic_category": "强调提示" | "装饰" | "信息标签" | "情绪表达",
       "frames_appeared": [int, ...],
@@ -22,9 +22,9 @@
       "size_norm_0_999": [w_int, h_int],
       "confidence": 0.0-1.0,
       "reasoning": "≤200 字中文解释"
-    }}
+    }
   ]
-}}
+}
 ```
 
 ## semantic_category 判定
@@ -38,4 +38,4 @@
 
 - 跨格出现的同一贴纸（视觉风格高度近似）合并为一条，`frames_appeared` 列出所有帧。
 - `position_norm_0_999[0..1]` 是 bbox **左上角**点；`size_norm_0_999` 是宽高。
-- 若画面中**没有贴纸**，返回 `{{"stickers": []}}`。
+- 若画面中**没有贴纸**，返回 `{"stickers": []}`。

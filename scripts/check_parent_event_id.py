@@ -17,8 +17,12 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Functions whose names imply they're a phase-2 step that must keep the
-# parent's event id alive.
+# parent's event id alive. Match both prefix and suffix forms so both
+# ``refine_sticker_bbox`` / ``classify_caption_function`` (subject-first
+# naming, common in extract/) and ``_color_histogram_refine`` (modifier-last
+# naming, common in helpers) are caught.
 PHASE2_NAME_SUFFIXES = ("_refine", "_phase2", "_classify")
+PHASE2_NAME_PREFIXES = ("refine_", "phase2_", "classify_")
 
 EXEMPT_FILES = (
     "tests/",
@@ -58,7 +62,10 @@ def _calls_with_parent(node: ast.AST) -> bool:
 
 
 def _is_phase2(name: str) -> bool:
-    return any(name.endswith(suffix) for suffix in PHASE2_NAME_SUFFIXES)
+    bare = name.lstrip("_")
+    if any(bare.endswith(suffix) for suffix in PHASE2_NAME_SUFFIXES):
+        return True
+    return any(bare.startswith(prefix) for prefix in PHASE2_NAME_PREFIXES)
 
 
 def main() -> int:

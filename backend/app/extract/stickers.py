@@ -7,24 +7,24 @@ gantt view consumes):
 2. CV refine pass on each detected sticker — Canny edge + frame-diff
    inside the VLM-given bbox ±10% → tightened to ±5px.
 
-Phase 1A intermediate dataclass ``StickerDetection`` carries the merged
-result; 1B integration writes it into ``Slot.style.stickers``.
+Each detection appends to ``Phase1AReport.stickers`` so the workbench's
+right pane lights up the new row; the refine event re-writes the same
+entry in place once CV tightens the bbox.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
 from app.event_bus import get_event_bus
-from app.extract.frame_sampler import FrameSample
+from app.extract.context import Phase1AContext
+from app.ir.phase1a_report import Phase1AStickerDetection
 from app.ir.template import StickerEvent
 from app.ir.vision_event import IRTarget, VisionEvent
-from app.llm.client import FrameRef, LLMClient, get_llm_client
+from app.llm.client import FrameRef
 from app.llm.prompts import load_prompt
 from app.logging import get_logger
 
@@ -50,31 +50,31 @@ class StickersRawResult(BaseModel):
 
 
 @dataclass
-class StickerDetection:
-    sticker: StickerEvent
-    bbox_norm_0_999: tuple[int, int, int, int]
-    frames_appeared: list[float]
-    confidence: float
+class _RefineRequest:
+    """In-process holder for a sticker pending its CV refine call."""
+
+    detection: Phase1AStickerDetection
+    sticker_idx: int
+    parent_event_id: str
 
 
 async def detect_stickers(
-    normalized_path: Path,
-    frames: Sequence[FrameSample],
+    ctx: Phase1AContext,
     *,
-    task_id: str,
     parent_event_id: str | None = None,
-    client: LLMClient | None = None,
-) -> tuple[list[StickerDetection], list[VisionEvent]]:
+) -> tuple[list[Phase1AStickerDetection], list[VisionEvent]]:
+    frames = await ctx.frames()
     if not frames:
         return [], []
     settings = get_settings()
-    cl = client or get_llm_client(stage=STAGE)
+    cl = ctx.client(STAGE)
     bus = get_event_bus()
 
     limited = list(frames)[:6]
     frame_refs = [FrameRef(ts=f.ts, url=f.rel_path, scene_idx=f.scene_idx) for f in limited]
     user_prompt = (
         f"请按 schema 识别贴纸。采样帧时间戳依次为 {[round(f.ts, 2) for f in limited]}（秒）。"
+        "frames_appeared 用 0-indexed 整数对应上述时间戳数组的下标。"
     )
     messages = [
         {"role": "system", "content": load_prompt("1a_stickers")},
@@ -84,20 +84,23 @@ async def detect_stickers(
         messages,
         model=settings.model_vlm,
         stage=STAGE,
-        task_id=task_id,
+        task_id=ctx.task_id,
         frames=frame_refs,
-        ir_target_template=IRTarget(ir_type="TemplateIR", path="skeleton"),
+        ir_target_template=None,  # call-level event has no IR write
         schema=StickersRawResult,
         parent_event_id=parent_event_id,
     )
     call_ev_id = events[0].event_id if events else parent_event_id
 
-    detections: list[StickerDetection] = []
+    detections: list[Phase1AStickerDetection] = []
+    pending_refine: list[_RefineRequest] = []
     for raw in result.stickers:
         bbox = _bbox_norm(raw)
-        ts_appeared = [limited[i].ts for i in raw.frames_appeared if 0 <= i < len(limited)]
-        if not ts_appeared:
+        anchor_idx = next((i for i in raw.frames_appeared if 0 <= i < len(limited)), None)
+        if anchor_idx is None:
             continue
+        anchor = limited[anchor_idx]
+        ts_appeared = [limited[i].ts for i in raw.frames_appeared if 0 <= i < len(limited)]
         sticker = StickerEvent(
             description=raw.description[:60] or "未命名贴纸",
             position=(round(bbox[0] / 1000, 4), round(bbox[1] / 1000, 4)),
@@ -106,54 +109,58 @@ async def detect_stickers(
             end=max(ts_appeared) + 0.5,
             semantic_category=raw.semantic_category,
         )
-        detection = StickerDetection(
+        detection = Phase1AStickerDetection(
             sticker=sticker,
             bbox_norm_0_999=bbox,
             frames_appeared=ts_appeared,
             confidence=raw.confidence,
+            reasoning=raw.reasoning[:200],
         )
-        # Entity-level event so the workbench's right pane appends a row to
-        # the targeted slot's stickers list.
+        sticker_idx = len(detections)  # 0-based index in Phase1AReport.stickers
+        # Entity-level event: append to Phase1AReport.stickers + carry the
+        # anchor frame URL so the workbench left pane can show the frame
+        # image with the sticker bbox overlay.
         entity = VisionEvent(
-            task_id=task_id,
+            task_id=ctx.task_id,
             source="vlm",
             model_used=settings.model_vlm,
             stage=STAGE,
-            frame_ts=detection.sticker.start,
+            frame_ts=anchor.ts,
+            frame_url=f"/data/{anchor.rel_path.lstrip('/')}",
             bbox_norm=tuple(float(v) for v in bbox),
             semantic_label=f"贴纸：{raw.semantic_category} · {raw.description[:20]}",
             reasoning=raw.reasoning[:200],
             confidence=raw.confidence,
-            ir_target=IRTarget(
-                ir_type="TemplateIR",
-                path=f"skeleton[{_slot_idx_for(raw.frames_appeared, limited)}].style.stickers",
-                op="append",
-            ),
-            ir_value=sticker.model_dump(mode="json"),
+            ir_target=IRTarget(ir_type="Phase1AReport", path="stickers", op="append"),
+            ir_value=detection.model_dump(mode="json"),
             parent_event_id=call_ev_id,
             duration_ms=0,
         )
-        await bus.publish(task_id, entity)
+        await bus.publish(ctx.task_id, entity)
         events.append(entity)
+        detections.append(detection)
+        pending_refine.append(
+            _RefineRequest(detection=detection, sticker_idx=sticker_idx, parent_event_id=entity.event_id)
+        )
 
-        # Refine pass (CV) — only when OpenCV is present; otherwise skip.
+    # Refine pass (CV) — only when OpenCV is present; otherwise skip silently.
+    for req in pending_refine:
         refine_ev = await refine_sticker_bbox(
-            normalized_path,
-            detection,
-            task_id=task_id,
-            parent_event_id=entity.event_id,
+            ctx,
+            req.detection,
+            sticker_idx=req.sticker_idx,
+            parent_event_id=req.parent_event_id,
         )
         if refine_ev is not None:
             events.append(refine_ev)
-        detections.append(detection)
     return detections, events
 
 
 async def refine_sticker_bbox(
-    normalized_path: Path,
-    detection: StickerDetection,
+    ctx: Phase1AContext,
+    detection: Phase1AStickerDetection,
     *,
-    task_id: str,
+    sticker_idx: int,
     parent_event_id: str,
 ) -> VisionEvent | None:
     """Tighten bbox to ±5px using Canny + frame-diff inside ±10% of VLM bbox.
@@ -169,7 +176,7 @@ async def refine_sticker_bbox(
         log.warning("stickers.refine_dep_missing", error=str(e))
         return None
 
-    cap = cv2.VideoCapture(str(normalized_path))
+    cap = cv2.VideoCapture(str(ctx.normalized_path))
     if not cap.isOpened():
         return None
     try:
@@ -206,29 +213,45 @@ async def refine_sticker_bbox(
     finally:
         cap.release()
 
-    # Apply to detection in-place.
+    # Apply to detection (pydantic — model_copy + reassign for clarity).
     detection.bbox_norm_0_999 = new_bbox
-    detection.sticker.position = (round(new_bbox[0] / 1000, 4), round(new_bbox[1] / 1000, 4))
-    detection.sticker.size = (round(new_bbox[2] / 1000, 4), round(new_bbox[3] / 1000, 4))
+    detection.sticker = detection.sticker.model_copy(
+        update={
+            "position": (round(new_bbox[0] / 1000, 4), round(new_bbox[1] / 1000, 4)),
+            "size": (round(new_bbox[2] / 1000, 4), round(new_bbox[3] / 1000, 4)),
+        }
+    )
+
+    # Resolve the anchor frame's rel_path from the cached frames so the
+    # refine event also carries a frame_url + bbox the workbench can render.
+    cached_frames = await ctx.frames()
+    anchor_ts = detection.frames_appeared[0]
+    anchor_frame = (
+        min(cached_frames, key=lambda f: abs(f.ts - anchor_ts)) if cached_frames else None
+    )
+    frame_url = (
+        f"/data/{anchor_frame.rel_path.lstrip('/')}" if anchor_frame is not None else None
+    )
 
     ev = VisionEvent(
-        task_id=task_id,
+        task_id=ctx.task_id,
         source="cv",
         stage=STAGE,
-        frame_ts=detection.frames_appeared[0],
+        frame_ts=anchor_ts,
+        frame_url=frame_url,
         bbox_norm=tuple(float(v) for v in new_bbox),
         semantic_label="CV 精化贴纸 bbox 至 ±5px",
         reasoning="Canny + 帧差在 VLM bbox ±10% 范围内精化。",
         confidence=0.94,
         ir_target=IRTarget(
-            ir_type="TemplateIR",
-            path="skeleton[0].style.stickers[0]",  # caller rebinds in 1B
+            ir_type="Phase1AReport",
+            path=f"stickers[{sticker_idx}]",
         ),
-        ir_value=detection.sticker.model_dump(mode="json"),
+        ir_value=detection.model_dump(mode="json"),
         parent_event_id=parent_event_id,
         duration_ms=0,
     )
-    await bus.publish(task_id, ev)
+    await bus.publish(ctx.task_id, ev)
     return ev
 
 
@@ -245,12 +268,14 @@ def _bbox_norm(raw: _StickerRaw) -> tuple[int, int, int, int]:
     return (0, 0, 100, 100)
 
 
-def _slot_idx_for(frame_indices: list[int], frames: Sequence[FrameSample]) -> int:
-    if not frame_indices:
-        return 0
-    mid = frame_indices[len(frame_indices) // 2]
-    if 0 <= mid < len(frames):
-        idx = frames[mid].scene_idx
-        if idx is not None:
-            return idx
-    return 0
+# Back-compat alias — older tests may still import StickerDetection.
+StickerDetection = Phase1AStickerDetection
+
+__all__ = [
+    "Phase1AStickerDetection",
+    "STAGE",
+    "StickerDetection",
+    "StickersRawResult",
+    "detect_stickers",
+    "refine_sticker_bbox",
+]

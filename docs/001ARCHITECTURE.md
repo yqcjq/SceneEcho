@@ -51,8 +51,8 @@
 │ FFmpeg 归一化 / IR 校验 / 渲染客户端 /        │
 │ LLMClient（OpenAI-compat + Anthropic 双适配  │
 │ 器，缺凭据 fallback）+ Phase 1A 11 个视觉子 │
-│ 能力（按需签名 + STAGE 模块常量 + lazy ML  │
-│ import）                                       │
+│ 能力（Phase1AContext 入参 + STAGE 模块常量  │
+│ + lazy ML import + Phase1AReport ir_target） │
 └──────────────────────────────────────────────┘
                          ↓
 ┌──────────────────────────────────────────────┐
@@ -198,5 +198,9 @@ python -m app.cli ingest-sample /local/path.mp4
 - **D12 任务表含资源回链**：`tasks` 表自 Phase 0.5 起新增 `resource_kind` / `resource_id` / `events_jsonl_path` 三列；老库通过 `init_db` 内置 idempotent ALTER 自动迁移。`last_event_sequence` 列在 0.5 二核审计后被移除（jsonl 已是真理源），老库残留该列不影响读写。
 - **D13 LLM 客户端真实双适配器**：`OpenAICompatClient` 走 `/v1/chat/completions`，`AnthropicClient` 走 `/v1/messages`，共享 `_RealClientBase` 的重试 + 缺凭据 / 4xx / 重试耗尽时回退 stub + `severity="warning"` 事件。重试只在 5xx / 超时 / 连接错误 / JSON 解析失败时发生；4xx 立即回退。
 - **D14 dual-check 并发 + 跳过 fallback**：`chat_vision_dual` 通过 `asyncio.gather` 并发调主备模型；任一侧返回 `severity=warning` 事件（fallback）时跳过结构对比，避免「真结果 vs 默认 schema」误报为 cross-check 异议。
-- **D15 子能力按需签名 + STAGE 常量**：`extract/*` 与 `understand/*` 每个函数只取它真实需要的参数 + `task_id` + 可选 `parent_event_id`，stage 在模块顶部硬编码常量。重 ML 依赖在 `[extract]` extras 内 lazy import，缺包返默认形状 + warning 事件不阻塞。
-- **D16 Phase 1A CI 守卫**：`scripts/check_stage_naming.py` AST-aware 检查 VisionEvent / chat_vision / chat_text / chat_vision_dual / `STAGE` 常量字面量；`check_event_emission.py` 检查 AI 客户端方法体必发 `event_bus.publish`；`check_parent_event_id.py` 检查 `*_refine` / `*_phase2` / `*_classify` 函数必传 `parent_event_id=` kwarg。三脚本跳 site-packages，CI python job 跑完单测后串行执行。
+- **D15 子能力统一上下文签名 + STAGE 常量**：`extract/*` 与 `understand/*` 子能力函数签名为 `async def detect_X(ctx: Phase1AContext, *, parent_event_id=None) -> tuple[Result, list[VisionEvent]]`；`captions_anim` / `caption_function` 多一个 `caption_idx` 形参、`stickers.refine_sticker_bbox` 多一个 `sticker_idx` 形参索引到 `Phase1AReport`。stage 在模块顶部硬编码常量。重 ML 依赖在 `[extract]` extras 内 lazy import，缺包返默认形状 + `severity="warning"` VisionEvent。
+- **D16 Phase 1A CI 守卫**：`scripts/check_stage_naming.py` AST 检查 VisionEvent / chat_vision / chat_text / chat_vision_dual / `STAGE` 常量字面量；`check_event_emission.py` 检查 AI 客户端方法体调用 `event_bus.publish` 或 chat_vision 系列；`check_parent_event_id.py` 检查名字以 `_refine` / `_phase2` / `_classify` 结尾或以 `refine_` / `phase2_` / `classify_` 开头的函数体内任一调用传 `parent_event_id=` kwarg。三脚本跳 site-packages，CI python job 在单测后串行执行。
+- **D17 Phase 1A 识别报告 IR**：1A 子能力 VisionEvent 写入 `Phase1AReport`（`backend/app/ir/phase1a_report.py`），不写 `TemplateIR`。`IRTarget.ir_type` Literal 取 `{TemplateIR, ProjectIR, TranscriptLedger, Phase1AReport}` 之一。Phase1AReport 字段 = `scenes[]` / `captions[]` / `stickers[]` / `zoom_directions{}` / `zoom_curves{}` / `transitions{}` / `masks{}` / `color` / `audio`。列表型字段以 `op="append"` 增量写入；字典型字段以 `str(scene_idx)` 作 key、路径形如 `zoom_directions.0`；单值型字段整对象写或带 `field` 子字段写。1B `skeleton.py` 读 `Phase1AReport` 映射到 `TemplateIR.skeleton[N].style.{...}`。工作台右栏头部按最近事件 `ir_target.ir_type` 动态显示 IR 类型。
+- **D18 Phase 1A 共享上下文**：`backend/app/extract/context.py` 暴露 `Phase1AContext(sample_id, normalized_path, task_id)`，`await ctx.scenes()` / `await ctx.frames()` / `ctx.client(stage)` 三个 lazy 入口在首次调用时计算并缓存。lab runner、1B pipeline、集成测试都以 `ctx` 为入参；多子能力同 fixture 时 `detect_scenes` / `sample_frames` 只执行一次。
+- **D19 Phase 1A 实体事件可视化字段**：每个子能力的实体级 VisionEvent（每条字幕、每枚贴纸、每个 mask 检出）必须填 `frame_url`（指向 entity 首次出现的采样帧 `/data/<rel>`）+ `bbox_norm`（0-999 → 0-1 归一化），工作台左栏 `WorkbenchVisionPane` + `BboxOverlay` 在两个字段同时存在时才渲染帧底图 + 框。`Phase1ACaptionEvent` / `Phase1AStickerDetection` 同时携带 `reasoning` 与 raw VLM 字段（color_hex_raw / anim_in_type_raw / layout_raw 等），右栏 IR 展开可见 VLM 中文解释 + 原始判定。
+- **D20 几何 mask CV 主路径**：`extract/masks.py::detect_masks` 在每个 scene 首/中/末三帧分别跑 `HoughCircles` / Canny 矩形 / `HoughLinesP` 三类几何检测器，多数决（同 kind 至少 ceil(n_frames/2) 票）确认 `has_mask`；CV 全 false 时调一次 VLM 看三帧网格兜底。CV 候选与最终判定事件都带 frame_url + bbox。

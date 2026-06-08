@@ -1,3 +1,84 @@
+## [2026-06-08-5] fix(workbench): preload frame images on event arrival to eliminate refresh-to-see-frame on SSE replay
+
+### 改动
+- `useWorkbenchStore.appendEvent` 收到事件时即调 `preloadFrame(event.frame_url)` 创建 `new Image(); img.decoding="async"; img.src = url`，事件一入 store 就让浏览器后台拉图入 HTTP cache；后续 `<img>` src 任意切换都从 cache 即时出，避开 SSE replay 涌入时反复取消/重发请求的问题
+- `WorkbenchVisionPane` 的 `<img>` 加 `decoding="async"` + `loading="eager"`，解码不阻塞主线程
+- `WorkbenchVisionPane` 在 `hasFrame && !frameSize && !frameError` 时显示 "loading frame…" 脉冲占位（含事件 `frame_ts`），加载失败时显示错误占位 + url 便于排查
+
+### 涉及文件
+- frontend/src/state/workbench.ts：新增 preloadFrame helper + appendEvent 调用
+- frontend/src/components/workbench/WorkbenchVisionPane.tsx：img 加 decoding/loading hint，新增 frameError state + loading / error 占位
+- docs/003ISSUES.md：ISS-009 [已解决]
+
+### 关联
+-> ISS-009
+
+---
+
+## [2026-06-08-4] fix(phase1a): wire frame_url onto entity events, expand Phase1AReport with reasoning, switch mask detection to CV-primary
+
+### 改动
+- 给所有 entity 级 VisionEvent 补 `frame_url`：captions / stickers / stickers refine / captions_anim / classify_caption_function 都把 entity `frames_appeared` 第一帧的 `/data/<rel>` 写到 `frame_url`，让工作台 `WorkbenchVisionPane` 能正常截帧 + `BboxOverlay` 框出位置
+- `Phase1ACaptionEvent` 补 `reasoning` / `color_hex_raw` / `anim_in_type_raw` / `layout_raw` 字段，`Phase1AStickerDetection` 补 `reasoning` 字段；entity_ev 写 ir_value 时整对象带上，让右栏 IR 树展开看到 VLM 完整解释
+- `1a_captions.md` 标题改「画面字幕样式与位置识别」，开头加边界声明「不处理语音」「不识别字幕原文」「只看画面烧入的视觉文字」；`Phase1ACaptionEvent` docstring 同步声明
+- `detect_masks` 重写为 CV 主路径 + VLM 兜底：scene 内首/中/末三帧分别跑 OpenCV `HoughCircles` / Canny 矩形 / `HoughLinesP` 三类检测器；多数决（同 kind 至少 ceil(n_frames/2) 票）确认 has_mask；CV 全 false 时调一次 VLM 看三帧网格图兜底；每个 CV 候选都发带 frame_url + bbox 的 info 事件
+- `verify_caption_anim` 加 `anchor_frame_url` 形参，lab runner `_run_captions_anim` 从 `ctx.frames()` 解析最近帧 url 透传；fallback 路径也带 frame_url
+- `classify_caption_function` 修正：覆盖 LLM client 默认的 `ir_value`（schema 整 dump）为 `result.function` 字符串，并把 `caption.bbox_norm_0_999` 挂到事件 bbox_norm 上让工作台同步显示 caption 位置
+
+### 涉及文件
+- backend/app/ir/phase1a_report.py：Phase1ACaptionEvent 补 reasoning / color_hex_raw / anim_in_type_raw / layout_raw + docstring 声明画面字幕；Phase1AStickerDetection 补 reasoning
+- backend/app/extract/captions.py：entity_ev 取 anchor 帧补 frame_url；Phase1ACaptionEvent 透传 reasoning + raw VLM 字段；semantic_label 改「画面字幕」前缀
+- backend/app/extract/stickers.py：entity / refine ev 取 anchor 帧补 frame_url；detection 补 reasoning
+- backend/app/extract/captions_anim.py：verify_caption_anim + _fallback 加 anchor_frame_url 形参，事件携带 frame_url + bbox_norm
+- backend/app/extract/masks.py：完全重写 — CV 三帧多数决主路径 + VLM 兜底，CV 候选事件 + 最终事件全带 frame_url
+- backend/app/understand/vision.py：events[0].ir_value 修正为 result.function；events[0].bbox_norm 挂 caption bbox
+- backend/app/api/lab.py：_run_captions_anim 解析 anchor_frame_url 并透传
+- backend/app/llm/prompts/1a_captions.md：标题改「画面字幕」+ 加边界声明段
+- docs/003ISSUES.md：ISS-008 [已解决]
+
+### 关联
+-> ISS-008
+
+---
+
+## [2026-06-08-3] refactor(phase1a): introduce Phase1AReport IR + Phase1AContext, fix prompt escape and slot[0] hardcoding
+
+### 改动
+- 新增 `Phase1AReport` IR 聚合 1A 全部识别结果（scenes / captions / stickers / zoom_directions / zoom_curves / transitions / masks / color / audio），`IRTarget.ir_type` Literal 扩 `"Phase1AReport"`；11 个子能力 VisionEvent 的 ir_target 全部从假 TemplateIR 切到这棵树
+- 新增 `Phase1AContext(sample_id, normalized_path, task_id)` lazy 缓存 scenes / frames / client；子能力签名统一收口为 `detect_X(ctx, *, parent_event_id=None)`；lab runner 简化到 `await sub.runner(ctx)`
+- 修 prompt 模板：7 个 `1a_*.md` 把 `{{` `}}` 改裸 `{` `}`，调用点统一走 `load_prompt`（无 substitution 时不该走 `str.format`）
+- 修 LLM 客户端：`_RETRY_DELAYS = (0.5, 2.0)` 删死代码 6.0，循环改 `len(delays)+1` 次尝试让所有 delay 生效；`_attach_frames_anthropic` 聚合缺失帧后 `raise ValueError` 走 retry/fallback；`chat_vision` 调用方传 `ir_target_template=None`，调用级事件不再覆写 IR 根字段
+- 修硬编码：`captions_anim.verify_caption_anim` / `understand.classify_caption_function` 加 `caption_idx`、`stickers.refine_sticker_bbox` 加 `sticker_idx`，索引到 `Phase1AReport.captions[N]` / `.stickers[N]`
+- 改 phase2 函数命名：`_refine_with_histogram` → `_color_histogram_refine`；`_classify_with_optical_flow` → `_decide_anim_from_flow`（避开 CI 误报）
+- 扩 CI 守卫：`scripts/check_parent_event_id.py` 在原 endswith 基础上加 startswith `refine_` / `phase2_` / `classify_`，覆盖 `refine_sticker_bbox` / `classify_caption_function` 等命名
+- 改 prompt 索引语义：captions / stickers 的 user prompt 明确 `frames_appeared` 用 0-indexed 整数对应时间戳数组的下标
+- 加 mock-level integration tests：9 条覆盖 11 子能力的事件结构 + Phase1AReport ir_target + parent_event_id 链路 + schema round-trip
+- 同步前端：`IRTargetType` 加 `Phase1AReport`，`WorkbenchIRPane` 标题按最近事件 `ir_target.ir_type` 动态切换
+- 同步文档：`001ARCHITECTURE.md` 加 D17 / D18 并更新 D15 / D16，`002STRUCTURE.md` 同步新文件
+
+### 涉及文件
+- backend/app/ir/phase1a_report.py：新建 — Phase1AReport / Phase1AScene / Phase1ACaptionEvent / Phase1AStickerDetection / Phase1AMaskParams / Phase1AColorReport
+- backend/app/ir/{__init__,export,vision_event}.py：注册 Phase1AReport，IRTarget.ir_type Literal 扩到 4 个
+- backend/app/extract/context.py：新建 — Phase1AContext lazy scenes / frames / client(stage)
+- backend/app/extract/{scenes,captions,captions_anim,stickers,motion,transitions,masks,color,audio}.py：重写 — 签名 `detect_X(ctx, *, parent_event_id)` + ir_target 切 Phase1AReport
+- backend/app/understand/vision.py：重写 — `classify_caption_function` 加 `caption_idx`，写 `Phase1AReport.captions[idx].function`
+- backend/app/llm/client.py：_RETRY_DELAYS 改 (0.5, 2.0)，_invoke 循环 attempts=len+1，_attach_frames_anthropic 缺帧 raise
+- backend/app/llm/prompts/1a_*.md × 7：{{ }} → { }，captions/stickers prompt 加 0-indexed 声明
+- backend/app/api/lab.py：runner 签名收口为 `(ctx) → None`，REGISTRY 不变
+- scripts/check_parent_event_id.py：endswith + startswith 双匹配 phase2 命名
+- backend/tests/unit/test_extract_subcaps.py：适配新签名，用 seeded Phase1AContext 喂空 cache
+- backend/tests/integration/__init__.py、backend/tests/integration/test_subcap_shapes.py：新建 — mock-level integration tests
+- frontend/src/types/workbench.ts：IRTargetType 加 Phase1AReport
+- frontend/src/components/workbench/WorkbenchIRPane.tsx：标题按最近事件 ir_type 动态显示
+- docs/001ARCHITECTURE.md：加 D17（Phase1AReport）/ D18（Phase1AContext），D15 / D16 同步签名变化
+- docs/002STRUCTURE.md：同步 phase1a_report.py / context.py / integration/ 入树
+- docs/003ISSUES.md：ISS-007 [已解决]
+
+### 关联
+-> ISS-007
+
+---
+
 ## [2026-06-08-2] feat(phase1a): visual understanding subcapabilities + real LLM clients + lab
 
 Phase 1A 整体交付：把 Phase 0.5 的占位 `chat_vision` / `chat_text` 替换为真实 OpenAI-compatible + Anthropic 双适配器，加 11 个独立可调用的视觉理解子能力（切点 / 字幕 / 字幕动画 / 贴纸 / 缩放方向 / 缩放曲线 / 转场 / 蒙版 / 调色 / BGM / 字幕功能），后端开 SubcapabilityLab API，前端开 `/lab` 单点验证页，CI 加 3 条 grep 守卫。子能力都遵循「按需签名 + STAGE 模块常量 + 缺依赖必发 severity=warning 事件不阻塞 pipeline」的统一契约。本条目反映最终落地状态，含二次核查中并入的全部修复。

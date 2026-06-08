@@ -59,10 +59,22 @@ export const WorkbenchIRPane: React.FC = () => {
       : lastEvent.ir_target.path
     : null;
 
+  // Pick the IR-type label from the most recent event so 1A subcap runs
+  // show "Phase1AReport" while 1B/2 runs show "TemplateIR / ProjectIR".
+  // Multiple ir_types in a single task are still rendered into one snapshot
+  // tree (their top-level keys don't collide in practice).
+  const irTypeLabel = React.useMemo(() => {
+    for (let i = events.length - 1; i >= 0; i -= 1) {
+      const t = events[i]?.ir_target?.ir_type;
+      if (t) return t;
+    }
+    return "TemplateIR / ProjectIR";
+  }, [events]);
+
   const root = React.useMemo<IrNode[]>(() => {
-    const top = flatten(ir, "", "TemplateIR / ProjectIR");
+    const top = flatten(ir, "", irTypeLabel);
     return top.children && top.children.length > 0 ? top.children : [];
-  }, [ir]);
+  }, [ir, irTypeLabel]);
 
   // react-arborist takes numeric width/height — measure the container so
   // the tree fills its parent regardless of viewport size. The container
@@ -96,7 +108,9 @@ export const WorkbenchIRPane: React.FC = () => {
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-border px-4 py-3">
-        <h2 className="font-serif text-lg text-primary">VLM 决定写入 IR</h2>
+        <h2 className="font-serif text-lg text-primary">
+          AI 写入 IR · <span className="font-mono text-sm text-secondary">{irTypeLabel}</span>
+        </h2>
         <p className="text-tertiary text-xs">点击节点展开；最近写入字段 800ms 高亮</p>
       </div>
       <div ref={containerRef} className="flex-1 overflow-hidden">

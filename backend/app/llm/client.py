@@ -99,9 +99,13 @@ class LLMClient(ABC):
 # Helpers
 # ---------------------------------------------------------------------------
 
-# Retry plan for the inner provider call. Backoff is intentionally short so a
-# fallback path lands quickly; real production tuning belongs to the caller.
-_RETRY_DELAYS = (0.5, 2.0, 6.0)
+# Retry plan for the inner provider call. The loop runs ``len + 1`` attempts
+# total — sleeps between attempts, and the final attempt's failure goes
+# straight to fallback (so the trailing element is the *last* delay before
+# the final attempt, not a dead value). 0.5 + 2.0 = 2.5s upper bound on a
+# fully-failing retry chain — short enough that the workbench shows the
+# fallback warning quickly.
+_RETRY_DELAYS = (0.5, 2.0)
 
 
 def _is_retryable(exc: BaseException) -> bool:
@@ -249,14 +253,21 @@ def _attach_frames_anthropic(
 
     Anthropic's image blocks need ``base64`` source; URL ingestion isn't
     universal across all model versions. We require local file presence.
+
+    Raises ``ValueError`` when any expected frame is missing — silently
+    dropping frames means the model answers without seeing them, returning
+    plausible-looking hallucinations with full confidence. Better to surface
+    the missing frame as a retryable error so ``_invoke`` either retries or
+    falls back with a visible warning event.
     """
     if not frames:
         return messages
     parts: list[dict[str, Any]] = []
+    missing: list[str] = []
     for f in frames:
         local, _ = _resolve_frame(f)
         if local is None or not local.exists():
-            log.warning("anthropic.frame_missing", path=f.url)
+            missing.append(f.url)
             continue
         suffix = local.suffix.lower()
         media_type = (
@@ -269,6 +280,10 @@ def _attach_frames_anthropic(
                 "source": {"type": "base64", "media_type": media_type, "data": data},
             }
         )
+    if missing:
+        # Treat missing frames as a value error so _invoke triggers fallback
+        # instead of dispatching a textless prompt to a vision model.
+        raise ValueError(f"anthropic frames missing on disk: {missing!r}")
     out: list[dict[str, Any]] = []
     user_done = False
     for m in messages:
@@ -432,7 +447,10 @@ class _RealClientBase(LLMClient):
                 reason="missing API credentials",
             )
         last_err: str | None = None
-        for attempt, delay in enumerate(_RETRY_DELAYS):
+        # Number of attempts = len(delays) + 1: sleep `delay[i]` between
+        # attempts i and i+1, then the final attempt's failure → fallback.
+        attempts = len(_RETRY_DELAYS) + 1
+        for attempt in range(attempts):
             try:
                 if kind == "vision":
                     text, tokens, model_used = await self._call_vision_provider(
@@ -475,8 +493,8 @@ class _RealClientBase(LLMClient):
                 if not retryable:
                     # 4xx / unknown failures won't fix on retry; bail to fallback.
                     break
-                if attempt < len(_RETRY_DELAYS) - 1:
-                    await asyncio.sleep(delay)
+                if attempt < len(_RETRY_DELAYS):
+                    await asyncio.sleep(_RETRY_DELAYS[attempt])
         return await self._fallback(
             source=source,
             stage=stage,

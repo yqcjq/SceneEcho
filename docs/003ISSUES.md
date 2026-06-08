@@ -164,3 +164,132 @@ renderer 把 IR 里的 `user_material` 相对路径拼成 `{BACKEND_URL}/data/<r
 -> backend/app/extract/audio.py:_demucs_separate
 -> docs/001ARCHITECTURE.md（约定 D10）
 
+---
+
+## [ISS-007] Phase 1A 二核：prompt 转义错位 + IR 写入伪装 TemplateIR + lab runner 重复样板
+
+**状态**：[已解决]
+**优先级**：[P0 致命]
+**类型**：[功能异常]
+**发现日期**：2026-06-08
+**解决日期**：2026-06-08
+
+**现象**：
+Phase 1A 第一版交付（[2026-06-08-2]）二次核查发现以下问题，按 LLM 调用链 / IR 写入 / 子能力编排三类聚合：
+
+1. **prompt 模板字面 `{{` `}}`**：`backend/app/llm/prompts/1a_*.md` 共 7 个文件用 `{{` `}}` 双花括号转义（`str.format` 风格），但所有调用点统一走 `load_prompt(name)`（裸读），LLM 收到的 system prompt 含字面 `{{` `}}` 字符。
+2. **`_RETRY_DELAYS = (0.5, 2.0, 6.0)` 死代码**：`backend/app/llm/client.py::_invoke` 循环只在 `attempt < len(_RETRY_DELAYS) - 1` 时 `await asyncio.sleep(delay)`，最后一个 6.0 永远不执行。
+3. **`_attach_frames_anthropic` 缺帧静默**：本地文件不存在时 `log.warning + continue`，调用照常发出（无图）。
+4. **VLM `frames_appeared` 索引语义模糊**：`captions.py` / `stickers.py` 的 user prompt 没声明 0-indexed 还是 1-indexed，VLM 给 1-indexed 时 `limited[i]` 越界被 `_merge_captions` 丢弃。
+5. **调用级事件硬塞 `ir_target=IRTarget(path="skeleton")`**：`captions.py:142,153` 与 `stickers.py:89` 把整个 `parsed.model_dump()` 写入 `TemplateIR.skeleton`（应为 `list[Slot]`），前端 lodash.set 直接覆盖根字段类型。
+6. **硬编码 `skeleton[0]` 路径**：`captions_anim.py:75` 与 `stickers.py:225` 注释「caller rebinds to actual slot index」但 `lab.py` runner 没 rebind，多 caption / 多 sticker 时全部互相覆盖。
+7. **`_refine_with_histogram` 命名漏 CI 守卫**：`scripts/check_parent_event_id.py` 用 `endswith("_refine")` 匹配，函数名以 `_histogram` 结尾被漏掉；同期 `classify_caption_function` 等"前缀 classify_"命名也不在匹配范围。
+8. **PLAN 与实现的宏观矛盾**：PLAN.md 1361 行声明"本阶段不产出 TemplateIR"，但 11 个子能力 VisionEvent 全部用 `ir_type="TemplateIR"` + `path="skeleton[N].xxx"` / `"global_style.audio"`，前端 lodash.set 把它们拼成"半成品 TemplateIR"显示在右栏。
+9. **`lab.py` 7 个 `_run_*` 重复**：每个 runner 90% 代码相同（`detect_scenes → sample_frames → 该子能力`），多 fixture × 多 subcap 时 detect/sample 反复执行。
+
+**后果**：
+- 1～4 让真实 VLM 路径几乎全部回退到 stub（CI 单测因 `no_credentials` fixture 强制 fallback 路径，拦不到）；接入真实 key 后整个 1A 视觉子能力实际产出与人工标注无关的默认 schema。
+- 5～7 让前端 IR 树展示错位：调用级事件覆盖 `skeleton` 根字段，多 caption 全打到 slot 0 互相覆盖，CI 漏报让"必传 parent_event_id"约束在 `_refine_with_histogram` 与 `classify_caption_function` 等命名上失效。
+- 8 在工作台右栏渲染了一棵假 `TemplateIR`，1B 集成期 `skeleton.py` 试图读这棵树写真 TemplateIR 时类型不匹配。
+- 9 让 11 个子能力跑同一 fixture 时 detect/sample 跑 11 次，浪费时间且 lab runner 无法被未来 1B pipeline 复用。
+
+**初步判断**：
+已确认。第一性原理：1A 阶段输出的本就是"识别报告"而非 TemplateIR；prompt 模板转义需统一为单一规则（裸 `{` `}` 或全量走 `render_prompt`）；子能力编排需要共享上下文对象避免每个 runner 重复样板。
+
+**方案讨论**（已确认）：
+- prompt 转义：选裸 `{` `}`（无 substitution 时不该走 `str.format`），保留 `render_prompt` 供未来动态拼装。
+- IR 写入：新增 `Phase1AReport`（`backend/app/ir/phase1a_report.py`），所有 1A 子能力的 ir_target 切到这棵树；`IRTarget.ir_type` Literal 加 `"Phase1AReport"`；前端 IR 面板按最近事件 ir_type 动态显示标题。
+- 子能力编排：新增 `Phase1AContext`（`backend/app/extract/context.py`）lazy 缓存 scenes/frames/client；子能力签名收口为 `detect_X(ctx, *, parent_event_id=None)`；lab runner 简化到 `await sub.runner(ctx)`。
+- integration tests：本期只补 mock-level（`tests/integration/test_subcap_shapes.py` 用 seeded ctx 跑全部 subcap 断言事件结构 + Phase1AReport schema round-trip）；F1 / IoU 指标基线留待用户准备完整 fixtures 后续补到 `test_subcap_baselines.py`。
+
+**关联**：
+-> backend/app/llm/client.py（_RETRY_DELAYS / _attach_frames_anthropic / _invoke 循环）
+-> backend/app/llm/prompts/1a_*.md × 7（{{ }} → { }）
+-> backend/app/ir/phase1a_report.py（新增）
+-> backend/app/ir/vision_event.py（IRTarget.ir_type Literal 扩 Phase1AReport）
+-> backend/app/extract/context.py（新增 Phase1AContext）
+-> backend/app/extract/{scenes,captions,captions_anim,stickers,motion,transitions,masks,color,audio}.py
+-> backend/app/understand/vision.py
+-> backend/app/api/lab.py
+-> scripts/check_parent_event_id.py（前后缀双匹配）
+-> backend/tests/integration/test_subcap_shapes.py（新增）
+-> frontend/src/types/workbench.ts、frontend/src/components/workbench/WorkbenchIRPane.tsx
+-> docs/001ARCHITECTURE.md（D17 / D18）
+-> docs/002STRUCTURE.md
+-> 004CHANGELOG.md [2026-06-08-3]
+
+**解决方案**：
+新增 `Phase1AReport` IR + `Phase1AContext` 共享上下文，11 个子能力签名统一 `(ctx, *, parent_event_id)`，所有 ir_target 切到 Phase1AReport（列表型 op=append、字典型 path=`zoom_directions.<idx>`、单值型整对象 / 子字段写入）；prompt 模板 `{{` `}}` → `{` `}`；`_RETRY_DELAYS` 改 `(0.5, 2.0)` 并把循环改为 `len+1` 次尝试；`_attach_frames_anthropic` 缺帧 `raise ValueError` 走 retry/fallback 链；`captions_anim` / `caption_function` 加 `caption_idx` 形参索引到 `Phase1AReport.captions[N]`；`stickers refine` 加 `sticker_idx`；`_refine_with_histogram` 改名 `_color_histogram_refine`；`check_parent_event_id.py` 加前缀匹配 `refine_` / `phase2_` / `classify_`；前端 `IRTargetType` 加 `Phase1AReport`、`WorkbenchIRPane` 标题动态显示 ir_type；新增 9 条 mock-level integration tests 覆盖 11 子能力的事件结构 + ir_target + schema 合法性。
+
+---
+
+## [ISS-008] Phase 1A 工作台可视化盲点：实体事件缺 frame_url + IR 信息缺 reasoning + mask 单帧 VLM 不稳
+
+**状态**：[已解决]
+**优先级**：[P1 严重]
+**类型**：[功能异常]
+**发现日期**：2026-06-08
+**解决日期**：2026-06-08
+
+**现象**：
+用户在 lab UI 用真实 LLM key 跑 captions / stickers / masks 子能力时反馈：
+
+1. **左栏既看不到帧也看不到框**：`captions.detect_captions` / `stickers.detect_stickers` 等子能力发出的实体级 `VisionEvent` 只填了 `bbox_norm`，**没填 `frame_url`**；前端 `WorkbenchVisionPane` 在 `event.bbox_norm && hasFrame && frameSize` 三个条件齐全时才渲染 `BboxOverlay`，缺 frame_url 直接退到「no frame」占位，bbox 无处可叠 → 用户感受到「点开事件什么都看不见」。grep `extract/*.py` 全文 `frame_url=` 0 命中，确认问题。
+2. **右栏 IR 信息密度比 [2026-06-08-2] 上一版变浅**：[2026-06-08-3] 二核重构后调用级事件 `ir_target=None`、实体级事件写精简过的 `Phase1ACaptionEvent`，砍掉了 `reasoning` 与 raw VLM 字段（`color_hex` / `anim_in_type` / `layout`），导致用户在右栏只看到「采集了几条字幕」但没有具体内容。
+3. **画面字幕 vs 语音字幕命名歧义**：1A.captions prompt 标题用「字幕」二字，没声明只识别画面里烧入的视觉字幕；用户搞不清识别的是语音转写还是画面文字。
+4. **mask 检测不稳定**：`detect_masks` 每个 scene 只取**中点一帧**送 VLM，蒙版只在 scene 部分时间出现 / 中点恰好没蒙版就漏报；用户反馈贴纸 / 切点的稳定性远高于 mask。
+
+**后果**：
+- 1 让 Phase 0.5 阶段能用的 bbox 可视化在 Phase 1A 真实跑时完全失效，工作台变成「数字面板 + 文字日志」而不是「AI 看到什么」的可视化。
+- 2 让 Phase 0.5 → 1A 的体验回退（用户原话「右栏会非常模糊笼统，没有具体内容」），降低人工核验信心。
+- 3 在产品定义层让用户怀疑功能定位（"它到底在识别啥"）；接 ASR 之后会进一步混淆。
+- 4 让 mask 在 fixture 测试中表现不可预测，明明蒙版存在却报无 — 而几何 mask 本身适合 CV（HoughCircles / Canny / HoughLines）确定性检测，不依赖 VLM 截帧运气。
+
+**初步判断**：
+已确认。第一性原理：实体事件携带「entity 出现的那一帧 url」是 BboxOverlay 工作的前提；Phase1AReport 作为「识别报告」IR 应保留 VLM 的 reasoning + raw 字段供审计；几何 mask 在视觉特征足够清晰时 CV 比 VLM 更适合（确定性 + 多帧稳定）。
+
+**关联**：
+-> backend/app/extract/captions.py（entity_ev 补 frame_url + Phase1ACaptionEvent 补 reasoning / color_hex_raw / anim_in_type_raw / layout_raw）
+-> backend/app/extract/stickers.py（entity / refine ev 补 frame_url + detection 补 reasoning）
+-> backend/app/extract/captions_anim.py（verify_caption_anim 加 anchor_frame_url 形参）
+-> backend/app/extract/masks.py（重写 — CV 主路径多帧投票 + VLM 兜底）
+-> backend/app/understand/vision.py（classify_caption_function 给事件挂 caption.bbox + 修正 ir_value）
+-> backend/app/api/lab.py（_run_captions_anim 解析 anchor_frame_url 透传）
+-> backend/app/llm/prompts/1a_captions.md（标题 + 边界声明改「画面字幕」）
+-> backend/app/ir/phase1a_report.py（Phase1ACaptionEvent / Phase1AStickerDetection 补 reasoning + raw 字段 + docstring 声明画面字幕）
+-> 004CHANGELOG.md [2026-06-08-4]
+
+**解决方案**：
+- 实体级事件全部补 `frame_url`，源帧选 entity `frames_appeared` 列表的第一帧，从 `Phase1AContext.frames()` 缓存里拿 `rel_path` 拼 `/data/<rel>`。
+- `Phase1ACaptionEvent` 补 `reasoning` / `color_hex_raw` / `anim_in_type_raw` / `layout_raw` 字段；`Phase1AStickerDetection` 补 `reasoning` 字段；entity_ev 写 ir_value 时一并带上。
+- 1a_captions.md 标题改「画面字幕样式与位置识别」，开头加一段强调「不处理语音」「不识别原文」「只看画面里烧入的视觉文字」；`Phase1ACaptionEvent` docstring 同步声明。
+- `detect_masks` 重写：scene 内首/中/末三帧 OpenCV `HoughCircles` / Canny 矩形 / `HoughLinesP` 三类检测多数决；`majority_vote` 至少 quorum=ceil(n/2) 同 kind 才确认；CV 全 False 时 VLM 兜底（一次性看三帧）；CV 候选 + 最终判定都发事件带 frame_url。
+
+---
+
+## [ISS-009] Phase 1A 工作台首屏截帧需刷新才显示
+
+**状态**：[已解决]
+**优先级**：[P2 一般]
+**类型**：[体验]
+**发现日期**：2026-06-08
+**解决日期**：2026-06-08
+
+**现象**：
+ISS-008 修复后实体事件已带 frame_url 与 bbox，但首次进入 `/workbench/{taskId}` 时左栏长时间空白（数秒），手动刷新一次后立即显示。复现路径：lab UI 跑完一个 subcap → 跳转 workbench → 等。
+
+**后果**：
+人工核验体验"识别完成但要等很久 / 刷新一次才能看图"，影响快速迭代。
+
+**初步判断**：
+已确认。SSE replay 在订阅瞬间一次性涌入历史事件，`autoFollow=true` 让每条新事件都成为 `selectedEventId` → `WorkbenchVisionPane` 的 `<img src={frame_url}>` 在事件涌入期间反复改 src → 浏览器对前一个 src 的 in-flight HTTP 请求持续被取消和重发，只有"最后一条事件"对应的 img 真正完成加载。刷新页面时事件已经在 jsonl 里，replay 是同步快速跑完，最后一次 src 落定后 img 加载顺利完成 → 用户感受"刷新就有了"。
+
+**关联**：
+-> frontend/src/state/workbench.ts（appendEvent 时 preloadFrame 后台拉图入 HTTP cache）
+-> frontend/src/components/workbench/WorkbenchVisionPane.tsx（loading / error 占位 + decoding=async + loading=eager）
+-> 004CHANGELOG.md [2026-06-08-5]
+
+**解决方案**：
+- store `appendEvent` 时即调 `new Image(); img.decoding="async"; img.src = event.frame_url`，每条事件一进 store 就在后台拉图入浏览器 HTTP cache；后续 `<img>` 元素的 src 任意切换都从 cache 即时出，不再受 SSE 涌入抖动影响。
+- `<img>` 加 `decoding="async"` + `loading="eager"`，解码不阻塞主线程。
+- `WorkbenchVisionPane` 在 `hasFrame && !frameSize && !frameError` 时显示 "loading frame…" 脉冲占位（事件 frame_ts 同显），加载失败时显示明确错误 + url 便于排查。

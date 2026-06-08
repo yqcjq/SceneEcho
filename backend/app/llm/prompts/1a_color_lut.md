@@ -5,12 +5,12 @@
 ## 输出 JSON Schema
 
 ```json
-{{
+{
   "tags": ["暖色" | "冷色" | "高饱和" | "低饱和" | "电影感" | "平淡"],
   "dominant_lut_id": "<LUT 库里的 id>",
   "confidence": 0.0-1.0,
   "reasoning": "≤200 字中文解释"
-}}
+}
 ```
 
 ## tags 多选规则

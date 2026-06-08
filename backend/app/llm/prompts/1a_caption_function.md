@@ -5,11 +5,11 @@
 ## 输出 JSON Schema
 
 ```json
-{{
+{
   "function": "标题" | "强调" | "卖点" | "CTA" | "regular" | "过渡",
   "confidence": 0.0-1.0,
   "reasoning": "≤200 字中文解释"
-}}
+}
 ```
 
 ## 判定规则

@@ -2,7 +2,8 @@
 
 The temporal floor that VLM cannot reach: ±0.04s precision via
 ``ContentDetector(threshold=27)``. One ``VisionEvent`` per detected cut so
-the workbench shows the timeline points lining up.
+the workbench shows the timeline points lining up. Each scene appends to
+``Phase1AReport.scenes``.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from app.event_bus import get_event_bus
+from app.ir.phase1a_report import Phase1AScene
 from app.ir.vision_event import IRTarget, VisionEvent
 from app.logging import get_logger
 
@@ -20,9 +22,19 @@ log = get_logger(__name__)
 
 @dataclass
 class Scene:
+    """In-process struct used by Phase1AContext + downstream subcaps.
+
+    Mirrors :class:`app.ir.phase1a_report.Phase1AScene` (which is pydantic
+    + JSON-Schema-exported). The dataclass version stays in ``extract`` so
+    sub-modules don't need to depend on the IR layer for a 3-field record.
+    """
+
     idx: int
     start_sec: float
     end_sec: float
+
+    def to_report_entry(self) -> Phase1AScene:
+        return Phase1AScene(idx=self.idx, start_sec=self.start_sec, end_sec=self.end_sec)
 
 
 async def detect_scenes(
@@ -68,22 +80,15 @@ async def detect_scenes(
         for i, (start, end) in enumerate(boundaries):
             scenes.append(Scene(idx=i, start_sec=start.get_seconds(), end_sec=end.get_seconds()))
     for s in scenes:
-        # Only emit an IR-write event when the scene length is positive.
-        # A zero-or-negative span (ffprobe failed, or detector glitch on a
-        # 0-frame source) would otherwise produce {min: 0.5, nominal: 0,
-        # max: 0} — a duration with min > max, which downstream slot
-        # constraints reject. Surface the boundary as an info event but
-        # leave Slot.duration unwritten for 1B's skeleton builder to fill.
-        length = s.end_sec - s.start_sec
+        # Append each Phase1AScene to Phase1AReport.scenes. Empty-length
+        # scenes still emit the boundary event but skip the IR write so the
+        # report doesn't carry zero-span entries that downstream slot
+        # constraints would reject.
         ir_target: IRTarget | None = None
         ir_value: dict | None = None
-        if length > 0:
-            ir_target = IRTarget(ir_type="TemplateIR", path=f"skeleton[{s.idx}].duration")
-            ir_value = {
-                "min": max(0.5, length * 0.7),
-                "nominal": length,
-                "max": length * 1.5,
-            }
+        if s.end_sec - s.start_sec > 0:
+            ir_target = IRTarget(ir_type="Phase1AReport", path="scenes", op="append")
+            ir_value = s.to_report_entry().model_dump(mode="json")
         ev = VisionEvent(
             task_id=task_id,
             source="cv",

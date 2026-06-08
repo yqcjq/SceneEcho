@@ -3,15 +3,15 @@
 Each meaningful audio judgement (has_bgm / is_instrumental / bpm /
 mood_tag) emits its own VisionEvent so the workbench shows the audio
 pipeline as a separate lane in the gantt view. Demucs and librosa are
-lazy-imported so the unit tests don't pay the model-download tax.
+lazy-imported so the unit tests don't pay the model-download tax. All
+events write into ``Phase1AReport.audio`` (sub-fields).
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-
 from app.config import get_settings
 from app.event_bus import get_event_bus
+from app.extract.context import Phase1AContext
 from app.ir.template import AudioStyle
 from app.ir.vision_event import IRTarget, VisionEvent
 from app.logging import get_logger
@@ -21,9 +21,8 @@ log = get_logger(__name__)
 
 
 async def extract_bgm(
-    normalized_path: Path,
+    ctx: Phase1AContext,
     *,
-    task_id: str,
     save_stem: bool = True,
     parent_event_id: str | None = None,
 ) -> tuple[AudioStyle, list[VisionEvent]]:
@@ -39,14 +38,14 @@ async def extract_bgm(
         import numpy as np  # type: ignore[import-not-found]
     except ImportError as e:
         log.warning("audio.dep_missing", error=str(e))
-        return await _fallback(task_id, parent_event_id, str(e))
+        return await _fallback(ctx.task_id, parent_event_id, str(e))
 
     sr = 22050
     try:
-        y, sr_loaded = librosa.load(str(normalized_path), sr=sr, mono=True)
+        y, sr_loaded = librosa.load(str(ctx.normalized_path), sr=sr, mono=True)
     except Exception as e:  # noqa: BLE001
         log.warning("audio.load_failed", error=str(e))
-        return await _fallback(task_id, parent_event_id, str(e))
+        return await _fallback(ctx.task_id, parent_event_id, str(e))
 
     # 1) Energy curve — per-second RMS (truncate to integer second count).
     rms_full = librosa.feature.rms(y=y).flatten()
@@ -66,13 +65,13 @@ async def extract_bgm(
     bgm_rel_path: str | None = None
     try:
         bgm_rel_path, has_bgm, is_instrumental = await _demucs_separate(
-            normalized_path, save_stem=save_stem
+            ctx, save_stem=save_stem
         )
     except Exception as e:  # noqa: BLE001
         log.warning("audio.demucs_failed", error=str(e))
 
     bgm_evt = VisionEvent(
-        task_id=task_id,
+        task_id=ctx.task_id,
         source="audio",
         stage=STAGE,
         semantic_label=f"BGM 有/无：{'有' if has_bgm else '无'}",
@@ -81,12 +80,12 @@ async def extract_bgm(
             "accompaniment RMS > 静音阈值视为有 BGM。"
         ),
         confidence=0.95,
-        ir_target=IRTarget(ir_type="TemplateIR", path="global_style.audio", field="has_bgm"),
+        ir_target=IRTarget(ir_type="Phase1AReport", path="audio", field="has_bgm"),
         ir_value=has_bgm,
         parent_event_id=parent_event_id,
         duration_ms=0,
     )
-    await bus.publish(task_id, bgm_evt)
+    await bus.publish(ctx.task_id, bgm_evt)
 
     # 3) BPM estimation.
     try:
@@ -97,24 +96,23 @@ async def extract_bgm(
         bpm = None
 
     bpm_evt = VisionEvent(
-        task_id=task_id,
+        task_id=ctx.task_id,
         source="audio",
         stage=STAGE,
         semantic_label=f"BPM：{bpm:.1f}" if bpm else "BPM：未检测",
         reasoning="librosa beat_track on mono mix.",
         confidence=0.85 if bpm else 0.3,
-        ir_target=IRTarget(ir_type="TemplateIR", path="global_style.audio", field="bpm"),
+        ir_target=IRTarget(ir_type="Phase1AReport", path="audio", field="bpm"),
         ir_value=bpm,
         parent_event_id=bgm_evt.event_id,
         duration_ms=0,
     )
-    await bus.publish(task_id, bpm_evt)
+    await bus.publish(ctx.task_id, bpm_evt)
 
-    # 4) Mood tag from BPM + energy heuristic. Replace with a real classifier
-    #    if PLAN evolves; for now, rules cover the reasonable demo space.
+    # 4) Mood tag from BPM + energy heuristic.
     mood_tag = _mood_from_features(bpm or 0.0, overall_energy)
     mood_evt = VisionEvent(
-        task_id=task_id,
+        task_id=ctx.task_id,
         source="audio",
         stage=STAGE,
         semantic_label=f"情绪标签：{mood_tag}",
@@ -122,12 +120,12 @@ async def extract_bgm(
             f"BPM {bpm or 0:.1f} + overall RMS {overall_energy:.4f} → 规则映射 {mood_tag}。"
         ),
         confidence=0.7,
-        ir_target=IRTarget(ir_type="TemplateIR", path="global_style.audio", field="mood_tag"),
+        ir_target=IRTarget(ir_type="Phase1AReport", path="audio", field="mood_tag"),
         ir_value=mood_tag,
         parent_event_id=bgm_evt.event_id,
         duration_ms=0,
     )
-    await bus.publish(task_id, mood_evt)
+    await bus.publish(ctx.task_id, mood_evt)
 
     style = AudioStyle(
         has_bgm=has_bgm,
@@ -144,7 +142,7 @@ async def extract_bgm(
 
 
 async def _demucs_separate(
-    normalized_path: Path, *, save_stem: bool
+    ctx: Phase1AContext, *, save_stem: bool
 ) -> tuple[str | None, bool, bool]:
     """Run Demucs and return (stem rel path, has_bgm, is_instrumental).
 
@@ -163,14 +161,13 @@ async def _demucs_separate(
     settings = get_settings()
     model = get_model("htdemucs")
     model.cpu().eval()
-    wav = load_track(normalized_path, model.audio_channels, model.samplerate)
+    wav = load_track(ctx.normalized_path, model.audio_channels, model.samplerate)
     ref = wav.mean(0)
     wav = (wav - ref.mean()) / ref.std()
     with torch.no_grad():
         sources = apply_model(model, wav[None], split=True, overlap=0.25, progress=False)[0]
     sources = sources * ref.std() + ref.mean()
 
-    # demucs source order: drums / bass / other / vocals.
     by_name = dict(zip(model.sources, sources, strict=False))
     vocals = by_name.get("vocals")
     accompaniment = sum(s for k, s in by_name.items() if k != "vocals")  # type: ignore[arg-type]
@@ -180,12 +177,11 @@ async def _demucs_separate(
     accomp_rms = float(accompaniment.pow(2).mean().sqrt().item())
     vocals_rms = float(vocals.pow(2).mean().sqrt().item())
     has_bgm = accomp_rms > 1e-3
-    is_instrumental = vocals_rms < accomp_rms * 0.10  # vocals quieter than 10% accompaniment
+    is_instrumental = vocals_rms < accomp_rms * 0.10
 
     rel: str | None = None
     if save_stem and has_bgm:
-        # Place stem next to source for the "original" BGM strategy.
-        out_dir = normalized_path.parent / "audio"
+        out_dir = ctx.normalized_path.parent / "audio"
         out_dir.mkdir(parents=True, exist_ok=True)
         out_path = out_dir / "bgm_stem.wav"
         save_audio(accompaniment, str(out_path), samplerate=model.samplerate)

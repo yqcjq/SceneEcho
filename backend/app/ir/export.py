@@ -12,6 +12,14 @@ from pydantic.json_schema import GenerateJsonSchema, models_json_schema
 
 from app.ir.ledger import TranscriptLedger, Unit
 from app.ir.patch import Patch
+from app.ir.phase1a_report import (
+    Phase1ACaptionEvent,
+    Phase1AColorReport,
+    Phase1AMaskParams,
+    Phase1AReport,
+    Phase1AScene,
+    Phase1AStickerDetection,
+)
 from app.ir.project import Caption, Gap, PlacedSegment, ProjectIR, Section
 from app.ir.template import (
     AudioStyle,
@@ -48,6 +56,13 @@ TOP_LEVEL_MODELS = [
     ProjectIR,
     # patch
     Patch,
+    # phase 1A report (1A 阶段识别结果聚合，1B skeleton.py 消费)
+    Phase1AScene,
+    Phase1ACaptionEvent,
+    Phase1AStickerDetection,
+    Phase1AMaskParams,
+    Phase1AColorReport,
+    Phase1AReport,
     # workbench events
     IRTarget,
     VisionEvent,

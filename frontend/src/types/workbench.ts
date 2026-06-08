@@ -16,7 +16,11 @@ export type VisionEventSource =
   | "text_llm"
   | "system";
 
-export type IRTargetType = "TemplateIR" | "ProjectIR" | "TranscriptLedger";
+export type IRTargetType =
+  | "TemplateIR"
+  | "ProjectIR"
+  | "TranscriptLedger"
+  | "Phase1AReport";
 export type IRTargetOp = "set" | "append" | "remove";
 
 export interface IRTarget {
