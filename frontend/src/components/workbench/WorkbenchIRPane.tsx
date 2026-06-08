@@ -65,15 +65,26 @@ export const WorkbenchIRPane: React.FC = () => {
   }, [ir]);
 
   // react-arborist takes numeric width/height — measure the container so
-  // the tree fills its parent regardless of viewport size.
+  // the tree fills its parent regardless of viewport size. The container
+  // div is always mounted (occupied by either the placeholder or the Tree)
+  // so the ref attaches on first render and the observer is reliably set
+  // up; the previous "early-return placeholder" branch hid the ref behind
+  // a conditional, leaving the observer permanently unwired and the Tree
+  // stuck at its default width.
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const [size, setSize] = React.useState<{ w: number; h: number }>({
     w: 360,
     h: 600,
   });
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     const el = containerRef.current;
     if (!el) return;
+    // Synchronous initial measurement before paint avoids one frame of the
+    // 360×600 default flashing before ResizeObserver fires.
+    const r0 = el.getBoundingClientRect();
+    if (r0.width > 0 && r0.height > 0) {
+      setSize({ w: r0.width, h: r0.height });
+    }
     const observer = new ResizeObserver((entries) => {
       const r = entries[0]?.contentRect;
       if (r) setSize({ w: Math.max(80, r.width), h: Math.max(80, r.height) });
@@ -82,17 +93,6 @@ export const WorkbenchIRPane: React.FC = () => {
     return () => observer.disconnect();
   }, []);
 
-  if (root.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center bg-subtle text-secondary">
-        <div className="text-center">
-          <p className="font-serif text-base text-primary">VLM 决定写入 IR</p>
-          <p className="mt-2 text-sm">事件流尚未写入字段…</p>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-border px-4 py-3">
@@ -100,42 +100,52 @@ export const WorkbenchIRPane: React.FC = () => {
         <p className="text-tertiary text-xs">点击节点展开；最近写入字段 800ms 高亮</p>
       </div>
       <div ref={containerRef} className="flex-1 overflow-hidden">
-        <Tree<IrNode>
-          data={root}
-          openByDefault
-          rowHeight={26}
-          width={size.w}
-          height={size.h}
-          padding={8}
-          indent={18}
-        >
-          {({ node, style }) => {
-            const isFlash = flashPath !== null && node.data.id === flashPath;
-            return (
-              <div
-                style={style}
-                className={`flex items-center gap-2 px-2 text-sm ${isFlash ? "se-ir-flash rounded-sm" : ""}`}
-                onClick={() => node.toggle()}
-              >
-                {!node.data.isLeaf ? (
-                  <span className="text-tertiary text-xs w-3">
-                    {node.isOpen ? "▾" : "▸"}
+        {root.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-secondary">
+            <p className="text-sm">事件流尚未写入字段…</p>
+          </div>
+        ) : (
+          <Tree<IrNode>
+            data={root}
+            openByDefault
+            rowHeight={26}
+            width={size.w}
+            height={size.h}
+            padding={8}
+            indent={18}
+          >
+            {({ node, style }) => {
+              const isFlash = flashPath !== null && node.data.id === flashPath;
+              return (
+                <div
+                  style={style}
+                  className={`flex items-center gap-2 px-2 text-sm ${isFlash ? "se-ir-flash rounded-sm" : ""}`}
+                  onClick={() => node.toggle()}
+                >
+                  {!node.data.isLeaf ? (
+                    <span className="text-tertiary text-xs w-3 shrink-0">
+                      {node.isOpen ? "▾" : "▸"}
+                    </span>
+                  ) : (
+                    <span className="w-3 shrink-0" />
+                  )}
+                  <span className="font-mono text-xs text-secondary shrink-0">
+                    {node.data.name}
                   </span>
-                ) : (
-                  <span className="w-3" />
-                )}
-                <span className="font-mono text-xs text-secondary">
-                  {node.data.name}
-                </span>
-                {node.data.preview ? (
-                  <span className="ml-2 truncate text-xs text-primary">
-                    {node.data.preview}
-                  </span>
-                ) : null}
-              </div>
-            );
-          }}
-        </Tree>
+                  {node.data.preview ? (
+                    // min-w-0 + flex-1 lets `truncate` actually clip — without
+                    // min-w-0 a flex item's min-width is `auto` (= content
+                    // width), so the row grows past the tree's rendered width
+                    // and react-arborist falls back to horizontal scroll.
+                    <span className="ml-2 min-w-0 flex-1 truncate text-xs text-primary">
+                      {node.data.preview}
+                    </span>
+                  ) : null}
+                </div>
+              );
+            }}
+          </Tree>
+        )}
       </div>
     </div>
   );

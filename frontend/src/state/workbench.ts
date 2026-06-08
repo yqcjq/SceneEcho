@@ -133,19 +133,3 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       autoFollow: true,
     }),
 }));
-
-/** Filter selector: stage prefix + time-range against frame_ts (if present). */
-export function selectVisibleEvents(state: WorkbenchState): VisionEvent[] {
-  return state.events.filter((e) => {
-    if (state.filterStage && !e.stage.startsWith(state.filterStage)) return false;
-    if (state.timeRange && e.frame_ts !== null && e.frame_ts !== undefined) {
-      const [lo, hi] = state.timeRange;
-      if (e.frame_ts < lo || e.frame_ts > hi) return false;
-    }
-    return true;
-  });
-}
-
-export function selectChildren(state: WorkbenchState, parentId: string): string[] {
-  return state.childIndex.get(parentId) ?? [];
-}

@@ -1,9 +1,6 @@
 import React from "react";
 import { useSearchParams } from "react-router-dom";
-import {
-  selectVisibleEvents,
-  useWorkbenchStore,
-} from "../../state/workbench.js";
+import { useWorkbenchStore } from "../../state/workbench.js";
 import type { VisionEvent } from "../../types/workbench.js";
 import { EventBadge } from "./EventBadge.js";
 
@@ -84,14 +81,37 @@ const EventRow: React.FC<RowProps> = ({
 };
 
 export const WorkbenchEventStream: React.FC = () => {
-  const events = useWorkbenchStore(selectVisibleEvents);
+  // Pull only primitive references from the store. Derived collections live
+  // in component-local useMemo so each subscription returns a stable
+  // reference — Zustand's getSnapshot must not return a fresh array every
+  // call (that triggers React 18's "Maximum update depth" loop via
+  // useSyncExternalStore).
+  const allEvents = useWorkbenchStore((s) => s.events);
+  const filterStage = useWorkbenchStore((s) => s.filterStage);
+  const timeRange = useWorkbenchStore((s) => s.timeRange);
   const selectedId = useWorkbenchStore((s) => s.selectedEventId);
   const setSelected = useWorkbenchStore((s) => s.setSelected);
   const toggleVetoed = useWorkbenchStore((s) => s.toggleVetoed);
   const vetoedIds = useWorkbenchStore((s) => s.vetoedIds);
-  const allEvents = useWorkbenchStore((s) => s.events);
   const setFilter = useWorkbenchStore((s) => s.setFilter);
   const [searchParams] = useSearchParams();
+
+  const events = React.useMemo<VisionEvent[]>(() => {
+    return allEvents.filter((e) => {
+      if (filterStage && !e.stage.startsWith(filterStage)) return false;
+      if (timeRange && e.frame_ts != null) {
+        const [lo, hi] = timeRange;
+        if (e.frame_ts < lo || e.frame_ts > hi) return false;
+      }
+      return true;
+    });
+  }, [allEvents, filterStage, timeRange]);
+
+  // Visual (top-to-bottom) order: newest first. The keyboard handler
+  // navigates this array directly so ↓ / ↑ track what's literally on screen
+  // — chronological-index navigation made the directions feel inverted
+  // because we render with .reverse().
+  const ordered = React.useMemo(() => [...events].reverse(), [events]);
 
   React.useEffect(() => {
     const stage = searchParams.get("stage_filter");
@@ -105,12 +125,12 @@ export const WorkbenchEventStream: React.FC = () => {
   }, [searchParams, setFilter]);
 
   // Refs hold the latest values so the keyboard listener installs once.
-  const eventsRef = React.useRef(events);
+  const orderedRef = React.useRef<VisionEvent[]>(ordered);
   const selectedIdRef = React.useRef(selectedId);
   const rowRefs = React.useRef<Map<string, HTMLButtonElement>>(new Map());
   React.useEffect(() => {
-    eventsRef.current = events;
-  }, [events]);
+    orderedRef.current = ordered;
+  }, [ordered]);
   React.useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
@@ -124,16 +144,18 @@ export const WorkbenchEventStream: React.FC = () => {
       ) {
         return;
       }
-      const list = eventsRef.current;
+      const list = orderedRef.current;
       if (list.length === 0) return;
       const idx = list.findIndex((ev) => ev.event_id === selectedIdRef.current);
       if (e.key === "ArrowDown") {
         e.preventDefault();
-        const next = list[Math.min(list.length - 1, idx + 1)];
+        // Visual "down" — next row below in the rendered list.
+        const next = idx < 0 ? list[0] : list[Math.min(list.length - 1, idx + 1)];
         if (next) setSelected(next.event_id);
       } else if (e.key === "ArrowUp") {
         e.preventDefault();
-        const prev = list[Math.max(0, idx - 1)];
+        // Visual "up" — prior row above in the rendered list.
+        const prev = idx <= 0 ? list[0] : list[idx - 1];
         if (prev) setSelected(prev.event_id);
       } else if (e.key === "Enter") {
         // "Jump to the frame" — the left pane already mirrors selectedEventId
@@ -162,7 +184,6 @@ export const WorkbenchEventStream: React.FC = () => {
     );
   }
 
-  const ordered = [...events].reverse();
   const lookupParent = (id: string | null) => {
     if (!id) return null;
     const parent = allEvents.find((e) => e.event_id === id);

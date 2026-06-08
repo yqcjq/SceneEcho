@@ -108,7 +108,16 @@ export const Workbench: React.FC = () => {
           </button>
         </div>
       </div>
-      <div className="grid flex-1 overflow-hidden border-t border-border md:grid-cols-3">
+      {/*
+        md:grid-rows-1 → grid-template-rows: repeat(1, minmax(0, 1fr)). Without
+        an explicit row template the row defaults to `auto` and grows to its
+        tallest cell's content; that broke each pane's internal scroll because
+        h-full resolved to the content-driven row height instead of the
+        viewport-bounded grid height. The minmax(0, 1fr) lets the row track
+        shrink below content size so flex-1 + overflow-y-auto inside each pane
+        actually engage.
+      */}
+      <div className="grid flex-1 overflow-hidden border-t border-border md:grid-cols-3 md:grid-rows-1">
         <div className="border-r border-border">
           <WorkbenchVisionPane />
         </div>

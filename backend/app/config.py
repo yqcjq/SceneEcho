@@ -3,10 +3,10 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -35,7 +35,12 @@ class Settings(BaseSettings):
     bgm_strategy: str = Field(default="features", alias="BGM_STRATEGY")
     enable_cli_ingest: bool = Field(default=False, alias="ENABLE_CLI_INGEST")
     enable_dev_mock: bool = Field(default=False, alias="ENABLE_DEV_MOCK")
-    dual_check_stages: list[str] = Field(default_factory=list, alias="DUAL_CHECK_STAGES")
+    # NoDecode: pydantic-settings would otherwise json.loads() the raw env string
+    # for list[str] fields, which conflicts with the comma-separated convention
+    # the validator below implements. NoDecode hands the validator the raw string.
+    dual_check_stages: Annotated[list[str], NoDecode] = Field(
+        default_factory=list, alias="DUAL_CHECK_STAGES"
+    )
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
 
     @field_validator("dual_check_stages", mode="before")
