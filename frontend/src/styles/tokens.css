@@ -1,0 +1,68 @@
+/*
+ * SceneEcho design tokens — Anthropic-inspired warm-doc aesthetic.
+ * All pages share these. No per-page color palettes (PLAN.md "前端设计语言").
+ */
+:root {
+  /* Backgrounds */
+  --bg-canvas: #FAF9F7;
+  --bg-surface: #FFFFFF;
+  --bg-subtle: #F5F4F0;
+  --bg-inverted: #1F1E1C;
+
+  /* Text */
+  --text-primary: #1F1E1C;
+  --text-secondary: #6B6962;
+  --text-tertiary: #A8A49B;
+  --text-inverted: #FAF9F7;
+
+  /* Accent (warm-orange, derived from Anthropic logo) */
+  --accent-primary: #CC785C;
+  --accent-hover: #B86A50;
+  --accent-subtle: #F5E5DD;
+
+  /* Semantic */
+  --color-success: #5C8A6E;
+  --color-warning: #C99846;
+  --color-error: #C76B5A;
+  --color-info: #6B8CAE;
+
+  /* Borders */
+  --border-default: #E8E5DE;
+  --border-strong: #C9C5BC;
+  --border-focus: var(--accent-primary);
+
+  /* Typography */
+  --font-serif: "Source Serif 4", "Source Han Serif SC", Georgia, serif;
+  --font-sans: "Inter", "Source Han Sans SC", -apple-system, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Source Han Sans Mono", Consolas, monospace;
+
+  /* Spacing (8px base, large modules use 24/48/64) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --space-16: 64px;
+
+  /* Radii (small only — avoid iOS-style over-roundedness) */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+
+  /* Shadows (use sparingly; prefer borders for layering) */
+  --shadow-subtle: 0 1px 2px rgba(31, 30, 28, 0.04);
+  --shadow-card: 0 1px 3px rgba(31, 30, 28, 0.06), 0 1px 2px rgba(31, 30, 28, 0.04);
+
+  /* Stage badge palette (workbench middle pane) */
+  --stage-mock: #A8A49B;
+  --stage-1a: #6B8CAE;
+  --stage-1b: #4F6E8C;
+  --stage-2: #5C8A6E;
+  --stage-25: #8A6BAE;
+  --stage-3: #C99846;
+  --stage-4: #4F8E8B;
+  --stage-5: #C76B9A;
+  --stage-system: #6B6962;
+}

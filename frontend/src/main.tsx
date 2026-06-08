@@ -1,17 +1,61 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Link, Navigate, Route, Routes } from "react-router-dom";
+import "./styles/global.css";
 import { SampleExtract } from "./pages/SampleExtract.js";
+import { Workbench } from "./pages/Workbench.js";
+import { WorkbenchLauncher } from "./pages/WorkbenchLauncher.js";
 
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root");
+
+const Shell: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <div className="min-h-screen bg-canvas text-primary">
+    <header className="border-b border-border bg-surface">
+      <div className="mx-auto flex max-w-[1280px] items-center justify-between px-6 py-4">
+        <div className="flex items-baseline gap-3">
+          <span className="font-serif text-lg">SceneEcho</span>
+          <span className="text-tertiary text-xs">口播视频「结构 + 风格」迁移</span>
+        </div>
+        <nav className="flex gap-6 text-sm text-secondary">
+          <Link to="/sample-extract" className="hover:text-primary">样例</Link>
+          <Link to="/workbench/dev" className="hover:text-primary">工作台</Link>
+        </nav>
+      </div>
+    </header>
+    <main>{children}</main>
+  </div>
+);
 
 ReactDOM.createRoot(root).render(
   <React.StrictMode>
     <BrowserRouter>
       <Routes>
         <Route path="/" element={<Navigate to="/sample-extract" replace />} />
-        <Route path="/sample-extract" element={<SampleExtract />} />
+        <Route
+          path="/sample-extract"
+          element={
+            <Shell>
+              <SampleExtract />
+            </Shell>
+          }
+        />
+        <Route
+          path="/workbench/dev"
+          element={
+            <Shell>
+              <WorkbenchLauncher />
+            </Shell>
+          }
+        />
+        <Route
+          path="/workbench/:taskId"
+          element={
+            <Shell>
+              <Workbench />
+            </Shell>
+          }
+        />
       </Routes>
     </BrowserRouter>
   </React.StrictMode>,

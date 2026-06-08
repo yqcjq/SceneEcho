@@ -1,4 +1,5 @@
 """FastAPI entry point for SceneEcho backend."""
+
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
@@ -8,8 +9,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import tasks_store
-from app.api import projects, samples, tasks
+from app.api import dev_workbench, events, projects, samples, tasks
 from app.config import get_settings
+from app.event_bus import get_event_bus
 from app.logging import configure_logging, get_logger
 
 settings = get_settings()
@@ -19,9 +21,20 @@ log = get_logger(__name__)
 
 def _init_data_tree() -> None:
     root = settings.data_root
-    for sub in ("samples", "projects", "system", "aigc", "logs",
-                "system/bgm_pool", "system/fonts", "system/stickers_reference",
-                "system/models", "aigc/stickers", "aigc/broll"):
+    for sub in (
+        "samples",
+        "projects",
+        "system",
+        "aigc",
+        "logs",
+        "system/bgm_pool",
+        "system/fonts",
+        "system/stickers_reference",
+        "system/models",
+        "system/dev_events",
+        "aigc/stickers",
+        "aigc/broll",
+    ):
         (root / sub).mkdir(parents=True, exist_ok=True)
 
 
@@ -29,7 +42,17 @@ def _init_data_tree() -> None:
 async def lifespan(app: FastAPI):  # noqa: ARG001
     _init_data_tree()
     tasks_store.init_db()
-    log.info("backend_started", data_root=str(settings.data_root))
+    bus = get_event_bus()
+    # Inject the tasks-store reader so event_bus never imports tasks_store
+    # — the layered architecture stays unidirectional (event_bus is below
+    # tasks_store in the dependency graph).
+    bus.set_lookup_callback(tasks_store.get_task)
+    app.state.event_bus = bus
+    log.info(
+        "backend_started",
+        data_root=str(settings.data_root),
+        enable_dev_mock=settings.enable_dev_mock,
+    )
     yield
     log.info("backend_stopped")
 
@@ -47,6 +70,10 @@ app.add_middleware(
 app.include_router(samples.router, prefix="/api", tags=["samples"])
 app.include_router(projects.router, prefix="/api", tags=["projects"])
 app.include_router(tasks.router, prefix="/api", tags=["tasks"])
+app.include_router(events.router, prefix="/api", tags=["events"])
+
+if settings.enable_dev_mock:
+    app.include_router(dev_workbench.router, prefix="/api", tags=["dev"])
 
 
 @app.get("/health")

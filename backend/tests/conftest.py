@@ -15,7 +15,7 @@ FIXTURE_ROOT = REPO_ROOT / "tests" / "fixtures"
 def temp_data_root(tmp_path_factory) -> Path:
     root = tmp_path_factory.mktemp("data_root")
     os.environ["DATA_ROOT"] = str(root)
-    for sub in ("samples", "projects", "system", "aigc", "logs"):
+    for sub in ("samples", "projects", "system", "aigc", "logs", "system/dev_events"):
         (root / sub).mkdir(parents=True, exist_ok=True)
     if FIXTURE_ROOT.exists():
         # Copy fixture videos into samples/ for convenience.
@@ -30,3 +30,30 @@ def temp_data_root(tmp_path_factory) -> Path:
 
     get_settings.cache_clear()  # type: ignore[attr-defined]
     return root
+
+
+@pytest.fixture
+def fresh_event_bus(temp_data_root, monkeypatch):
+    """Provide a fresh EventBus singleton per test, isolated from siblings."""
+    from app import event_bus as eb
+
+    eb.reset_event_bus()
+    yield eb.get_event_bus()
+    eb.reset_event_bus()
+
+
+@pytest.fixture
+def task_with_events(temp_data_root, fresh_event_bus):
+    """Create a sample-resource task with an events_jsonl_path wired up."""
+    from app import tasks_store
+
+    tasks_store.init_db()
+    sample_id = "evt_test_sample"
+    (temp_data_root / "samples" / sample_id / "extracted").mkdir(parents=True, exist_ok=True)
+    task_id = tasks_store.create_task(
+        "test", resource_kind="sample", resource_id=sample_id
+    )
+    fresh_event_bus.register_path(
+        task_id, fresh_event_bus.resolve_events_path("sample", sample_id, task_id)
+    )
+    return task_id, sample_id

@@ -1,4 +1,5 @@
 """TemplateIR — reusable style recipe = skeleton + style rules + tags."""
+
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
@@ -49,6 +50,10 @@ class StickerEvent(BaseModel):
     start: float
     end: float
     generated_image: str | None = None
+    # Coarse semantic tag (e.g. "强调提示" / "信息标签" / "情绪表达"). The
+    # 1A sticker pipeline emits this in its second-pass classify step;
+    # Phase 0.5 mocks include it so the workbench can demo the field flash.
+    semantic_category: str | None = None
 
 
 class StyleRule(BaseModel):

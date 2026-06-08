@@ -1,3 +1,122 @@
+## [2026-06-08-1] feat(phase0.5): ai workbench skeleton — sse event bus, mock streams, three-pane viewer
+
+Phase 0.5 整体交付：可观测性底座 + AI 透明工作台前端骨架。本条目反映 0.5 阶段最终落地状态，涵盖初始实现 + 两轮深度自审中识别并并入的全部修复。
+
+### 改动
+- 新增 `backend/app/ir/vision_event.py`：`VisionEvent` + `IRTarget` pydantic 模型；`ir_value: Any`（标量/列表/dict 任一），与前端 lodash.set 写入语义对齐；`export.py` 把它们加入 `TOP_LEVEL_MODELS`，下次 `pnpm gen:types` 自动产出 zod schema 给 renderer/frontend
+- 新增 `backend/app/ir/path_validator.py`：lodash 风路径校验器（结构化验证 path 命中 pydantic 模型字段，dict 字段宽容）；CI 用以拦截 mock 与真实 IR 漂移，1A 接入真 VLM 时直接复用 mock path
+- 新增 `backend/app/event_bus.py`：进程内 `EventBus`
+  - `subscribe_with_snapshot(task_id) -> tuple[Queue, int]`：在 task lock 内原子返回新 queue 与当前 sequence high-water；snapshot 把"已持久化历史（≤snapshot）"与"将经队列下发的 live 事件（>snapshot）"清晰切分，SSE 消费者无需任何 sequence dedup
+  - `subscribe(task_id) -> Queue`：同步版本供测试与非 SSE 调用方使用
+  - `publish` 用 `await q.put` + 无界 queue 实现反压（慢消费者拖慢发布者，绝不丢事件，硬保 D9 契约）；per-task asyncio.Lock 保证 sequence 单调与 jsonl 行不交错
+  - 首次 publish 时 lazy 从 jsonl 末尾读取 sequence high-water；jsonl 是 sequence 的唯一真理源，重启/任务重用都从 jsonl 恢复
+  - `replay(task_id, from_event_id, until_seq)`：`from_event_id` 跳过 Last-Event-ID 之前；`until_seq` 切到 snapshot 边界（SSE replay 专用）
+  - `close_task` 给所有 subscribers put None sentinel 收尾
+  - `set_lookup_callback(callback)` 依赖注入接口（main.py lifespan 注入 `tasks_store.get_task`），event_bus 模块**不 import tasks_store**，分层依赖单向
+- 扩展 `backend/app/tasks_store.py`：`tasks` 表新增 `resource_kind / resource_id / events_jsonl_path` 三列；`init_db` 内置 PRAGMA-based idempotent ALTER 兼容 Phase 0 老库；`create_task` 改 kwargs 接收 resource 字段，自动调 `EventBus.resolve_events_path`（仅静态调用，不引入运行时反向依赖）落 `events_jsonl_path`
+- 扩展 `backend/app/ir/template.py`：`StickerEvent` 加 `semantic_category: str | None = None`（1A sticker 二阶段分类需要；mock 也用此字段演示）
+- 新增 `backend/app/llm/client.py`：`LLMClient` ABC + `OpenAICompatClient` / `AnthropicClient` Phase 0.5 占位（`chat_vision` / `chat_text` 返 mock + 发 mock VisionEvent，含 `silent` 模式）；`get_llm_client` 工厂按 `MODEL_PROVIDER` 选；`time.perf_counter` 计 `duration_ms` 客户端层零侵入回填
+- 新增三份 mock scenario JSON（`captions_demo` / `stickers_demo` / `full_extract_demo`）：path 全部命中真实 `TemplateIR` 字段（`skeleton[X].style.caption` / `skeleton[X].caption_function` / `global_style.audio` / `sanity_check` / `tags` 等，**非** `skeleton.slots[X]` 等想象路径）；事件流覆盖 bbox 高亮、IR 字段填充、parent_event_id 因果链、confidence_warning 双模 cross-check 异议；`zoom_keyframes` 第一阶段事件 `ir_target=null`（仅推理判方向不写 IR），第二阶段写 `list[ZoomKeyframe]` 真实结构
+- 新增 `backend/app/api/events.py`：
+  - `GET /api/tasks/{id}/events` SSE：`subscribe_with_snapshot` 拿 (queue, snapshot) → `replay(from_event_id=Last-Event-ID, until_seq=snapshot)` 推历史 → 队列推 live；history 与 live 永不重叠；任务终态自动发 `event:done`（含订阅时任务已结束的兜底）；sse-starlette 提供 ping=15s 心跳
+  - `GET /api/tasks/{id}/events/history` 一次性 JSON 数组（供 Visualize 回放页加载全量；Workbench 主页不要叠用）
+- 新增 `backend/app/api/dev_workbench.py`（`ENABLE_DEV_MOCK=true` 才 mount）：`POST /api/dev/workbench/mock-stream` 自动建 dummy sample + task 后按 scenario 顺序广播；`GET /api/dev/workbench/scenarios` 列脚本；replay 时重映射 event_id（避免重复触发同一 task 时 id 撞车）；replay 异常时落 `status="failed"` + `close_task` 收尾
+- 扩展 `backend/app/config.py`：新增 `model_provider`（Literal openai|anthropic|mixed）/ `anthropic_api_key` / `enable_dev_mock` / `dual_check_stages`（逗号分隔字符串自动 parse 成 list）
+- 扩展 `backend/app/main.py`：挂载 `events` 路由始终启用、`dev_workbench` 路由按 `enable_dev_mock` gated；lifespan 把 EventBus 单例挂到 `app.state.event_bus`，并 `bus.set_lookup_callback(tasks_store.get_task)` 注入依赖；`_init_data_tree` 加 `system/dev_events`
+- 扩展 `backend/app/api/samples.py`：`render_demo` 调 `create_task` 时传 `resource_kind="project"` + `resource_id=project_id`，把 Phase 0 demo 渲染任务接入新事件路径机制
+- 扩展 `backend/pyproject.toml`：新增 `sse-starlette>=2.1.0` 依赖
+- 新增 `backend/tests/unit/test_event_bus.py` 9 个用例（多订阅广播 / replay from_event_id / replay until_seq 切片 / jsonl 解析 / 并发 sequence / `subscribe_with_snapshot` 不重不丢 / counter 重启从 jsonl tail 恢复 / 路径解析 / silent 模式 / unsubscribe）；扩 `conftest.py` 加 `fresh_event_bus` + `task_with_events` fixture
+- 新增 `backend/tests/unit/test_scenarios.py`：参数化遍历所有 scenario JSON，验证 ① 每条 event 能 `VisionEvent.model_validate` ② 每条 `ir_target.path + field` 通过 `path_validator` 命中真实 IR ③ `parent_event_id` 都向前引用
+- 扩展 `.env.example`：加 `MODEL_PROVIDER` / `ANTHROPIC_API_KEY` / `DUAL_CHECK_STAGES` / `ENABLE_DEV_MOCK`
+- 新增 frontend Anthropic 风 design tokens：`tokens.css`（颜色/字体/间距/圆角/stage 染色 + bbox 脉冲、IR 字段闪烁、事件卡片入场三套动画）+ `global.css`（@tailwind 注入 + se-* 组件类）；`tailwind.config.ts` 把 token CSS 变量桥接到 Tailwind theme；`postcss.config.js` 启用 tailwindcss + autoprefixer
+- 新增 frontend Workbench 三栏页面：
+  - `Workbench.tsx`：仅订阅 SSE（不叠 fetchEventHistory）+ `useTaskStatus` hook 1.5s 轮询 `/api/tasks/{id}` 显示 `status · progress% · stage`（终态自动停轮询）；顶 bar 含累计事件/tokens/耗时 + 暂停按钮
+  - `WorkbenchVisionPane.tsx` 左栏：根据 `selectedEventId` 显示帧 + bbox overlay；动态读取 `<img onLoad>` 的 `naturalWidth/Height`，避免 1A+ 真实帧分辨率不同时 bbox 错位
+  - `WorkbenchEventStream.tsx` 中栏：事件卡片倒序 + URL `?stage_filter=&time_range=` 双维过滤 + parent 因果链气泡 + 否决线穿；键盘快捷键 ↑↓ 切换 / Enter 滚动卡片到视图（左栏帧已自动联动）/ X 切换否决态；INPUT/TEXTAREA focus 时跳过；listener 用 ref 单次绑定（不随事件流重装）
+  - `WorkbenchIRPane.tsx` 右栏：react-arborist 渲染 IR 树，宽高用 `ResizeObserver` 测父容器（响应式）；`flashPath = field ? path + "." + field : path` 与 store `writeIr` 落地路径一致，最近写入字段 800ms 闪烁
+  - `EventBadge.tsx` stage 前缀染色；`BboxOverlay.tsx` 0-999 → 像素映射的 SVG overlay
+- 新增 frontend `WorkbenchLauncher.tsx`（`/workbench/dev` 入口）：列出 mock scenarios + 启动按钮 → 调 `mock-stream` → navigate 到 `/workbench/{task_id}`
+- 新增 frontend `api/events.ts`：`subscribeEvents` 封装 EventSource（vision/done 事件分发 + URL encode + teardown）/ `fetchEventHistory` / `startMockStream` / `listScenarios`
+- 新增 frontend `state/workbench.ts`：Zustand store
+  - `irSnapshot`：immer + `lodash.set/get/unset` 增量写入；按 op 分支处理（set/append/remove），append 走 `lodash.get` + `Array.push`（缺失时初始化为单元素数组）；append 不再被误当 set 处理
+  - 反向 `childIndex` 支持因果链查找
+  - `vetoedIds: Set<string>` + `toggleVetoed(id)` action
+  - `autoFollow: boolean`：默认 true 时 `appendEvent` 自动选中最新事件；`setSelected` 切为 false（用户主动选中后停止自动跟随）；`reset` 复位为 true
+- 新增 frontend 本地类型镜像 `types/workbench.ts`：`VisionEvent` / `IRTarget` / `ScenarioListItem` 与 pydantic 字段精确对齐（`ir_value: unknown`，与后端 Any 对齐），避免依赖 `pnpm gen:types` 才能编译
+- 新增 frontend vitest 配置（jsdom + globals + setup 引入 jest-dom）+ 关键测试：`api/events.test.ts`（FakeEventSource 验证 onEvent / onDone / teardown / URL encode）/ `EventBadge.test.tsx`（stage 前缀染色映射 + 渲染断言）/ `BboxOverlay.test.tsx`（0-999 → 像素映射 + SVG rect 属性断言）
+- 扩展 frontend `package.json`：依赖加 tailwindcss 3.x / postcss / autoprefixer / @radix-ui/{dialog,tabs,tooltip} / lucide-react / react-arborist / immer / lodash + @types/lodash；devDeps 加 vitest 2.x / jsdom / @testing-library/{react,jest-dom}；`test` 脚本改 `vitest run`
+- 扩展 frontend `tsconfig.json`：`types` 加 `vitest/globals`，`include` 覆盖 vitest/tailwind/postcss 配置文件
+- 扩展 frontend `main.tsx`：导入 `styles/global.css`；加 Shell 顶部导航条；新增路由 `/workbench/dev` 与 `/workbench/:taskId`
+- 扩展 `.github/workflows/ci.yml` frontend job：在 typecheck 后追加 `pnpm -F @sceneecho/frontend test` 步骤
+
+### 自我审计修复（深度审计后并入本次实现）
+本阶段实现过程中两轮深度审计识别的设计/正确性问题，全部已并入上面的"改动"列表。这里仅留作记录，供后续阶段参考思路：
+
+**架构性（按第一性原理重构，非打补丁）：**
+- **EventBus 队列丢事件**：原方案 `q.put_nowait` + `maxsize=1024` 在突发流下 `QueueFull` 静默丢，破坏 D9 "AI 调用必发 VisionEvent" 契约。最终用 `await q.put` + 无界 queue 反压发布者
+- **sequence high-water mark race**：原方案靠 SQL `tasks.last_event_sequence` 维护，与 jsonl 真实状态有 race（write-then-crash 时 SQL 落后 jsonl）。最终改为 lazy 从 jsonl 最后一行读，jsonl 是唯一真理源；删除 SQL `last_event_sequence` 列与 `bump_event_sequence` 函数
+- **event_bus ↔ tasks_store 循环依赖**：原方案靠函数体内 local import 解。最终用 `set_lookup_callback` 依赖注入彻底解开，event_bus 模块不再 import tasks_store，分层依赖单向
+- **mock scenarios IR path 与真实 TemplateIR 不齐**：原方案用 `skeleton.slots[X]`、`zoom_keyframes={direction:推进}` 等想象路径，1A 接入真 VLM 必须再改一次。最终改为真实路径（`skeleton[X].style.caption`、`zoom_keyframes` 第一阶段不写、第二阶段写 list 等），删除 1A 才扩展的字段（`placeholder_text` / `length_constraint` / `semantic_purpose` / `verified_stagger_ms` / `alt_proposed`）；新增 `path_validator.py` + `test_scenarios.py` 把漂移卡死在 CI
+- **SSE history-vs-live race**：原 "先 replay 再 subscribe" 在 window 内的 publish 永久丢失。最终改为 `subscribe_with_snapshot` 在 lock 内原子拿 (queue, snapshot)，`replay(until_seq=snapshot)` 切分，从根本消除重叠（也连带删除原"在 live 流中 dedup-by-sequence"补丁式逻辑）
+
+**正确性 / UX：**
+- **WorkbenchIRPane flashPath 丢 field**：原 `flashPath` 仅取 `ir_target.path`，命中不到子字段写入。最终 `flashPath = field ? path + "." + field : path`，与 store `writeIr` 落地路径一致
+- **WorkbenchIRPane 高度硬编码 600px**：父容器尺寸变化时 tree 内部滚动而非容器滚动。改为 `ResizeObserver` 测父高度
+- **Workbench 顶 bar 缺 stage / progress**：补 `useTaskStatus` hook 1.5s 轮询 `/api/tasks/{id}`，渲染 `status · progress% · stage`（终态自动停轮询），补齐 PLAN.md 1314 要求
+- **EventStream 缺 PLAN 1317 要求的 Enter / X 快捷键**：补齐
+- **`selectedEventId` 自动跟随跳屏**：原实现一律自动选中最新事件，用户用 ↑↓ 选定后视图被新事件强行拽走。加 `autoFollow` 开关，用户主动选中后停止跟随
+- **VisionPane bbox overlay 硬编码 1080×1920**：1A+ 真实帧分辨率不同会错位。改为读取 `<img onLoad>` 的 `naturalWidth/Height`，frame_url 切换时重置
+- **EventStream 键盘监听重装**：`useEffect` deps 含 `events / selectedId`，每条事件都拆装 window listener。改为 ref 暂存最新值，listener 只装一次
+- **op="append" 当 set 处理**（state/workbench.ts）：原实现忽略 op 类型一律 set，下次同路径 append 会覆盖整个数组。改为按 op 分支：append 走 `lodash.get` + `Array.push`（缺失时初始化为单元素数组），remove 用 `lodash.unset`
+- **Workbench.tsx 双拉历史**：原本同时调 `fetchEventHistory` + `subscribeEvents`，前者 resolve 后 `setHistory` 会覆盖期间已 append 的 SSE 事件。SSE 端点已自带 history replay，去掉前者；连带删除已死代码 `setHistory` action 与 `seenIds` 集合
+- **完成态空流不关闭**（events.py）：任务标完成但订阅时机晚于 close_task → SSE 永远 wait_for 超时。在 history replay 完成后立即检查任务状态；timeout 分支也复查
+- **scenario replay 异常使任务卡 running**（dev_workbench.py）：循环里 publish 抛错让 BackgroundTask 直接退出，task 永停在 `running`、SSE 永等不到 done。整段循环 try/except，失败时落 `status="failed"` + `close_task` 收尾
+- **subscribeEvents `ping` 监听器死代码**：sse-starlette 心跳是 SSE 注释行，浏览器不触发 named event。删除
+- **`ir_value` 类型 `dict | None`**：dict 限制太严，无法表达标量值（如 `CaptionStyle.anim_in: str`）。改为 `Any`（前端 `unknown`），与 lodash.set 写入语义一致
+- **render-demo 任务未升级到新 `create_task` kwargs**：补传 `resource_kind="project" + resource_id=project_id`，Phase 0 demo 任务也走方案 B 路径
+- **dead code 与吞错日志**：删除 `EventBus.publish_many_sync`（无调用方）；`_lookup_path` 等位置的 bare `except: pass` 改为 log warning 便于排障
+
+### 涉及文件
+- `backend/app/ir/vision_event.py`：新建 — VisionEvent / IRTarget pydantic 模型（`ir_value: Any`）
+- `backend/app/ir/path_validator.py`：新建 — lodash 风路径校验器（CI 验证 mock JSON 命中真实 IR）
+- `backend/app/ir/template.py`：扩展 — StickerEvent.semantic_category
+- `backend/app/ir/export.py`：扩展 — TOP_LEVEL_MODELS 加入 IRTarget / VisionEvent
+- `backend/app/event_bus.py`：新建 — 事件总线（subscribe_with_snapshot / await put 反压 / jsonl tail seq 真理源 / lookup callback 注入 / replay until_seq）
+- `backend/app/tasks_store.py`：扩展 — schema 加 3 列 + idempotent migration + create_task 扩参；不含 last_event_sequence / bump_event_sequence
+- `backend/app/config.py`：扩展 — model_provider / anthropic_api_key / enable_dev_mock / dual_check_stages
+- `backend/app/main.py`：扩展 — events / dev_workbench 路由挂载 + lifespan 挂 event_bus + 注入 lookup callback + system/dev_events 目录
+- `backend/app/api/samples.py`：扩展 — render_demo 接入 resource_kind=project 路径
+- `backend/app/api/events.py`：新建 — SSE（subscribe_with_snapshot 切分 history/live + 完成态自动关流）+ history 端点
+- `backend/app/api/dev_workbench.py`：新建 — mock-stream / scenarios 列表（dev gated）+ 失败兜底
+- `backend/app/llm/__init__.py`、`backend/app/llm/client.py`：新建 — LLMClient ABC + 占位实现
+- `backend/app/llm/prompts/__init__.py`、`backend/app/llm/prompts/scenarios/{captions_demo,stickers_demo,full_extract_demo}.json`：新建 — Phase 0.5 mock 事件脚本（path 命中真实 TemplateIR）
+- `backend/pyproject.toml`：扩展 — 加 sse-starlette
+- `backend/tests/conftest.py`：扩展 — fresh_event_bus / task_with_events fixtures
+- `backend/tests/unit/test_event_bus.py`：新建 — 9 个事件总线单测
+- `backend/tests/unit/test_scenarios.py`：新建 — mock JSON 静态校验（parse / path / parent 顺序）
+- `.env.example`：扩展 — Phase 0.5 新增 4 个 env 变量
+- `.github/workflows/ci.yml`：扩展 — frontend job 加 vitest 步骤
+- `frontend/package.json`：扩展 — 依赖 + test 脚本
+- `frontend/tsconfig.json`：扩展 — types + include
+- `frontend/postcss.config.js`、`frontend/tailwind.config.ts`：新建 — Tailwind 工具链
+- `frontend/vitest.config.ts`、`frontend/test-setup.ts`：新建 — 测试运行器
+- `frontend/src/styles/{tokens.css,global.css}`：新建 — design tokens + 全局样式
+- `frontend/src/main.tsx`：扩展 — Shell + 工作台路由
+- `frontend/src/api/events.ts`、`frontend/src/api/index.ts`：新建/扩展 — SSE 订阅（无 ping 死代码）+ 子模块导出
+- `frontend/src/state/workbench.ts`：新建 — Zustand store（按 op 分支增量写 IR / vetoedIds / autoFollow）
+- `frontend/src/types/workbench.ts`：新建 — 本地类型镜像（ir_value: unknown）
+- `frontend/src/pages/Workbench.tsx`：新建 — /workbench/:taskId 三栏（仅订阅 SSE + useTaskStatus 顶 bar 显示 status/progress/stage）
+- `frontend/src/pages/WorkbenchLauncher.tsx`：新建 — dev 入口
+- `frontend/src/components/workbench/{WorkbenchVisionPane,WorkbenchEventStream,WorkbenchIRPane,EventBadge,BboxOverlay}.tsx`：新建 — 三栏 + badge + bbox overlay；VisionPane 动态读取帧 naturalWidth/Height；EventStream 键盘 ↑↓/Enter/X 单次绑定 + 否决视觉；IRPane flashPath 含 field + ResizeObserver 高度
+- `frontend/src/api/events.test.ts`、`frontend/src/components/workbench/{EventBadge,BboxOverlay}.test.tsx`：新建 — 关键单测
+- `docs/001ARCHITECTURE.md`：扩展 — 拓扑图加 SSE 通道、分层加事件总线、状态分类增 jsonl 行（jsonl 是 sequence 真理源）、加链路 C、追加 D9-D12 约定（含 ir_value: Any、event_bus 不依赖 tasks_store、SSE 用 snapshot 切分、tasks 表三列）
+- `docs/002STRUCTURE.md`：扩展 — 同步 backend/app/{event_bus,llm,api/events,api/dev_workbench,ir/vision_event,ir/path_validator} + tests/unit/test_scenarios.py + frontend 全部新增文件
+
+### 关联
+-> PLAN.md 阶段 0.5（1246-1344 行）
+
+---
+
 ## [2026-06-07-2] feat(plan): add v3.2 workbench v4 upgrade — gantt + causal chain + regression fixture
 
 ### 改动
@@ -61,7 +180,7 @@
 
 ### 改动
 - 新建根 workspace：`pnpm-workspace.yaml`、`package.json`（dev / gen:types / build / lint）、`.env.example`，扩展 `.gitignore` 加入 node_modules / data / 生成产物 / venv
-- 新建后端骨架：FastAPI 入口 + lifespan + CORS + /data 静态挂载；`config.py` pydantic-settings + REPO_ROOT 解析；`logging.py` structlog JSON；SQLite tasks 表 CRUD（WAL）；typer CLI ingest（gated by ENABLE_CLI_INGEST）
+- 新建后端骨架：FastAPI 入口 + lifespan + CORS + /data 静态挂载；`config.py` pydantic-settings + REPO_ROOT 解析;`logging.py` structlog JSON;SQLite tasks 表 CRUD（WAL）;typer CLI ingest（gated by ENABLE_CLI_INGEST）
 - 新建后端 IR 包：`ledger / template / project / patch` pydantic 模型 + `export.py` 聚合导出 JSON Schema
 - 新建后端 API：`POST /samples` 上传 + ffmpeg normalize；`POST /samples/{id}/render-demo` 构造最小 ProjectIR + 触发 BackgroundTask；`POST /projects` 占位；`GET /tasks/{id}` + `POST /internal/task-progress`
 - 新建 render 客户端：httpx 调 renderer `/render`；`ffmpeg.py` normalize / probe / thumbnail wrapper

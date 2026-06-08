@@ -121,6 +121,8 @@ async def render_demo(sample_id: str, background_tasks: BackgroundTasks) -> dict
         ir.model_dump_json(indent=2), encoding="utf-8"
     )
 
-    task_id = tasks_store.create_task("render")
+    task_id = tasks_store.create_task(
+        "render", resource_kind="project", resource_id=project_id
+    )
     background_tasks.add_task(_run_render, task_id, ir)
     return {"task_id": task_id, "project_id": project_id}

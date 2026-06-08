@@ -23,6 +23,7 @@ from app.ir.template import (
     VisualStyle,
     ZoomKeyframe,
 )
+from app.ir.vision_event import IRTarget, VisionEvent
 
 TOP_LEVEL_MODELS = [
     # ledger
@@ -46,6 +47,9 @@ TOP_LEVEL_MODELS = [
     ProjectIR,
     # patch
     Patch,
+    # workbench events
+    IRTarget,
+    VisionEvent,
 ]
 
 

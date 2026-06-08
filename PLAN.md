@@ -1263,18 +1263,21 @@ class Patch(BaseModel):
 - 工作台页面骨架可独立运行（不依赖任何真实 VLM 输出，用 mock generator 驱动）。
 
 ### 后端改动（backend/）
-- **新增** `backend/app/ir/vision_event.py`：`VisionEvent` + `IRTarget` pydantic 模型（同核心数据结构定义）；同步更新 `backend/app/ir/export.py` 把 VisionEvent 加入 JSON Schema 导出。
+- **新增** `backend/app/ir/vision_event.py`：`VisionEvent` + `IRTarget` pydantic 模型（同核心数据结构定义）；`ir_value: Any`（标量/列表/dict 任一），与 lodash.set 语义对齐；同步更新 `backend/app/ir/export.py` 把 VisionEvent 加入 JSON Schema 导出。
+- **新增** `backend/app/ir/path_validator.py`：lodash 风路径校验器（给定 root pydantic 模型 + path 字符串，结构化验证命中真实字段；dict 字段宽容）。`tests/unit/test_scenarios.py` 用它对 mock JSON 的 ir_target.path 做 CI 静态校验，防止 mock 与真实 IR 漂移。
 - **新增** `backend/app/event_bus.py`：内存事件总线 + jsonl 持久化（路径方案 B）
-  - `class EventBus`：维护 `dict[task_id, list[asyncio.Queue]]` 订阅者表 + `dict[task_id, AtomicCounter]` sequence 计数器（S1）
-  - `subscribe(task_id) -> asyncio.Queue`：返回新订阅 queue
+  - `class EventBus`：维护 `dict[task_id, list[asyncio.Queue]]` 订阅者表 + `dict[task_id, int]` sequence 计数器（首次 publish 从 jsonl 末尾的最高 sequence 懒初始化）；jsonl 是 high-water mark 的唯一真理源
+  - `subscribe_with_snapshot(task_id) -> tuple[Queue, int]`：在 task lock 内原子返回新 queue 与当前 sequence high-water；snapshot 把"已持久化历史（≤snapshot）"与"将经队列下发的 live 事件（>snapshot）"清晰切分，SSE 消费者不再需要任何 sequence dedup
+  - `subscribe(task_id) -> asyncio.Queue`：同步版本，供测试与非 SSE 调用方使用，不提供 snapshot 语义
   - `unsubscribe(task_id, queue)`：清理
-  - `publish(task_id, event: VisionEvent)`：① 原子分配 `event.sequence = counter.next()` ② 广播到所有订阅 queue ③ 按 `tasks_store.get(task_id).events_jsonl_path` 追加到对应 jsonl 文件（路径已由 `tasks_store.create_task` 根据 `resource_kind + resource_id` 提前计算好）
-  - `replay(task_id, from_event_id: str | None = None) -> list[VisionEvent]`：从持久化文件读历史事件，若传 from_event_id 则跳过该 id 之前的所有事件，供 SSE 重连时 catch-up（H3）
+  - `publish(task_id, event)`：① 在 task lock 内分配 `event.sequence = counter+1`、append jsonl ② lock 外 broadcast 用 `await q.put`（队列无界）反压慢消费者，确保事件不丢失
+  - `replay(task_id, from_event_id=None, until_seq=None) -> list[VisionEvent]`：从 jsonl 读历史；`from_event_id` 跳过指定事件之前（Last-Event-ID 续推语义）；`until_seq` 切到 snapshot 边界（SSE replay 专用）
   - `resolve_events_path(resource_kind, resource_id, task_id) -> str`：路径计算工具函数，按方案 B：
     - `sample` → `samples/{resource_id}/extracted/events_{task_id}.jsonl`
     - `project` → `projects/{resource_id}/pipeline/events_{task_id}.jsonl`
-    - `template` → `samples/{source_sample_id}/extracted/events_{task_id}.jsonl`（模板继承自 sample）
-- **扩展** `backend/app/tasks_store.py`：`create_task(kind, resource_kind, resource_id) -> Task` 调 `event_bus.resolve_events_path()` 写 `events_jsonl_path` 字段；`tasks` 表 schema 加 `resource_kind` / `resource_id` / `events_jsonl_path` / `last_event_sequence` 四列（迁移脚本写在 `alembic/versions/` 或简化为 init_db 自动建表，MVP 阶段无 Alembic 也可）
+    - `template` → `samples/{source_sample_id}/extracted/events_{task_id}.jsonl`（模板继承自 sample；Phase 0.5 暂回退到 `system/dev_events/template_{id}/`，KB 接入后回填真实 sample 路径）
+  - `set_lookup_callback(callback)`：依赖注入接口；`main.py` lifespan 内传入 `tasks_store.get_task`，event_bus 模块不再 import tasks_store，分层依赖单向
+- **扩展** `backend/app/tasks_store.py`：`create_task(kind, *, resource_kind, resource_id, task_id=None)` 调 `EventBus.resolve_events_path()`（仅静态方法调用，不引入运行时反向依赖）写 `events_jsonl_path` 字段；`tasks` 表 schema 加 `resource_kind` / `resource_id` / `events_jsonl_path` 三列；老库通过 `init_db` 内置 idempotent ALTER 自动迁移
 - **扩展** `backend/app/config.py`：Settings 类加四个字段：`model_provider: Literal["openai","anthropic","mixed"] = "openai"`、`anthropic_api_key: str | None = None`、`enable_dev_mock: bool = False`、`dual_check_stages: list[str] = []`（env 里逗号分隔解析）
 - **新增** `backend/app/llm/client.py`（占位骨架，1A 才填真实逻辑）：
   - `class LLMClient`：抽象基类，定义 `chat_text` / `chat_vision` 接口
@@ -1288,11 +1291,12 @@ class Patch(BaseModel):
     - 后续 Phase 3 的 dedup/segment 等 Text LLM 调用直接走 `chat_text`，自动满足 D13
 - **新增** `backend/app/api/events.py`：
   - `GET /api/tasks/{task_id}/events`：SSE 端点（`sse-starlette.EventSourceResponse`）
-    - 读 `Last-Event-ID` 请求 header（浏览器原生 EventSource 重连时自动回传）→ 调 `event_bus.replay(task_id, from_event_id=...)` 先推历史 → 再订阅 queue 推后续
+    - 读 `Last-Event-ID` 请求 header（浏览器原生 EventSource 重连时自动回传）
+    - 流程：`subscribe_with_snapshot(task_id)` 原子拿到 (queue, snapshot) → `replay(from_event_id=last_event_id, until_seq=snapshot)` 推历史 → 队列推 live 事件；history 与 live 永不重叠，无须 dedup
     - **每条 event 必须三行格式**（H3 强约束）：`id: {event.event_id}\nevent: vision\ndata: {json}\n\n`；`id:` 字段不可省略，浏览器自动用它续推
-    - 心跳：每 15s 发空 comment `: heartbeat\n\n` 保活
-    - 任务结束时发 `event: done\ndata: {}\n\n` 让前端关闭 EventSource
-  - `GET /api/tasks/{task_id}/events/history`：一次性返回所有历史事件 JSON 数组（供 Visualize 回放页加载全量）
+    - 心跳：每 15s 发空 comment `: heartbeat\n\n` 保活（sse-starlette `ping` 参数）
+    - 任务终态（completed/failed）即刻发 `event: done\ndata: {status}\n\n`，包括"订阅时任务已结束"的兜底情况
+  - `GET /api/tasks/{task_id}/events/history`：一次性返回所有历史事件 JSON 数组（供 Visualize 回放页加载全量；Workbench 主页不要叠用，会与 SSE replay 冲突）
 - **扩展** `backend/app/main.py`：挂载 `api/events.py` 路由
 - **扩展** `backend/pyproject.toml`：加 `sse-starlette` 依赖
 - **新增** `backend/app/api/dev_workbench.py`（仅 `ENABLE_DEV_MOCK=true` 时启用）：

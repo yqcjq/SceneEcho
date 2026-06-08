@@ -1,0 +1,121 @@
+@import "./tokens.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+  margin: 0;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-serif);
+  color: var(--text-primary);
+  letter-spacing: -0.005em;
+}
+
+code,
+pre,
+kbd {
+  font-family: var(--font-mono);
+}
+
+button {
+  font-family: inherit;
+}
+
+/* Reusable component classes — keep deliberately small. */
+@layer components {
+  .se-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-subtle);
+  }
+
+  .se-btn-primary {
+    background: var(--accent-primary);
+    color: var(--text-inverted);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-4);
+    transition: background-color 200ms ease-out;
+  }
+
+  .se-btn-primary:hover {
+    background: var(--accent-hover);
+  }
+
+  .se-btn-ghost {
+    background: transparent;
+    color: var(--text-primary);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-4);
+    transition: border-color 200ms ease-out;
+  }
+
+  .se-btn-ghost:hover {
+    border-color: var(--border-strong);
+  }
+
+  /* Bbox highlight pulses for 1.5s when a new event lands. */
+  @keyframes se-bbox-pulse {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.55;
+    }
+  }
+  .se-bbox {
+    fill: none;
+    stroke: var(--accent-primary);
+    stroke-width: 2;
+    animation: se-bbox-pulse 1.5s ease-in-out infinite;
+  }
+
+  /* IR Pane field-fill animation — 200ms flash on accent border. */
+  @keyframes se-ir-flash {
+    0% {
+      box-shadow: 0 0 0 0 var(--accent-subtle);
+      background-color: var(--accent-subtle);
+    }
+    100% {
+      box-shadow: 0 0 0 0 transparent;
+      background-color: transparent;
+    }
+  }
+  .se-ir-flash {
+    animation: se-ir-flash 800ms ease-out;
+  }
+
+  /* Event card entry: 80ms short fade-in + 4px lift. */
+  @keyframes se-event-in {
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  .se-event-in {
+    animation: se-event-in 200ms ease-out;
+  }
+}

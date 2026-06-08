@@ -9,10 +9,11 @@
 ```
 ┌──────────────────────────┐   HTTP /api/*    ┌────────────────────────────┐
 │  Frontend (Vite, :5173)   │ ───────────────▶ │  Backend (FastAPI, :18521)  │
-│  React + Remotion Player  │ ◀── /data/* ──── │  app/{api, ir, render, … } │
-└──────────────────────────┘                  └────────────┬───────────────┘
-                                                           │ HTTP /render
-                                                           ▼
+│  React + Remotion Player  │ ◀── /data/* ──── │  app/{api, ir, render,      │
+│  + Workbench (/workbench) │ ◀══ SSE  /api/   │       event_bus, llm}       │
+│                          │     tasks/{id}/   └────────────┬───────────────┘
+│                          │     events ══════              │ HTTP /render
+└──────────────────────────┘                                ▼
                                               ┌────────────────────────────┐
                                               │ Renderer (Express, :8001)  │
                                               │ Remotion + Chromium → mp4  │
@@ -21,7 +22,7 @@
                                                 共享卷 DATA_ROOT (本地 backend/data/)
 ```
 
-三服务通过 HTTP + JSON 通信，共享 `DATA_ROOT` 文件系统读写媒体。前端不直渲染像素，调用后端 API 触发渲染，渲染产物经后端 `/data/*` 静态路由回放。
+三服务通过 HTTP + JSON 通信，共享 `DATA_ROOT` 文件系统读写媒体。前端不直渲染像素，调用后端 API 触发渲染，渲染产物经后端 `/data/*` 静态路由回放。AI 决策事件（VLM / Text LLM / ASR / audio / CV）经后端进程内 `event_bus` 广播，浏览器走 SSE 长连接订阅 `/api/tasks/{id}/events`。
 
 ---
 
@@ -36,11 +37,18 @@
 ┌──────────────────────────────────────────────┐
 │ 编排层（backend/app/api）                     │
 │ HTTP 路由，触发任务，组装 IR                  │
+│ events.py / dev_workbench.py 出 SSE 事件流   │
 └──────────────────────────────────────────────┘
                          ↓
 ┌──────────────────────────────────────────────┐
-│ 能力层（backend/app/{render, ir}）            │
-│ FFmpeg 归一化 / IR 校验 / 渲染客户端          │
+│ 事件总线（backend/app/event_bus）             │
+│ 进程内 asyncio 广播 + jsonl 持久化（方案 B）  │
+└──────────────────────────────────────────────┘
+                         ↓
+┌──────────────────────────────────────────────┐
+│ 能力层（backend/app/{render, ir, llm}）       │
+│ FFmpeg 归一化 / IR 校验 / 渲染客户端 /        │
+│ LLMClient 占位（chat_vision / chat_text）    │
 └──────────────────────────────────────────────┘
                          ↓
 ┌──────────────────────────────────────────────┐
@@ -56,10 +64,12 @@ IR（pydantic 模型）位于 `backend/app/ir/`，作为「人 / AI / 渲染器�
 ## 3. 调用方向约束
 
 - 前端只调 `/api/*`；不直连 renderer。
-- 后端 `api/` 只 import `app/{ir,render,tasks_store,config,logging}`；不反向依赖 frontend / renderer 进程。
+- 后端 `api/` 只 import `app/{ir,render,tasks_store,config,logging,event_bus,llm}`；不反向依赖 frontend / renderer 进程。
 - renderer 不调后端业务 API，仅通过 `POST /api/internal/task-progress` 上报进度，并通过 `GET {BACKEND_URL}/data/*` 拉取用户素材字节。
 - IR 类型方向：pydantic（唯一真相源）→ JSON Schema → 两端 zod/TS；CI 的 `type-sync` job 阻塞反向修改。
 - 跨服务文件传递只用相对 `DATA_ROOT` 的 POSIX 路径字符串，禁止绝对路径。
+- AI 客户端（`app.llm.client`）只通过 `event_bus.publish` 广播事件；调用方不得绕过客户端层直接发事件。
+- `event_bus` 不依赖 `tasks_store`：`main.py` lifespan 注入 `tasks_store.get_task` 作为 lookup callback；`tasks_store.create_task` 仅静态调用 `EventBus.resolve_events_path` 计算路径，不引入运行时反向依赖。
 
 ---
 
@@ -67,11 +77,12 @@ IR（pydantic 模型）位于 `backend/app/ir/`，作为「人 / AI / 渲染器�
 
 | 数据类型 | 存储位置 | 说明 |
 |---------|---------|------|
-| 任务态（progress / stage / result） | `DATA_ROOT/kb.sqlite` 的 `tasks` 表 | WAL 模式；后端写、前端读 |
+| 任务态（progress / stage / result + resource_kind/id + events_jsonl_path） | `DATA_ROOT/kb.sqlite` 的 `tasks` 表 | WAL 模式；后端写、前端读 |
 | 上传媒体 / 归一化产物 / 渲染输出 | `DATA_ROOT/{samples,projects}/...` | 文件系统，相对路径在 IR 内引用 |
 | ProjectIR / TemplateIR / TranscriptLedger | `projects/{id}/project.json` 等 | JSON 落盘，供回放、调试 |
+| AI 决策事件流（VisionEvent jsonl） | `samples/{sid}/extracted/events_{task_id}.jsonl`、`projects/{pid}/pipeline/events_{task_id}.jsonl` | 路径方案 B：随资源走、task_id 作后缀；event_bus.publish 写入、SSE replay 与 history 端点读；同时承担 EventBus 的 sequence high-water mark 真理源（重启后 lazy 读最后一行恢复计数） |
 | Remotion bundle | renderer 进程内存 + headless Chromium 缓存 | 启动后首次渲染缓存一次 |
-| 前端 UI 态（上传 ID、当前任务） | 浏览器内存（Zustand） | 刷新即失，不持久化 |
+| 前端 UI 态（工作台事件 / IR 快照 / 选中事件） | 浏览器内存（Zustand `useWorkbenchStore`） | 刷新走 SSE replay 重建，不持久化 |
 
 ---
 
@@ -119,6 +130,31 @@ python -m app.cli ingest-sample /local/path.mp4
   → render.ffmpeg.normalize → normalized.mp4 + thumbnail.jpg
 ```
 
+**链路 C：AI 透明工作台 mock 流（`ENABLE_DEV_MOCK=true` 时启用）**
+```
+浏览器打开 /workbench/dev
+  → GET /api/dev/workbench/scenarios → 列出 captions_demo / stickers_demo / full_extract_demo
+浏览器点 scenario 卡片
+  → POST /api/dev/workbench/mock-stream {scenario}
+     → 创建 dummy sample + 任务 (resource_kind="sample")，路径方案 B 写 events_jsonl_path
+     → BackgroundTask: _replay_scenario(task_id, scenario)
+        → 读 backend/app/llm/prompts/scenarios/{scenario}.json
+        → 按 delay_ms 顺序: VisionEvent.model_validate → event_bus.publish
+           → lock 内分配 sequence + append jsonl → lock 外 await q.put 广播
+     → 返回 {task_id, workbench_url}
+  ← 前端 navigate(workbench_url)
+浏览器进入 /workbench/{task_id}
+  → useEffect: subscribeEvents(task_id) 建 EventSource 订阅 /api/tasks/{task_id}/events
+     → 后端 _stream: subscribe_with_snapshot 原子拿 (queue, snapshot) → replay(until_seq=snapshot) 推历史 → 队列推 live (>snapshot)；两段无重叠，前端无须 dedup
+     → SSE: 每条 event 三行 (id / event:vision / data:json) + 心跳每 15s
+     → useWorkbenchStore.appendEvent(event)
+        → immer produce + lodash.set(draftIr, ir_target.path + field, ir_value) 写入 IR 快照
+        → childIndex 反向索引 parent_event_id → child ids
+        → autoFollow=true 时自动选中最新事件；用户首次主动选中后切为 false
+  ← 三栏渲染：左帧+bbox / 中事件流卡片 (↑↓/Enter/X) / 右 IR 树（含 field 的命中字段闪烁）
+任务完成 → close_task → SSE event: done → 浏览器 EventSource 关闭
+```
+
 ---
 
 ## 6. 关键约定
@@ -131,3 +167,7 @@ python -m app.cli ingest-sample /local/path.mp4
 - **D6 媒体归一化用标准 ffmpeg 惯用法**：`scale=W:H:force_original_aspect_ratio=decrease,pad=W:H:(ow-iw)/2:(oh-ih)/2:color=black,fps=F`；不使用 ffmpeg 表达式语法以避免跨平台单引号转义问题。
 - **D7 渲染队列单 worker**：renderer 端 `p-queue({concurrency:1})` 串行，避免多 Chromium 实例资源竞争；多 worker 推后到 Phase 3+。
 - **D8 渲染端用户素材走 HTTP**：renderer 把 IR 里的 `user_material` 相对路径拼成 `{BACKEND_URL}/data/<rel>` 后传入 Remotion `<OffthreadVideo>`，不使用 `file://`。`BACKEND_URL` 由 env 注入，本地默认 `http://localhost:18521`。
+- **D9 AI 调用必发 VisionEvent**：所有 AI 客户端方法（`llm.client.chat_vision` / `chat_text` 等）返回 `tuple[BaseModel, list[VisionEvent]]`；事件由客户端层 `event_bus.publish` 广播。`silent=True` 跳过广播但仍 log。`ir_value` 是 Any 类型，与前端 lodash.set 写入路径（含 ir_target.field）的语义对齐。
+- **D10 事件持久化按资源 kind 路由**：`event_bus.publish` 按 `tasks.resource_kind + resource_id` 落 jsonl 文件——sample → `samples/{sid}/extracted/events_{task_id}.jsonl`，project → `projects/{pid}/pipeline/events_{task_id}.jsonl`，未知或 template 在 KB 接入前回退到 `system/dev_events/`。jsonl 同时是 EventBus 的 sequence high-water mark 真理源。
+- **D11 SSE 流通过 snapshot 切分**：浏览器 `EventSource` 自动维护 `Last-Event-ID`；后端 `/api/tasks/{id}/events` 在 `event_bus` 的 task lock 内原子拿 (queue, snapshot)，调 `replay(from_event_id=..., until_seq=snapshot)` 推历史，再从队列推 live 事件（sequence > snapshot）。两段集合不重叠，无须客户端 dedup。每条 SSE 三行格式（`id` / `event` / `data`），`id` 字段不可省略。
+- **D12 任务表含资源回链**：`tasks` 表自 Phase 0.5 起新增 `resource_kind` / `resource_id` / `events_jsonl_path` 三列；老库通过 `init_db` 内置 idempotent ALTER 自动迁移。`last_event_sequence` 列在 0.5 二核审计后被移除（jsonl 已是真理源），老库残留该列不影响读写。
