@@ -1,3 +1,28 @@
+## [2026-06-09-3] docs: plan v3.3 — add media timeline, extract history entry, workbench UX issue ISS-011
+
+### 改动
+
+Phase 1B 成品试用后吸收用户反馈：四处工作台体感缺口（看不到原视频 / VLM 卡片乱序 / Reasoning 截断 / 离开工作台找不回 task）按"是否属于已落地 UI 修补"二分。前三条同源同栈合并为 ISS-011 单条 issue 走代码修复（不进 Plan 正文、不拆三条）；后两条属新能力 / 数据通路新增，规划进 Phase 2.5 / Phase 2.6。本次仅改 PLAN.md 与 003ISSUES.md，未动代码。
+
+- PLAN.md 阶段总览：Phase 2.5 标题追加「+ 提取历史入口」；Phase 2.6 标题追加「+ 媒体时间线」
+- PLAN.md Phase 2.5 目标段追加"提取历史入口"叙事；前置条件加 `tasks` 表 `resource_kind/resource_id` 已稳定；新增"提取历史入口与工作台面包屑改动（建议 5 收口）"小节——后端 `GET /samples/{id}/tasks` + `GET /projects/{id}/tasks` + `tasks_store.list_by_resource` + DB `idx_tasks_resource` 复合索引；前端 `<ExtractHistoryList>` 子组件 + `WorkbenchBreadcrumb.tsx`；验证方式追加 7 / 8
+- PLAN.md Phase 2.6 目标段升级为四件事（壁钟甘特图 / 媒体时间线 / 因果链 / 回归基础设施）；本阶段补 `VisionEvent.media_ts: float | None` 与 `media_ts_range: tuple[float, float] | None` 字段 + 填充规则约定 + CI 守约；新增 `GET /api/tasks/{task_id}/media-timeline` 端点；前端新增 `WorkbenchMediaTimeline.tsx` 页面 + `workbench.ts` 加 `view="media_timeline"` 与 `currentMediaTs`；Workbench 顶栏 4 选 1 → 5 选 1；验证方式追加第 8 条媒体时间线端到端，原 8 顺延为 9
+- PLAN.md 末尾改动点总结追加「v3.3（2026-06-09）」段，说明 v3.3 的二分判断与本轮文档/编码工作量
+- 003ISSUES.md 新增 ISS-011：合并工作台三处体感缺陷（原视频缺位 / VLM 卡片乱序 / Reasoning 截断）为单条 issue，含修复方向（视频/帧 toggle / stage 分组视图 / reasoning 折叠展开），不拆条
+- ARCHITECTURE.md / STRUCTURE.md 不动：本轮仅规划未落地代码，按 000README 规范"只写当前事实"
+
+### 涉及文件
+
+- PLAN.md：阶段总览 + Phase 2.5 + Phase 2.6 + 改动点总结 v3.3
+- docs/003ISSUES.md：追加 ISS-011（合并条目）
+
+### 关联
+
+-> ISS-011
+-> decisions/（无，纯计划与体验性 issue 修复方向，无方案分叉）
+
+---
+
 ## [2026-06-09-2] refactor(phase1b): hoist audio to TemplateIR top, unify degraded path namespace, retire compat patches
 
 ### 改动

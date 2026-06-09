@@ -58,8 +58,8 @@ SceneEcho 解决一个真实痛点：**一镜到底口播视频枯燥，需要�
 | 阶段 1A | 视觉理解能力单点验证 | 📋 待开始 | 字幕样式/贴纸/缩放方向/转场/调色/蒙版/动画细节，每个独立 fixture + 指标基线，VLM 调用同步发射 VisionEvent |
 | 阶段 1B | 模板提取集成 | 📋 待开始 | 串联 1A 各能力 → 完整 TemplateIR（含 D2 + Tier B 部分项）→ KB，工作台展示全链路 |
 | **阶段 2** | **★MVP 应用闭环（短素材+指定模板）** | 📋 待开始 | **10–20s 口播 + 选模板 → ASR + 套风格 → MP4；模板推荐与套风格全程在工作台可见** |
-| 阶段 2.5 | NL 编辑 + 参数面板 + 工作台事件回放 | 📋 待开始 | 一句话改 IR 重渲染；Visualize 页改为对历史 VisionEvent 的可回放回顾 |
-| **阶段 2.6** | **AI 决策工作台 v4 升级（甘特图 + 因果链 + 回归基础设施）** | 📋 待开始 | **events 流的三种新用法：visx 甘特图调度视图 / parent_event_id 因果链可视化 / events.jsonl 反向作 ReplayClient 回归测试** |
+| 阶段 2.5 | NL 编辑 + 参数面板 + 工作台事件回放 + 提取历史入口 | 📋 待开始 | 一句话改 IR 重渲染；Visualize 页改为对历史 VisionEvent 的可回放回顾；样例/项目详情页补"提取历史"区块与工作台面包屑 |
+| **阶段 2.6** | **AI 决策工作台 v4 升级（甘特图 + 媒体时间线 + 因果链 + 回归基础设施）** | 📋 待开始 | **events 流的四种新用法：visx 壁钟甘特图 / 媒体时间线（视频时间轴 + 事件 marker + 播放头联动）/ parent_event_id 因果链可视化 / events.jsonl 反向作 ReplayClient 回归测试** |
 | 阶段 3 | 长视频分步审核闭环 | 📋 待开始 | ~3min 长口播 → 9 step 流水线（含 5 个用户审核暂停点）→ 多 Section 拼接；每 step 独立事件流 |
 | 阶段 4 | 标题条 + 音效预设注入 | 📝 略写 | 蒙版/调色/转场已纳入 1A 后，本阶段只剩标题条识别 + 用户手工配置的音效注入 |
 | 阶段 5 | AIGC 扩展（生图 + 视频 + 封面） | 📝 略写 | 贴纸生图 + B-roll 视频生成 + 封面生成，均用户主动触发 |
@@ -1664,14 +1664,15 @@ class Patch(BaseModel):
 
 ---
 
-## 阶段 2.5: NL 编辑 + 参数面板 + 工作台事件回放 📋
+## 阶段 2.5: NL 编辑 + 参数面板 + 工作台事件回放 + 提取历史入口 📋
 
 ### 前置条件
 - 阶段 2 的 `apply_short()` 可产出 ProjectIR 并渲染出 mp4（阶段 2 验证 7+9 通过）。
 - 阶段 0.5 工作台 events.jsonl 持久化文件已稳定可读。
+- 阶段 1B `tasks` 表 `resource_kind / resource_id` 字段已稳定写入（Phase 1B 验证 4 通过）。
 
 ### 目标
-用户用自然语言或参数面板改 ProjectIR → 重渲染拿新 mp4；前端 Visualize 页升级为**工作台事件回放器**——从 `events.jsonl` 读历史按时间顺序重放整个识别 + 应用过程，可作为答辩 demo 录屏素材库。
+用户用自然语言或参数面板改 ProjectIR → 重渲染拿新 mp4；前端 Visualize 页升级为**工作台事件回放器**——从 `events.jsonl` 读历史按时间顺序重放整个识别 + 应用过程，可作为答辩 demo 录屏素材库；**样例 / 项目详情页补"提取历史"区块 + 工作台顶栏补面包屑**，把 task_id 唯一寻址升级为有目录的可寻址，杜绝"离开工作台就找不回上次跑过的 task"。
 
 ### 设计约束（本阶段必守）
 - NL 编辑/参数面板修改都只改 IR 结构，不改像素；patch 可回滚（D3 / 核心原则）。
@@ -1717,6 +1718,27 @@ class Patch(BaseModel):
   - 底部：四步链路摘要（抽取 / 映射 / 缺口 / 补全）作为静态卡片，每张卡片可点击「跳到该步对应的事件区间」
 - **扩展** `frontend/src/api/events.ts`：加 `fetchReplayEvents(projectId)` 与 `snapshotAtSequence(projectId, sequence)`
 
+### 提取历史入口与工作台面包屑改动（建议 5 收口）
+
+> 痛点定位：当前 Workbench 通过 task_id 唯一寻址进入，但前端没有任何"目录"——用户在样例上传页跳转到 `/workbench/{task_id}` 后，离开页面就再也找不到这次提取的入口；样例侧也没有"本样例历史所有提取任务"的列表。寻址表完全缺失。
+
+- **扩展** `backend/app/api/samples.py`：
+  - `GET /samples/{id}/tasks` 返回 `[{task_id, kind, status, progress, stage, created_at, updated_at}]`，按 `created_at DESC` 排序；底层 `tasks_store.list_by_resource(resource_kind="sample", resource_id=id)`
+- **扩展** `backend/app/api/projects.py`：
+  - `GET /projects/{id}/tasks` 对称返回该 project 所有 task；底层同 `list_by_resource`
+- **扩展** `backend/app/tasks_store.py`：
+  - `list_by_resource(resource_kind, resource_id) -> list[TaskRow]`：纯查询，加 `WHERE resource_kind=? AND resource_id=?` 索引
+  - DB 迁移加 `idx_tasks_resource` 复合索引 `(resource_kind, resource_id, created_at DESC)`
+- **扩展** `frontend/src/pages/SampleExtract.tsx`（样例上传 / 详情页）：
+  - 详情区下方新增 `<ExtractHistoryList sampleId={id}>` 子组件：调 `GET /samples/{id}/tasks`，按时间倒序列出，每行 `{task_id 短哈希 / status 徽章 / stage / created_at 相对时间}`，行点击 → `navigate("/workbench/" + task_id)`
+  - 失败/进行中的 task 用 `--color-warning / --color-info` 染色徽章区分
+- **扩展** `frontend/src/pages/TemplateLibrary.tsx`：模板详情页"事件回放"按钮旁追加"本样例其它提取记录"折叠区（同 `<ExtractHistoryList>` 子组件复用）
+- **新增** `frontend/src/components/workbench/WorkbenchBreadcrumb.tsx`：
+  - 挂在 `Workbench.tsx` 顶栏左侧（与 view 切换器同一行）
+  - 数据源：进入 Workbench 时按 `task_id` 查 `GET /tasks/{task_id}`（已有端点）拿 `resource_kind / resource_id`，再按 kind 取 `sample.name` / `project.name`（`GET /samples/{id}` / `GET /projects/{id}` 任一存在则展示）
+  - 渲染：`样例 > {sample_name} > 提取任务 #{task_id 前 8 位}`，每段可点击；最后一段为当前任务、非链接
+  - 失败回退：拉不到 resource 时只渲染 `任务 #{task_id 前 8 位}`，不阻塞页面
+
 ### 验证方式
 1. `pytest backend/tests/integration/test_nl_edit.py`：固定 ProjectIR 测典型指令：
    - `"字幕改黄色描边黑色"` → patches 含 `{"op":"set_caption_style","value":{"color":"#FFD400","stroke_color":"#000000"}}`
@@ -1730,35 +1752,43 @@ class Patch(BaseModel):
 4. 重渲染 cancel：连续 3 次 NL 编辑（每次间隔 100ms）→ 后台应只完成最后一次渲染。
 5. **工作台事件回放**：访问 `/projects/{id}/replay` → 时间线从 0% 走到 100% → 三栏与原始任务跑时一致 → IRPane 字段填充顺序与 sequence 严格对应 → 导出 30s 录屏 webm 文件存在。
 6. 端到端：浏览器在 Editor 输入"字幕换成黄色"→ 看到预览字幕变色 → 点渲染 → mp4 字幕变色 → 工作台第二栏出现"NL 解析：字幕颜色改 #FFD400"事件。
+7. **提取历史端到端**（建议 5）：浏览器跑两次 `sample_basic_15s` extract（间隔 ≥ 1s）→ 离开 Workbench 回 `/samples/{sample_basic_15s}` → 看到 `ExtractHistoryList` 列出 2 条任务（时间倒序）→ 点第一条 → 进入对应 `/workbench/{task_id}`；Workbench 顶栏面包屑显示 `样例 > sample_basic_15s > 提取任务 #{tid}`，点击"样例"段回到样例详情页。
+8. **面包屑容错**：手动构造一个 `tasks` 表里 `resource_kind=NULL` 的旧任务 → 进入 Workbench → 面包屑回退为 `任务 #{tid}`，不报错、不空白。
 
 ---
 
-## 阶段 2.6: AI 决策工作台 v4 升级（甘特图 + 因果链 + 回归基础设施）📋
+## 阶段 2.6: AI 决策工作台 v4 升级（甘特图 + 媒体时间线 + 因果链 + 回归基础设施）📋
 
 ### 前置条件
 - 阶段 2 ★MVP 闭环已稳定（Phase 2 验证 7+9+10 通过；短素材选模板出 mp4 + 工作台事件流可见）。
 - 阶段 2.5 工作台事件回放器已稳定（Phase 2.5 验证 5+6 通过；events.jsonl 历史文件可读、Visualize 页能拖拽时间线）。
 - Phase 0.5 已在 `VisionEvent` IR 加 `duration_ms` 字段、`llm.client.chat_vision()` 已用 `time.perf_counter()` 自动回填该字段。
+- **本阶段在 `VisionEvent` IR 加 `media_ts: float | None` 与 `media_ts_range: tuple[float, float] | None` 字段**（Phase 0.5 已完工不回填字段，本阶段补 schema 增量 + gen_schema 重生成 zod），含义为"该事件锚定的视频媒体时间（秒）/ 时间区间"。约定填充规则：单帧型事件（caption_style / sticker / zoom_direction 等含 `frame_url` 的实体事件）填 `media_ts` 为该帧 ts；跨段事件（tagging / sanity_check / segment）填 `media_ts_range` 覆盖区间；无关事件（system / progress）两者皆 null。CI `scripts/check_event_emission.py` 守住"实体事件至少有一项 media_ts*"。所有 1A / 1B 已落地的 `chat_vision()` 发事件处按子能力补一次 `media_ts=ts`（无新事件、只是补字段）；后续 Phase 不需重跑 golden_runs（旧 events 字段缺失等价两者皆 null，回归仍绿）。
 - Phase 1A 已对两阶段 VLM 调用强制填 `parent_event_id`（CI `scripts/check_parent_event_id.py` 绿）。
 - Phase 1B 已 commit 至少 3 个 sample 的 `tests/fixtures/golden_runs/{sid}/{events.jsonl, template.json}` 种子文件（Phase 1B 验证 8）。
 
 ### 目标
-把工作台从「事件列表 + 回放器」升级为「甘特图调度视图 + 因果链可视化 + AI 决策痕迹回归基础设施」。三件事是同一份数据（events 流）的三种新用法：
-1. **甘特图视图**：把 1A 子能力的并发 + Phase 3 step 的串行用 lane 形式可视化，"30 秒 extract 里 VLM 字幕花 5s、贴纸 8s、调色 3s 并发完成" 一眼可见
-2. **因果链可视化**：父子事件在工作台中栏 + 甘特图上画 dashed line，"识别红色矩形 → 判为 CTA → 决定字幕样式 = 强调红色" 的推理路径可见
-3. **events.jsonl 作 regression fixture**：通过 `ReplayClient` 把历史 events 重放到 mock VLM → 验证 IR 重建一致性；模型升级 / 子能力代码改动时 CI 自动跑、IR 字段语义漂移立即被发现
+把工作台从「事件列表 + 回放器」升级为「壁钟甘特图 + 媒体时间线 + 因果链可视化 + AI 决策痕迹回归基础设施」。四件事是同一份数据（events 流）的四种新用法：
+1. **壁钟甘特图视图**：把 1A 子能力的并发 + Phase 3 step 的串行用 lane 形式可视化，横轴为 wall-clock；"30 秒 extract 里 VLM 字幕花 5s、贴纸 8s、调色 3s 并发完成"一眼可见——服务于 AI 工程师 / 调试视角
+2. **媒体时间线视图（建议 3）**：以**视频媒体时间**（不是壁钟）为横轴，事件以 marker 落点在时间线上；顶部嵌入原视频 `<video>` 播放器，播放头与 marker 双向联动——服务于创作者 / 产品视角，回答"视频第 3.4s 处 AI 都做了什么决策"
+3. **因果链可视化**：父子事件在工作台中栏 + 两个时间线视图上画 dashed line，"识别红色矩形 → 判为 CTA → 决定字幕样式 = 强调红色" 的推理路径可见
+4. **events.jsonl 作 regression fixture**：通过 `ReplayClient` 把历史 events 重放到 mock VLM → 验证 IR 重建一致性；模型升级 / 子能力代码改动时 CI 自动跑、IR 字段语义漂移立即被发现
 
-> **方法论**：工作台从"被动观测"升级为"AI 治理基础设施"。这三件事共享同一套渲染管线（hover 联动、`selectedEventId` state、stage 染色）与同一份数据（events 流），因此打包到一个阶段而非分散到 1A/1B/2.5 各处。
+> **为什么不与壁钟甘特图合并**：横轴语义不同——甘特图横轴是"调用何时发起、跑了多久"，媒体时间线横轴是"事件指向视频的哪一刻"。两轴互补不重叠；同一份 events 数据、两种投影。在统一视图里同时承载两种横轴会让 hover / zoom / selection 语义打架。
+
+> **方法论**：工作台从"被动观测"升级为"AI 治理基础设施"。这四件事共享同一套渲染管线（hover 联动、`selectedEventId` state、stage 染色）与同一份数据（events 流），因此打包到一个阶段而非分散到 1A/1B/2.5 各处。
 
 ### 设计约束（本阶段必守）
-- **实时增量渲染**：甘特图必须支持 SSE 推一条事件 → SVG 增加/更新一个横条，不全量重画；用 visx 的 React 声明式管线天然支持（避免 D3 命令式 enter/update/exit 心智负担）。
-- **三视图共享 selection state**：列表 / 帧 / IR 树 / 甘特图四种视图共享 `workbench.ts` 的 `selectedEventId` Zustand state；任一视图点选 → 其他三视图联动高亮。
+- **实时增量渲染**：甘特图与媒体时间线都必须支持 SSE 推一条事件 → SVG 增加/更新一个横条或 marker，不全量重画；用 visx 的 React 声明式管线天然支持（避免 D3 命令式 enter/update/exit 心智负担）。
+- **四视图共享 selection state**：列表 / 帧 / IR 树 / 甘特图 / 媒体时间线五种视图共享 `workbench.ts` 的 `selectedEventId` Zustand state；任一视图点选 → 其他视图联动高亮。
+- **媒体时间线 ↔ 视频播放头双向 sync**：视频播放进度推送 `currentMediaTs` → marker 高亮当前 ts 邻域 ±0.5s 内的事件；点击 marker → `<video>.currentTime = event.media_ts`；拖拽时间轴游标 → 视频 seek。
 - **ReplayClient 纯函数性**：同一 fixture 跑两次必产出位级别一致的 IR；ReplayClient 不调任何外部 API（无网络依赖，CI 毫秒级跑过）。
 - **golden_runs 入库 review 强制**：种子文件入库时必须人工 review 一遍 events.jsonl（无 PII / 无 API key 泄漏 / IR 字段语义符合预期），review 通过才 git commit；CI 跑 ReplayClient 与 commit 的 golden IR 比对。
 - **不加 `child_event_ids` 双向链**：前端从 `events` 列表按 `parent_event_id` O(1) 增量构建 `childIndex: Map<parentId, eventId[]>`，避免后端 schema 冗余字段、避免父事件发出后回头改的逻辑复杂度。
 
 ### 后端改动
 - **扩展** `backend/app/api/events.py`：新增 `GET /api/tasks/{task_id}/gantt` 端点，从 `events_{task_id}.jsonl` 聚合返回 visx 友好的 lane 列表 `{lanes: [{stage, color_token, events: [{event_id, start_ms, duration_ms, semantic_label, parent_event_id, reasoning, confidence}]}], total_duration_ms: int}`；按 stage 命名规范前缀分组（`1A.captions` 与 `1A.captions_anim` 同 lane group 还是分两 lane？默认按完整 stage 字符串分 lane，超过 20 lane 时折叠到 stage 前缀第一级——保留扩展空间）。
+- **扩展** `backend/app/api/events.py`：新增 `GET /api/tasks/{task_id}/media-timeline` 端点（建议 3 媒体时间线），从 `events_{task_id}.jsonl` 聚合返回 `{markers: [{event_id, media_ts | null, media_ts_range | null, stage, color_token, semantic_label, parent_event_id, reasoning, confidence, frame_url | null}], video_url: str, video_duration_sec: float}`；只输出含 `media_ts` 或 `media_ts_range` 的事件，过滤 `media_ts*` 全 null 的系统事件；`video_url` 按 `task.resource_kind / resource_id` 反查 `samples/{sid}/normalized.mp4` 或 `projects/{pid}/normalized.mp4` 静态路径。
 - **新增** `backend/app/llm/replay_client.py`：
   - `class ReplayClient(LLMClient)`：实现 `LLMClient` 抽象基类的所有方法（`chat_vision` / `chat_text` / `transcribe` / `extract_bgm`）
   - 构造时传 `golden_run_path: str` → 读 events.jsonl 到 `dict[stage, deque[VisionEvent]]`（按 stage 维护 FIFO 队列）
@@ -1790,11 +1820,19 @@ class Patch(BaseModel):
   - 根据 `childIndex` 画 SVG `<path>` overlay 连父子卡片
   - hover 父事件 → 所有子卡片加 `border: var(--accent-primary)`；反之亦然（与甘特图同步）
 - **扩展** `frontend/src/state/workbench.ts`：
-  - 加 `view: "list" | "gantt"`（URL query param 同步）
-  - 加 `selectedEventId: string | null`（四视图共享）
+  - 加 `view: "list" | "gantt" | "media_timeline"`（URL query param 同步）
+  - 加 `selectedEventId: string | null`（多视图共享）
+  - 加 `currentMediaTs: number | null`（媒体时间线视图当前播放头 / 拖拽位置，供 marker 高亮邻域计算用）
   - 加派生 selector `childIndex: Map<parentId, eventId[]>`（从 `events` 数组 useMemo 增量计算；events push 时 O(1) 更新）
-- **扩展** `frontend/src/api/events.ts`：`fetchGanttData(taskId): Promise<GanttLanes>` 调 `/api/tasks/{taskId}/gantt`
-- **扩展** `frontend/src/pages/Workbench.tsx`：顶栏加 view 切换 segmented control（4 选 1：列表 / 帧 / IR 树 / 甘特图）；URL `?view=` query param 双向同步；切换时复用同一 `taskId` 的 events 数据，不重新 fetch
+- **扩展** `frontend/src/api/events.ts`：`fetchGanttData(taskId): Promise<GanttLanes>` 调 `/api/tasks/{taskId}/gantt`；`fetchMediaTimeline(taskId): Promise<MediaTimelinePayload>` 调 `/api/tasks/{taskId}/media-timeline`
+- **新增** `frontend/src/pages/WorkbenchMediaTimeline.tsx`（路由：`/workbench/:taskId?view=media_timeline`，也作为 `Workbench.tsx` 的可切换 tab）：
+  - 顶部：`<video src={video_url} controls>` 嵌入原视频；`onTimeUpdate` 持续 push `currentMediaTs` 到 store
+  - 中央 SVG：单一时间轴（`scaleLinear` domain=[0, video_duration_sec]），按 stage 分若干横向条带（每个 stage 一行 lane）；事件按 `media_ts` 落点为小三角 marker（`<polygon points="0,-6 -5,4 5,4">`），`media_ts_range` 事件渲染为半透明矩形条段（`<rect>` width=range 长度）
+  - **播放头联动**：`currentMediaTs` 处画竖线 `<line stroke="var(--accent-primary)">`；±0.5s 邻域内 marker 加 `accent-primary` 描边
+  - **marker 交互**：hover 显示 tooltip（stage / media_ts / reasoning 摘要 / frame_url 缩略图）；点击 marker → `setSelectedEventId(event_id)` + `<video>.currentTime = media_ts`，URL `?view=list` 时其他视图同步高亮
+  - **拖拽时间游标**：在时间轴顶部放一个 `<rect>` cursor handle，鼠标拖拽 → `<video>.currentTime = ts` + 更新 `currentMediaTs`
+  - **因果链**：复用 Gantt 同一套 `parent_event_id` 渲染逻辑，dashed `<path>` 连父 marker → 子 marker
+- **扩展** `frontend/src/pages/Workbench.tsx`：顶栏加 view 切换 segmented control（5 选 1：列表 / 帧 / IR 树 / 甘特图 / 媒体时间线）；URL `?view=` query param 双向同步；切换时复用同一 `taskId` 的 events 数据，不重新 fetch
 
 ### 渲染服务改动
 - 无（本阶段不涉及渲染）。
@@ -1814,8 +1852,9 @@ class Patch(BaseModel):
    - 故意 push 一个 1A 子能力的 prompt 微调 commit（不改 IR 字段）→ ReplayClient 不走真实 VLM 所以 test 仍绿（证明回归测试只盯 IR 字段稳定性，不会被 prompt 变化误报）
 5. **golden runs 录制流程**：`python scripts/record_golden.py --sample sample_basic_15s` → `tests/fixtures/golden_runs/sample_basic_15s/{events.jsonl, template.json}` 生成 → git diff 显示新增 2 文件 → 人工 review 无 PII → commit。
 6. **CI golden-runs job 绿灯**：push → Actions 该 job 通过（不需 GPU、不需 API key、< 5s 跑完）；故意 push 一个修了 IR 字段语义的 commit → 该 job 红 + diff 提示具体字段。
-7. **视图切换 URL 同步**：手动改 URL `?view=gantt` ↔ `?view=list` ↔ `?view=ir` → Workbench 顶栏切换器 + 实际视图同步切换；浏览器后退按钮可回到上一个 view。
-8. **答辩演示价值验证**（主观）：录一段 30s 屏幕录像，开场 5s 切到甘特图视图 → 评审一眼看到"AI 30 秒里到底干了什么"——这是项目可解释性的视觉冲击点；中段切因果链 hover → 展示"AI 的思考链"。
+7. **视图切换 URL 同步**：手动改 URL `?view=gantt` ↔ `?view=list` ↔ `?view=ir` ↔ `?view=media_timeline` → Workbench 顶栏切换器 + 实际视图同步切换；浏览器后退按钮可回到上一个 view。
+8. **媒体时间线端到端**（建议 3）：跑 `sample_basic_15s` extract → 切到媒体时间线视图 → 视频可播放、播放时游标随播放头滑动、邻域内的事件 marker 加 accent 描边；点击 marker → 视频跳到该 `media_ts` + 中栏卡片高亮；拖拽时间游标到 8s 处 → 视频跳到 8s + marker 高亮邻域更新；hover marker tooltip 显示 stage + media_ts + reasoning 摘要 + 帧缩略图。
+9. **答辩演示价值验证**（主观）：录一段 30s 屏幕录像，开场 5s 切到甘特图视图 → 评审一眼看到"AI 30 秒里到底干了什么"——这是项目可解释性的视觉冲击点；中段切因果链 hover → 展示"AI 的思考链"；尾段切媒体时间线 → 演示"视频任意一刻 AI 做了什么决策"，三视图互补呈现可解释性。
 
 ### 课题对齐
 - **评分项 6（迁移过程可视化，10 分）**：甘特图 + 因果链把"迁移过程"从"日志列表"升级为"调度时间线 + 推理图谱"，直接命中"清晰展示如何迁移、如何补全"的高分要求
@@ -2253,6 +2292,25 @@ category 取值：`whoosh | ding | pop | typing | swoosh | impact | bell | trans
 ---
 
 ## 改动点总结
+
+### v3.3（2026-06-09）：Phase 1B 用户反馈 — 媒体时间线 + 提取历史入口
+
+Phase 1B 成品试用反馈把"看不到原视频"+"VLM 卡片乱序"+"Reasoning 截断"+"离开工作台找不回 task"四个工作台体感缺口逼出来。判断后：
+
+- **前三条合并为一条 Issue 走 003ISSUES.md 修代码（ISS-011）**：均为 Phase 0.5 / Phase 1B 已落地的 UI 缺陷（右栏视频入口在原视频帧位置补 video 元素 / 中栏按 stage 分组视图 / Reasoning 折叠展开），同源同栈、一次性收口，不进 Plan 正文也不拆为三条 issue。
+- **后两条进 Plan**：媒体时间线是新视图（与 Phase 2.6 壁钟甘特图正交、共用同一份 events 数据），提取历史入口是寻址表层缺失（需后端补 `list_by_resource` 查询 + 前端 `ExtractHistoryList` + Workbench 面包屑）；均不属于 Issue 修补可覆盖的范围，按阶段性新能力规划。
+
+**Phase 2.5 扩展**：标题升级为「NL 编辑 + 参数面板 + 工作台事件回放 + 提取历史入口」；新增"提取历史入口与工作台面包屑改动"小节——后端 `GET /samples/{id}/tasks` + `GET /projects/{id}/tasks` + `tasks_store.list_by_resource`；前端 `<ExtractHistoryList>` 子组件 + `WorkbenchBreadcrumb.tsx`；DB 加 `idx_tasks_resource` 复合索引。验证方式追加 7 / 8（端到端 + 面包屑容错）。
+
+**Phase 2.6 扩展**：标题升级为「甘特图 + 媒体时间线 + 因果链 + 回归基础设施」；目标从三件事升级为四件事。Phase 0.5 前置条件追加 `VisionEvent.media_ts: float | None` 与 `media_ts_range: tuple[float, float] | None` 字段约束 + CI 守住"实体事件至少有一项 media_ts*"；后端新增 `GET /api/tasks/{task_id}/media-timeline` 端点；前端新增 `WorkbenchMediaTimeline.tsx` 页面（顶部嵌入 `<video>` + 时间轴 marker + 播放头双向 sync + dashed 因果链复用）；`workbench.ts` 加 `view` 第三值 `"media_timeline"` + `currentMediaTs`；Workbench 顶栏 view 切换器 4 选 1 → 5 选 1。验证方式追加 8（媒体时间线端到端），原 8 顺延为 9。
+
+**与 Phase 2.6 壁钟甘特图的边界**：两视图横轴语义不同，互补不重叠——甘特图横轴是 wall-clock（"调用何时发起、跑了多久"，服务调试视角）；媒体时间线横轴是 media time（"事件指向视频的哪一刻"，服务创作者视角）。同一份 events 数据、两种投影。
+
+**这一轮工作量**：
+- 文档：PLAN.md 局部改（阶段总览 / Phase 2.5 / Phase 2.6 / 本节）+ 003ISSUES.md 新增 1 条 Issue（ISS-011 合并工作台三处体感缺陷）
+- 实际编码：Phase 2.5 ExtractHistoryList + Breadcrumb 大致 0.5 天；Phase 2.6 MediaTimeline 大致 1.5 天（在已有 Gantt 渲染管线基础上复用 visx + 视频 sync）
+
+---
 
 ### v3.2（2026-06-07）：工作台 v4 升级 — 甘特图 + 因果链 + 回归基础设施
 
