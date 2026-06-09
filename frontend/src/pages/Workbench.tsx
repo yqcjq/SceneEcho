@@ -1,6 +1,6 @@
 import React from "react";
 import { useParams } from "react-router-dom";
-import { subscribeEvents } from "../api/events.js";
+import { fetchEventHistory, subscribeEvents } from "../api/events.js";
 import { pollTask, type TaskStatus } from "../api/index.js";
 import { WorkbenchEventStream } from "../components/workbench/WorkbenchEventStream.js";
 import { WorkbenchIRPane } from "../components/workbench/WorkbenchIRPane.js";
@@ -47,17 +47,59 @@ export const Workbench: React.FC = () => {
   const togglePause = useWorkbenchStore((s) => s.togglePause);
   const task = useTaskStatus(taskId);
 
+  /**
+   * "History sync" — pull every persisted event and shovel them through
+   * ``appendEvent``. Cheap because the store dedups by event_id; idempotent
+   * because we never go through the live queue. This is the second leg
+   * that closes the SSE race: whatever live missed, history backfills.
+   */
+  const syncHistory = React.useCallback(
+    async (id: string) => {
+      try {
+        const events = await fetchEventHistory(id);
+        for (const e of events) appendEvent(e);
+      } catch {
+        // Best-effort. SSE may already have everything; user can refresh
+        // if both paths fail (which would be a bigger problem than a
+        // missing card).
+      }
+    },
+    [appendEvent],
+  );
+
   React.useEffect(() => {
     if (!taskId) return;
     reset(taskId);
-    // The SSE endpoint replays history-then-live on connect. We deliberately
-    // do NOT call fetchEventHistory in addition — that would race with live
-    // events and possibly clobber them.
+    // The SSE endpoint replays history-then-live on connect. We rely on
+    // the store's event_id dedup so the optional history sync below
+    // won't double-write — meaning we can fearlessly call it on terminal
+    // status to close any SSE gap.
     const teardown = subscribeEvents(taskId, {
       onEvent: (e) => appendEvent(e),
+      onDone: () => {
+        // SSE done means the server flushed its replay+live. Anything
+        // still missing is a delivery race — backfill from history.
+        void syncHistory(taskId);
+      },
     });
     return teardown;
-  }, [taskId, reset, appendEvent]);
+  }, [taskId, reset, appendEvent, syncHistory]);
+
+  /**
+   * Terminal-state safety net: if SSE never delivers ``done`` (e.g. the
+   * connection dropped mid-flight and reconnect missed the sentinel), the
+   * task-status poll still reaches completed/failed. Trigger a history
+   * sync there too so the workbench always converges.
+   */
+  const lastSyncedRef = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    if (!taskId || !task) return;
+    if (task.status !== "completed" && task.status !== "failed") return;
+    const key = `${taskId}:${task.status}`;
+    if (lastSyncedRef.current === key) return;
+    lastSyncedRef.current = key;
+    void syncHistory(taskId);
+  }, [taskId, task, syncHistory]);
 
   if (!taskId) {
     return (

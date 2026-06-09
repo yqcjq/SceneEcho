@@ -74,7 +74,8 @@ IR（pydantic 模型）位于 `backend/app/ir/`，作为「人 / AI / 渲染器�
 - 跨服务文件传递只用相对 `DATA_ROOT` 的 POSIX 路径字符串，禁止绝对路径。
 - AI 客户端（`app.llm.client`）只通过 `event_bus.publish` 广播事件；调用方不得绕过客户端层直接发事件。
 - `event_bus` 不依赖 `tasks_store`：`main.py` lifespan 注入 `tasks_store.get_task` 作为 lookup callback；`tasks_store.create_task` 仅静态调用 `EventBus.resolve_events_path` 计算路径，不引入运行时反向依赖。
-- `extract/*` 子能力模块只 import `app/{ir,event_bus,llm,extract,logging,config,render}`；不反向依赖 `api/` 或 `understand/`，调度 / 编排在 `api/lab.py`（dev）以及未来 1B 的 `extract/pipeline.py`（待建）里。
+- `extract/*` 子能力模块只 import `app/{ir,event_bus,llm,extract,logging,config,render}`；不反向依赖 `api/` 或 `understand/`，调度 / 编排在 `api/lab.py`（dev）以及 `extract/pipeline.py`（1B 完整 DAG）里。
+- `kb/*` 只 import `app/{ir,event_bus,llm,extract,frame_sampler,config,logging}`；`api/templates.py` 调 `kb.store`，`extract/pipeline.py` 调 `kb.store` 落库。`kb` 不反向依赖 `api/`。
 - `understand/vision.py` 是语义层，依赖 `extract/captions.py` 的 `CaptionEvent` dataclass + `llm/client.py` 的 `chat_vision`；caption_function 之类的"phase2 分类"由调用方在拿到 `extract` 输出后再调，并通过 `parent_event_id` 把事件挂到对应的 caption 实体事件下。
 - 重 ML 依赖（PySceneDetect / opencv-python-headless / librosa / Demucs / torch）放在 `pip install -e ".[extract]"` 可选 extras；每个 `extract/*` 模块在用前 `try: import ... except ImportError`，缺包时返回 fallback 形状 + 发 `severity="warning"` VisionEvent，不阻塞 pipeline。
 
@@ -85,6 +86,7 @@ IR（pydantic 模型）位于 `backend/app/ir/`，作为「人 / AI / 渲染器�
 | 数据类型 | 存储位置 | 说明 |
 |---------|---------|------|
 | 任务态（progress / stage / result + resource_kind/id + events_jsonl_path） | `DATA_ROOT/kb.sqlite` 的 `tasks` 表 | WAL 模式；后端写、前端读 |
+| 模板库（TemplateIR + tags + thumbnail + last_extract_task_id） | `DATA_ROOT/kb.sqlite` 的 `templates` 表 | WAL；`api/templates` 读写 / `extract/pipeline` 写 |
 | 上传媒体 / 归一化产物 / 渲染输出 | `DATA_ROOT/{samples,projects}/...` | 文件系统，相对路径在 IR 内引用 |
 | ProjectIR / TemplateIR / TranscriptLedger | `projects/{id}/project.json` 等 | JSON 落盘，供回放、调试 |
 | AI 决策事件流（VisionEvent jsonl） | `samples/{sid}/extracted/events_{task_id}.jsonl`、`projects/{pid}/pipeline/events_{task_id}.jsonl` | 路径方案 B：随资源走、task_id 作后缀；event_bus.publish 写入、SSE replay 与 history 端点读；同时承担 EventBus 的 sequence high-water mark 真理源（重启后 lazy 读最后一行恢复计数） |
@@ -180,6 +182,40 @@ python -m app.cli ingest-sample /local/path.mp4
 任务完成 → close_task → SSE event: done → 浏览器 EventSource 关闭
 ```
 
+**链路 E：Phase 1B 模板提取 → KB**
+```
+浏览器 /sample-extract
+  → POST /api/samples (multipart)         # 已有，沿用链路 A 的上传
+  → POST /api/samples/{sid}/extract       # 1B 新增
+     → tasks_store.create_task("extract_template", resource_kind="sample", resource_id=sid)
+        路径方案 B → events_jsonl_path = samples/{sid}/extracted/events_{task_id}.jsonl
+     → BackgroundTask: extract_template(sid, task_id)
+        → Phase1AContext(sid, normalized.mp4, task_id)
+        → ffprobe duration → 发 1B.pipeline start event
+        → _run_phase1a (asyncio.gather 七路并发):
+             captions / stickers / zoom_direction / transitions / masks / color_lut / audio
+             每个子能力包在 _safe(label, field_key, coro): 抛异常→ degraded[field_key]=str(e)
+             + 发 severity=warning 事件 + 不阻塞其他 branch（D21）
+          ↓
+        → 依赖层串行 fan-out:
+             zoom_curve（仅 direction != 稳定 的 scene）
+             captions_anim（per caption）→ verified_anim_in 回写 Phase1AReport.captions[i]
+             caption_function（per caption）→ function 回写 Phase1AReport.captions[i].function
+        → assemble Phase1AReport
+        → build_skeleton(report, duration, task_id): 位置阈值发现三段
+                                                     → list[Slot] + per-slot 事件
+        → tagging.suggest_tags(ir, frames, task_id):  1 次 VLM → Tags
+        → sanity.sanity_check(ir, frames, task_id):    1 次 VLM → {ok, issues, ...}
+        → kb_store.save_template(ir, thumbnail_path, last_extract_task_id=task_id)
+           INSERT OR REPLACE INTO templates  (kb.sqlite WAL)
+        → 发 1B.pipeline.done 事件 + tasks_store.update_task(status=completed)
+        → bus.close_task(task_id)
+  ← 浏览器 navigate /workbench/{task_id} 看 ≥ 10 条事件 + degraded 字段实时填充
+  ← 完成后 /templates 列表出现新模板
+  ← /templates/{id} 详情：骨架可视化 + sanity verdict + placeholder 编辑 +
+     「回放工作台事件流」按钮 → /workbench/{last_extract_task_id} 重读 jsonl
+```
+
 ---
 
 ## 6. 关键约定
@@ -204,3 +240,6 @@ python -m app.cli ingest-sample /local/path.mp4
 - **D18 Phase 1A 共享上下文**：`backend/app/extract/context.py` 暴露 `Phase1AContext(sample_id, normalized_path, task_id)`，`await ctx.scenes()` / `await ctx.frames()` / `ctx.client(stage)` 三个 lazy 入口在首次调用时计算并缓存。lab runner、1B pipeline、集成测试都以 `ctx` 为入参；多子能力同 fixture 时 `detect_scenes` / `sample_frames` 只执行一次。
 - **D19 Phase 1A 实体事件可视化字段**：每个子能力的实体级 VisionEvent（每条字幕、每枚贴纸、每个 mask 检出）必须填 `frame_url`（指向 entity 首次出现的采样帧 `/data/<rel>`）+ `bbox_norm`（0-999 → 0-1 归一化），工作台左栏 `WorkbenchVisionPane` + `BboxOverlay` 在两个字段同时存在时才渲染帧底图 + 框。`Phase1ACaptionEvent` / `Phase1AStickerDetection` 同时携带 `reasoning` 与 raw VLM 字段（color_hex_raw / anim_in_type_raw / layout_raw 等），右栏 IR 展开可见 VLM 中文解释 + 原始判定。
 - **D20 几何 mask CV 主路径**：`extract/masks.py::detect_masks` 在每个 scene 首/中/末三帧分别跑 `HoughCircles` / Canny 矩形 / `HoughLinesP` 三类几何检测器，多数决（同 kind 至少 ceil(n_frames/2) 票）确认 `has_mask`；CV 全 false 时调一次 VLM 看三帧网格兜底。CV 候选与最终判定事件都带 frame_url + bbox。
+- **D21 1B pipeline 单点降级**：`extract/pipeline.py::_safe(label, field_key, coro)` 包裹每个子能力调用；任一抛异常 → `TemplateIR.degraded[field_key] = str(e)` + 发 `severity="warning"` 事件 + 不阻塞下游。pipeline 自身永不 raise（顶层 `try/except` 仅防御非 `_safe` 路径的 programmer error）；最坏情况是一个 degraded 字段全标的 TemplateIR 仍可入 KB。
+- **D22 模板 = KB 主键 + events 路径回链**：`kb.sqlite` 的 `templates` 表只存 `ir_json + tags + thumbnail + last_extract_task_id`，**绝不复制 events.jsonl**。事件流通过 `tasks.events_jsonl_path`（按 `last_extract_task_id` 反查）就地读取，工作台「回放」一键打开 `/workbench/{last_extract_task_id}`。
+- **D23 Renderer Caption 双模式**：`compositions/Caption.tsx` 由调用方传 `renderMode: "template_preview" | "project_output"` props 区分；前者渲染 `placeholder_text[0]` 作为示例字幕（TemplateLibrary 详情 / 0.5 dev_workbench 预览），后者渲染 ProjectIR 的 `Caption.text`（Phase 2+ 用户素材产物）。组件内**绝不**根据 `text` 是否为空自动切换模式——隐式 fallback 在用户合法传空字符串时会无声跑错。

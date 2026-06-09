@@ -107,7 +107,14 @@ async def sample_frames(
     return samples, [summary]
 
 
-def _extract_frame(src: Path, dst: Path, at: float) -> None:
+def extract_one_frame(src: Path, dst: Path, at: float) -> None:
+    """Public single-frame extractor shared with ``scenes.py``.
+
+    Promoted from ``_extract_frame`` so the scenes subcap can write its own
+    representative frame into the same canonical ``extracted/frames/`` dir
+    without duplicating the ffmpeg incantation. Idempotent: caller checks
+    ``dst.exists()`` first to skip — same convention as ``sample_frames``.
+    """
     dst.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         ffmpeg_bin(),
@@ -123,6 +130,11 @@ def _extract_frame(src: Path, dst: Path, at: float) -> None:
         str(dst),
     ]
     subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+
+# Module-private alias kept for the existing call site below; tests don't
+# touch this name directly.
+_extract_frame = extract_one_frame
 
 
 def _scene_idx_for(ts: float, scenes: Sequence[Scene] | None) -> int | None:

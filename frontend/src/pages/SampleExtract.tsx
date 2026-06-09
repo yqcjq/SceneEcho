@@ -1,11 +1,19 @@
 import React, { useState } from "react";
 import { Link } from "react-router-dom";
-import { dataUrl, renderDemo, uploadSample } from "../api/index.js";
+import { dataUrl, renderDemo, triggerExtract, uploadSample } from "../api/index.js";
 import { TaskProgress } from "../components/TaskProgress.js";
 
+/**
+ * Phase 1B extension (PLAN 1552):
+ * After upload, display sample basic info (duration / streams).
+ * Add an "提取模板" button → calls POST /samples/{id}/extract → navigates
+ * the user to the workbench so they can watch the DAG run end-to-end.
+ */
 export const SampleExtract: React.FC = () => {
   const [sampleId, setSampleId] = useState<string | null>(null);
-  const [taskId, setTaskId] = useState<string | null>(null);
+  const [sampleInfo, setSampleInfo] = useState<any | null>(null);
+  const [renderTaskId, setRenderTaskId] = useState<string | null>(null);
+  const [extractTaskId, setExtractTaskId] = useState<string | null>(null);
   const [outputPath, setOutputPath] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -19,6 +27,7 @@ export const SampleExtract: React.FC = () => {
     try {
       const r = await uploadSample(file);
       setSampleId(r.sample_id);
+      setSampleInfo(r.info);
     } catch (err: any) {
       setError(String(err?.response?.data?.detail ?? err?.message ?? err));
     } finally {
@@ -32,17 +41,32 @@ export const SampleExtract: React.FC = () => {
     setOutputPath(null);
     try {
       const r = await renderDemo(sampleId);
-      setTaskId(r.task_id);
+      setRenderTaskId(r.task_id);
     } catch (err: any) {
       setError(String(err?.response?.data?.detail ?? err?.message ?? err));
     }
   };
 
+  const onExtract = async () => {
+    if (!sampleId) return;
+    setError(null);
+    try {
+      const r = await triggerExtract(sampleId);
+      setExtractTaskId(r.task_id);
+    } catch (err: any) {
+      setError(String(err?.response?.data?.detail ?? err?.message ?? err));
+    }
+  };
+
+  // Pluck a quick summary from the ffprobe-style info blob.
+  const videoStream = sampleInfo?.streams?.find((s: any) => s.codec_type === "video");
+  const durationSec = parseFloat(sampleInfo?.format?.duration ?? "0");
+
   return (
     <div style={{ maxWidth: 720, margin: "40px auto", fontFamily: "system-ui, sans-serif" }}>
-      <h1>SceneEcho · 阶段 0 渲染 Demo</h1>
+      <h1>SceneEcho · 阶段 1B 模板提取</h1>
       <p style={{ color: "#666" }}>
-        上传一段 mp4 → 后端归一化 → 点"渲染 demo" → Node Remotion 出片，叠加 "Hello SceneEcho" 字幕。
+        上传一段 5–20s 样例 → 「提取模板」启动 Phase 1B pipeline → 工作台实时观察全链路 AI 决策 → 完成后入 KB。
       </p>
 
       <div style={{ marginTop: 16 }}>
@@ -53,18 +77,35 @@ export const SampleExtract: React.FC = () => {
       {sampleId && (
         <div style={{ marginTop: 16 }}>
           <div>样例 ID：<code>{sampleId}</code></div>
+          {sampleInfo && (
+            <div style={{ marginTop: 8, fontSize: 13, color: "#555" }}>
+              时长 {durationSec.toFixed(1)}s
+              {videoStream
+                ? ` · ${videoStream.width}×${videoStream.height}@${videoStream.r_frame_rate}`
+                : ""}
+            </div>
+          )}
           <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={onRender} disabled={!!taskId && !outputPath}>
+            <button onClick={onExtract} disabled={!!extractTaskId}>
+              提取模板（Phase 1B）
+            </button>
+            <button onClick={onRender} disabled={!!renderTaskId && !outputPath}>
               渲染 demo
             </button>
-            {taskId && (
+            {extractTaskId && (
               <Link
-                to={`/workbench/${taskId}`}
+                to={`/workbench/${extractTaskId}`}
                 style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: 4 }}
               >
-                打开工作台看 AI 工作过程
+                打开 AI 工作台（提取进行中…）
               </Link>
             )}
+            <Link
+              to="/templates"
+              style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: 4 }}
+            >
+              模板库
+            </Link>
             {import.meta.env.DEV && (
               <Link
                 to="/lab"
@@ -74,12 +115,27 @@ export const SampleExtract: React.FC = () => {
               </Link>
             )}
           </div>
+          {extractTaskId && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: 12,
+                background: "#fff7e8",
+                border: "1px solid #f1cf85",
+                borderRadius: 4,
+                fontSize: 13,
+              }}
+            >
+              正在提取模板，<Link to={`/workbench/${extractTaskId}`}>打开 AI 工作台</Link>{" "}
+              看 VLM/CV 全链路。完成后会进入模板库。
+            </div>
+          )}
         </div>
       )}
 
-      {taskId && (
+      {renderTaskId && (
         <TaskProgress
-          taskId={taskId}
+          taskId={renderTaskId}
           onComplete={(t) => {
             if (t.status === "completed" && t.result?.output_path) {
               setOutputPath(t.result.output_path);

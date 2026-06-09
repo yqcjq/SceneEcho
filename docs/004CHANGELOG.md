@@ -1,3 +1,121 @@
+## [2026-06-09-1] feat(phase1b): extract pipeline DAG → TemplateIR → KB + workbench end-to-end
+
+### 改动
+
+**Phase 1B 整体交付**：把 11 个 Phase 1A 独立子能力串成一个完整的 extract DAG，
+产物落 KB 模板表；前端开 TemplateLibrary 页面浏览 / 编辑 / 回放工作台事件流；
+渲染端补 Mask / ColorLayer / dual-mode Caption。
+
+**Pipeline 编排（backend/app/extract/pipeline.py 新建）**
+- `extract_template(sample_id, task_id, name=None) -> TemplateIR`：按 PLAN.md 1516 的
+  DAG 调度——`scenes → frames`（lazy 一次）→ `captions / stickers / zoom_direction /
+  transitions / masks / color_lut / audio` 七路 `asyncio.gather` 并发 →
+  依赖层 `zoom_curve`（仅非稳定 scene）/ `captions_anim`（per caption）/
+  `caption_function`（per caption）→ `skeleton → tagging → sanity_check → save_template`
+- `_safe(label, field_key, coro)` 包裹每个子能力：抛异常 → 标 `ir.degraded[field_key]`
+  + 发 severity=warning 事件 + 不阻塞下游（PLAN 1507/1532 强约束）
+- 阶段进度通过 `tasks_store.update_task(stage=..., progress=...)` 上报，工作台顶 bar
+  实时刷新；最终发 `1B.pipeline.done` 事件 + 写 IR `id` 字段
+
+**Skeleton（backend/app/extract/skeleton.py 新建）**
+- `build_skeleton(report, total_duration, *, task_id)`：位置阈值发现三段
+  （start<0.30→开头，>0.70→结尾，else 主体；PLAN 1510/D5），连续同 role scene 合并
+- 每个 Slot 聚合：dominant caption / 拼接 zoom_curves（slot-local relative_time
+  归一化）/ first mask / global color_lut / global audio / overlapping stickers /
+  前后 boundary 的 transition
+- `material_req` 推断：有字幕→人物口播；无字幕但有 zoom/sticker/mask→B-roll/包装；
+  皆无→待定（PLAN 1510）
+- 槽位时长 `{min=span*0.7, nominal=span, max=span*1.5}`（PLAN 1505）
+- 每段 Slot 推断发一条 VisionEvent，`ir_target=TemplateIR.skeleton op=append`
+
+**KB store（backend/app/kb/store.py 新建 + __init__.py）**
+- SQLite `templates` 表与 `tasks` 表共用 `kb.sqlite`：列 `id / name / source_sample /
+  ir_json / tags_json / thumbnail_path / last_extract_task_id / created_at`，WAL；
+  `INSERT OR REPLACE` 支持 re-extract 覆盖
+- `save_template / get_template / list_templates / delete_template /
+  update_template_tags / update_caption_placeholder` 六个 CRUD 入口
+- `last_extract_task_id` 列回链 `tasks.events_jsonl_path` 实现"模板→事件流回放"
+  零拷贝（PLAN 1533：events 不重复存）
+
+**Tagging / sanity check（backend/app/kb/tagging.py + sanity.py 新建）**
+- `suggest_tags(ir, frames, task_id)`：1 次 VLM 调用，3 张代表帧 + 骨架文字摘要
+  → `Tags(position/function/scene/notes)`，事件 `ir_target=TemplateIR.tags`
+- `sanity_check(ir, frames, task_id)`：1 次 VLM 复查骨架 / material_req /
+  placeholder_text 合理性 / zoom scale 范围 → `{ok, issues, placeholder_text_reasonable,
+  reasoning}`，事件 `ir_target=TemplateIR.sanity_check`
+
+**KB select 占位 + agent/aigc 占位**
+- `backend/app/kb/select.py`：标签精确匹配最大命中数；Phase 3 才接 LLM rerank
+- `backend/app/agent/{__init__,aigc}.py`：保留模块路径，Phase 5 填实现
+
+**Templates API（backend/app/api/templates.py 新建）**
+- `GET /api/templates` 列表 / `GET /api/templates/{id}` 详情 /
+  `PATCH /api/templates/{id}/tags` / `PATCH /api/templates/{id}/caption-placeholder` /
+  `DELETE /api/templates/{id}` / `GET /api/templates/{id}/events`（事件回放）
+
+**Samples API 扩展**
+- `POST /api/samples/{sample_id}/extract`：创建 extract task（resource_kind=sample
+  → events 落 `samples/{sid}/extracted/events_{task_id}.jsonl`）→ BackgroundTask 跑
+  `extract_template` → 返回 `{task_id, workbench_url}`
+
+**TemplateIR IR 扩展**
+- `TemplateIR.degraded: dict[str, str]`：键 = 失败字段路径，值 = 异常摘要；
+  pipeline 在每个 `_safe` 失败时填，UI 在详情页顶部 banner 提示
+
+**Renderer**
+- `compositions/Caption.tsx` 重写：双模式 `renderMode="template_preview" |
+  "project_output"`（PLAN 1542）；anim_in 全套（fade / 整句滑入 / 淡入 / 打字机 /
+  逐字弹入）；多行布局 `wrapByCharLimit(text, maxCharsPerLine)`
+- `compositions/Mask.tsx` 新建：SVG clipPath 三类几何（circle / rectangle /
+  line_split），0-999 归一化坐标按 canvas 实际像素映射
+- `compositions/ColorLayer.tsx` 新建：CSS filter 预设表（warm / cool / cinematic /
+  high_saturation / low_saturation / flat）按 `dominant_lut_id` 选；包裹视频层，
+  不影响字幕清晰度
+- `compositions/Project.tsx` 重写：底→顶层 `<ColorLayer>video</ColorLayer>` →
+  `<Mask>` → `<Caption>`；从 first slot.style.visual 读 mask/lut
+
+**Frontend**
+- `pages/TemplateLibrary.tsx` 新建：`/templates` 列表（缩略图 + tags 摘要）/
+  `/templates/:id` 详情（骨架可视化 SlotCard + placeholder 编辑器 + sanity verdict +
+  「回放工作台事件流」按钮）；degraded 字段顶部 banner 警示
+- `api/templates.ts` 新建：`triggerExtract / listTemplates / getTemplate /
+  patchTemplateTags / patchCaptionPlaceholder / deleteTemplate / getTemplateEvents`
+- `pages/SampleExtract.tsx` 扩展：上传后展示时长 + 分辨率；新增「提取模板（Phase 1B）」
+  按钮 + 顶部 banner 提示「正在提取，[打开 AI 工作台]」+ 模板库跳转链接
+- `main.tsx` 路由表加 `/templates` / `/templates/:id`；导航条加「模板库」链接
+
+**测试**
+- `tests/unit/test_skeleton.py` 5 条：role 阈值 / 三段产出 / material_req 三种信号 /
+  empty report / 同 role 连续合并
+- `tests/unit/test_kb_store.py` 7 条：round-trip / list ordering / replace-on-id /
+  update_tags 双列同步 / update_caption_placeholder 写 rhythm / 无 caption slot
+  拒绝 / delete 行为
+- `tests/integration/test_extract_1b.py` 1 条 end-to-end：seeded Phase1AContext + 无
+  credentials → 跑完整 pipeline → KB 落行 + 事件总数 ≥ 10 + done 事件压尾 +
+  所有 ir_target 指向 TemplateIR / Phase1AReport（无残留假路径）
+
+### 涉及文件
+- backend/app/ir/template.py：TemplateIR 加 `degraded: dict[str, str]`
+- backend/app/extract/skeleton.py / pipeline.py：新建
+- backend/app/kb/{__init__,store,tagging,sanity,select}.py：新建
+- backend/app/agent/{__init__,aigc}.py：新建 — Phase 5 占位
+- backend/app/api/templates.py：新建
+- backend/app/api/samples.py：扩展 — `POST /samples/{id}/extract`
+- backend/app/main.py：扩展 — 挂 templates 路由 + lifespan 调 `kb_store.init_db()`
+- renderer/src/compositions/Caption.tsx：重写 — dual-mode + 全套 anim_in + 多行
+- renderer/src/compositions/Mask.tsx / ColorLayer.tsx：新建
+- renderer/src/compositions/Project.tsx：重写 — ColorLayer → Mask → Caption 三层
+- frontend/src/api/templates.ts / pages/TemplateLibrary.tsx：新建
+- frontend/src/api/index.ts / pages/SampleExtract.tsx / main.tsx：扩展
+- backend/tests/unit/test_skeleton.py / test_kb_store.py：新建
+- backend/tests/integration/test_extract_1b.py：新建
+- docs/001ARCHITECTURE.md / 002STRUCTURE.md：同步 1B 链路 + 新约定 + 新文件
+
+### 关联
+-> PLAN.md 阶段 1B（1492-1570 行）
+
+---
+
 ## [2026-06-08-5] fix(workbench): preload frame images on event arrival to eliminate refresh-to-see-frame on SSE replay
 
 ### 改动

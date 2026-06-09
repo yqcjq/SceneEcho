@@ -133,3 +133,58 @@ async def render_demo(sample_id: str, background_tasks: BackgroundTasks) -> dict
     task_id = tasks_store.create_task("render", resource_kind="project", resource_id=project_id)
     background_tasks.add_task(_run_render, task_id, ir)
     return {"task_id": task_id, "project_id": project_id}
+
+
+# ---------------------------------------------------------------------------
+# Phase 1B · extract template trigger
+# ---------------------------------------------------------------------------
+
+
+async def _run_extract_template(task_id: str, sample_id: str, name: str | None) -> None:
+    """BackgroundTask wrapper for the extract pipeline.
+
+    The pipeline itself never raises (every subcap goes through ``_safe``);
+    this wrapper still defends with try/except in case of programmer error
+    so the task entry doesn't sit in 'running' forever.
+    """
+    from app.event_bus import get_event_bus
+    from app.extract.pipeline import extract_template
+
+    bus = get_event_bus()
+    try:
+        await extract_template(sample_id, task_id, name=name)
+        tasks_store.update_task(
+            task_id, status="completed", progress=1.0, stage="1B.pipeline.done"
+        )
+    except Exception as e:  # noqa: BLE001
+        log.error("extract_template_crashed", task_id=task_id, error=str(e))
+        tasks_store.update_task(task_id, status="failed", error=str(e))
+    finally:
+        bus.close_task(task_id)
+
+
+@router.post("/samples/{sample_id}/extract")
+async def extract_template_endpoint(
+    sample_id: str, background_tasks: BackgroundTasks, name: str | None = None
+) -> dict:
+    """Trigger Phase 1B template extraction for a previously uploaded sample.
+
+    Returns the task id + a workbench URL so the frontend can navigate
+    to ``/workbench/{task_id}`` and watch the full DAG of VisionEvents
+    fire in real time. The task uses ``resource_kind=sample`` so events
+    land in ``samples/{sid}/extracted/events_{task_id}.jsonl`` per the
+    path-scheme B routing in ``event_bus``.
+    """
+    settings = get_settings()
+    sample_dir = settings.data_root / "samples" / sample_id
+    if not (sample_dir / "normalized.mp4").exists() and not (sample_dir / "source.mp4").exists():
+        raise HTTPException(404, f"sample {sample_id} missing normalized.mp4 / source.mp4")
+    task_id = tasks_store.create_task(
+        "extract_template", resource_kind="sample", resource_id=sample_id
+    )
+    background_tasks.add_task(_run_extract_template, task_id, sample_id, name)
+    return {
+        "task_id": task_id,
+        "sample_id": sample_id,
+        "workbench_url": f"/workbench/{task_id}",
+    }

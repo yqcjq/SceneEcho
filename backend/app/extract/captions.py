@@ -1,18 +1,27 @@
 """1A-V1 · Caption style + position detection (VLM main path).
 
-One VLM call per ``detect_captions`` invocation; cross-frame merging by
-IoU > 0.5 + style + semantic_purpose. The structured output schema enforces
-the 0-999 normalized coord system; this module maps to 0-1 when constructing
-the final ``CaptionStyle.position``.
+Window strategy (二轮优化):
+- Group sampled frames by scene_idx (frame_sampler already labels them).
+- Each scene's frames form a *window*; windows >6 frames are chunked
+  (the VLM context budget for image grids).
+- One VLM call per window → list of raw caption rows + a call-level event.
+- After every window has run, cross-window dedup by IoU + style +
+  semantic_purpose → one merged ``Phase1ACaptionEvent`` per caption.
+- Emit one entity event per merged caption, with ``parent_event_id``
+  pointing at the call event that first detected it.
 
-Per-caption events append to ``Phase1AReport.captions`` (pydantic IR
-exported by ``app.ir.phase1a_report``). 1B integration reads
-``Phase1AReport.captions[N].style`` and lifts it into ``Slot.style.caption``.
+This replaces the previous single-call "first 6 frames" approach: a 7-sec
+clip with 5 scenes used to silently drop captions after frame 6 (the
+hidden ``[:6]`` cap), and any caption whose ``frames_appeared`` indices
+exceeded the cap was filtered out by the anchor lookup. Both root causes
+disappear with windowing.
 """
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field
 
@@ -35,6 +44,10 @@ from app.logging import get_logger
 
 STAGE = "1A.captions"
 log = get_logger(__name__)
+
+# VLM image-grid budget per call. Empirically: 6 frames in a 2x3 grid still
+# fits comfortably under Qwen-VL and Claude Sonnet 4.6 context limits.
+_FRAMES_PER_WINDOW = 6
 
 
 # ---------- VLM response schema (0-999 coords, raw VLM output) ----------
@@ -65,6 +78,24 @@ class CaptionsRawResult(BaseModel):
         return f"字幕识别 · {len(self.captions)} 条"
 
 
+@dataclass
+class _CaptionDraft:
+    """Intermediate per-window detection awaiting cross-window merge.
+
+    Carries the raw VLM row plus the resolved absolute timestamps + anchor
+    frame so the post-merge entity emission has everything it needs without
+    re-doing window-local index math.
+    """
+
+    raw: _CaptionRaw
+    anchor: FrameSample
+    ts_appeared: list[float]
+    call_ev_id: str | None
+    # Bbox in 0-999 normalized space, derived from raw position/size and
+    # cached here so merge can compare without redoing the unpack.
+    bbox: tuple[int, int, int, int] = field(default=(0, 0, 0, 0))
+
+
 # ---------- Public API ----------
 
 
@@ -73,25 +104,125 @@ async def detect_captions(
     *,
     parent_event_id: str | None = None,
 ) -> tuple[list[Phase1ACaptionEvent], list[VisionEvent]]:
-    """Issue one VLM call covering up to 6 sampled frames; return merged captions.
+    """Run VLM caption detection over every scene window, then merge.
 
-    Cross-frame deduplication happens here (IoU + visual style); the workbench
-    sees one call event (no IR write) plus one append-event per merged caption.
+    Event ordering:
+    1. One call event per window (no IR write).
+    2. After all windows: one entity event per merged caption (IR append).
+
+    The first call event's id is the parent_event_id of every entity event
+    whose first observation came from that window; this preserves the
+    "phase1 call → phase2 entity" causal chain for the workbench gantt
+    view.
     """
     frames = await ctx.frames()
     if not frames:
         return [], []
+
+    windows = _build_windows(frames)
     settings = get_settings()
     cl = ctx.client(STAGE)
     bus = get_event_bus()
 
-    # Cap frames per call so the prompt stays under context budget.
-    limited = list(frames)[:6]
-    frame_refs = [FrameRef(ts=f.ts, url=f.rel_path, scene_idx=f.scene_idx) for f in limited]
+    all_events: list[VisionEvent] = []
+    drafts: list[_CaptionDraft] = []
+
+    for win_idx, window in enumerate(windows):
+        result, evs = await _call_window(
+            cl,
+            window,
+            win_idx=win_idx,
+            n_windows=len(windows),
+            task_id=ctx.task_id,
+            model=settings.model_vlm,
+            parent_event_id=parent_event_id,
+        )
+        all_events.extend(evs)
+        call_ev_id = evs[0].event_id if evs else parent_event_id
+        for raw in result.captions:
+            draft = _draft_from_raw(raw, window, call_ev_id)
+            if draft is not None:
+                drafts.append(draft)
+
+    merged_drafts = _merge_drafts(drafts)
+
+    out: list[Phase1ACaptionEvent] = []
+    for draft in merged_drafts:
+        entry = _to_caption_entry(draft)
+        entity_ev = VisionEvent(
+            task_id=ctx.task_id,
+            source="vlm",
+            model_used=settings.model_vlm,
+            stage=STAGE,
+            frame_ts=draft.anchor.ts,
+            frame_url=f"/data/{draft.anchor.rel_path.lstrip('/')}",
+            bbox_norm=tuple(float(v) for v in draft.bbox),
+            semantic_label=f"画面字幕：{draft.raw.semantic_purpose} · {entry.style.layout}",
+            reasoning=draft.raw.reasoning[:200],
+            confidence=draft.raw.confidence,
+            ir_target=IRTarget(ir_type="Phase1AReport", path="captions", op="append"),
+            ir_value=entry.model_dump(mode="json"),
+            parent_event_id=draft.call_ev_id,
+            duration_ms=0,
+        )
+        await bus.publish(ctx.task_id, entity_ev)
+        all_events.append(entity_ev)
+        out.append(entry)
+
+    return out, all_events
+
+
+# ---------- Window construction ----------
+
+
+def _build_windows(frames: Sequence[FrameSample]) -> list[list[FrameSample]]:
+    """Split frames into VLM-callable windows.
+
+    Grouping by ``scene_idx`` keeps each window stylistically homogeneous,
+    which is what the prompt assumes. Scenes with >6 frames split into
+    consecutive chunks of up to _FRAMES_PER_WINDOW. Frames missing scene
+    info (rare — only if frame_sampler ran with no scenes) all collapse
+    into a single chronological window list.
+    """
+    by_scene: dict[object, list[FrameSample]] = defaultdict(list)
+    order: list[object] = []
+    for f in frames:
+        key = f.scene_idx if f.scene_idx is not None else "_unscened"
+        if key not in by_scene:
+            order.append(key)
+        by_scene[key].append(f)
+
+    windows: list[list[FrameSample]] = []
+    for key in order:
+        group = by_scene[key]
+        # Preserve temporal order inside each scene.
+        group.sort(key=lambda f: f.ts)
+        for i in range(0, len(group), _FRAMES_PER_WINDOW):
+            windows.append(group[i : i + _FRAMES_PER_WINDOW])
+    return windows
+
+
+async def _call_window(
+    cl,
+    window: list[FrameSample],
+    *,
+    win_idx: int,
+    n_windows: int,
+    task_id: str,
+    model: str,
+    parent_event_id: str | None,
+) -> tuple[CaptionsRawResult, list[VisionEvent]]:
+    """One VLM call covering ``window`` frames; returns (parsed, [call_event])."""
+    frame_refs = [FrameRef(ts=f.ts, url=f.rel_path, scene_idx=f.scene_idx) for f in window]
+    scene_label = (
+        f"scene {window[0].scene_idx}" if window[0].scene_idx is not None else "全片"
+    )
     user_prompt = (
-        "请按上述 schema 识别这些采样帧中的字幕。"
-        f"采样时间戳依次为 {[round(f.ts, 2) for f in limited]}（秒）。"
-        "frames_appeared 用 0-indexed 整数，对应上述时间戳数组的下标。"
+        f"请按上述 schema 识别这些采样帧中的字幕。"
+        f"本次为窗口 {win_idx + 1}/{n_windows}（{scene_label}），共 {len(window)} 帧，"
+        f"采样时间戳依次为 {[round(f.ts, 2) for f in window]}（秒）。"
+        f"frames_appeared 用 0-indexed 整数（0..{len(window) - 1}），对应上述时间戳数组的下标。"
+        "若该窗口内没有字幕，返回 captions=[]；窗口间会自动合并跨窗口的同一字幕，不要重复列出多个窗口都能看到的字幕。"
     )
     messages = [
         {"role": "system", "content": load_prompt("1a_captions")},
@@ -103,113 +234,118 @@ async def detect_captions(
             if isinstance(cl, OpenAICompatClient)
             else (cl, OpenAICompatClient())
         )
-        result, events = await chat_vision_dual(
+        return await chat_vision_dual(
             primary=primary,
             secondary=secondary,
             messages=messages,
-            model_primary=settings.model_vlm,
+            model_primary=model,
             model_secondary="claude-sonnet-4-6",
             stage=STAGE,
-            task_id=ctx.task_id,
+            task_id=task_id,
             frames=frame_refs,
             ir_target_template=None,  # call-level event has no IR write
             schema=CaptionsRawResult,
             parent_event_id=parent_event_id,
         )
-    else:
-        result, events = await cl.chat_vision(
-            messages,
-            model=settings.model_vlm,
-            stage=STAGE,
-            task_id=ctx.task_id,
-            frames=frame_refs,
-            ir_target_template=None,  # call-level event has no IR write
-            schema=CaptionsRawResult,
-            parent_event_id=parent_event_id,
-        )
-    # Merge same-caption rows that the model returned per-frame.
-    merged = _merge_captions(result.captions)
-    out: list[Phase1ACaptionEvent] = []
-    call_ev_id = events[0].event_id if events else parent_event_id
-    for cap in merged:
-        if not cap.frames_appeared:
+    return await cl.chat_vision(
+        messages,
+        model=model,
+        stage=STAGE,
+        task_id=task_id,
+        frames=frame_refs,
+        ir_target_template=None,
+        schema=CaptionsRawResult,
+        parent_event_id=parent_event_id,
+    )
+
+
+def _draft_from_raw(
+    raw: _CaptionRaw, window: list[FrameSample], call_ev_id: str | None
+) -> _CaptionDraft | None:
+    """Build a _CaptionDraft from a single raw VLM row.
+
+    Returns None when the row is unusable:
+    - ``frames_appeared`` empty (model didn't ground the caption in any frame)
+    - all ``frames_appeared`` indices are out of window range (model lied)
+    """
+    if not raw.frames_appeared:
+        return None
+    valid = [i for i in raw.frames_appeared if 0 <= i < len(window)]
+    if not valid:
+        return None
+    anchor = window[valid[0]]
+    ts_appeared = [window[i].ts for i in valid]
+    bbox = _bbox_from_pos_size(raw.position_norm_0_999, raw.size_norm_0_999)
+    return _CaptionDraft(
+        raw=raw,
+        anchor=anchor,
+        ts_appeared=ts_appeared,
+        call_ev_id=call_ev_id,
+        bbox=bbox,
+    )
+
+
+# ---------- Cross-window merge ----------
+
+
+def _merge_drafts(drafts: list[_CaptionDraft]) -> list[_CaptionDraft]:
+    """Merge same-caption drafts surfaced by different windows.
+
+    Match rule: same ``semantic_purpose`` AND bbox IoU > 0.5. Time-adjacent
+    sightings of the same caption (same scene + same style + slid forward
+    in time) win this match and consolidate.
+
+    On match: union ``ts_appeared``, keep the earliest anchor (so the
+    workbench plays back the *first* sighting), and keep the
+    highest-confidence raw's textual fields (placeholder/reasoning).
+    """
+    merged: list[_CaptionDraft] = []
+    for d in drafts:
+        target: _CaptionDraft | None = None
+        for m in merged:
+            if (
+                d.raw.semantic_purpose == m.raw.semantic_purpose
+                and _iou(list(d.bbox), list(m.bbox)) > 0.5
+            ):
+                target = m
+                break
+        if target is None:
+            merged.append(d)
             continue
-        anchor_idx = next((i for i in cap.frames_appeared if 0 <= i < len(limited)), None)
-        if anchor_idx is None:
-            continue
-        anchor = limited[anchor_idx]
-        ts_appeared = [limited[i].ts for i in cap.frames_appeared if 0 <= i < len(limited)]
-        bbox = _bbox_from_pos_size(cap.position_norm_0_999, cap.size_norm_0_999)
-        style = _to_caption_style(cap, bbox)
-        entry = Phase1ACaptionEvent(
-            style=style,
-            start=min(ts_appeared),
-            end=max(ts_appeared) + 0.5,  # tail buffer
-            placeholder_text=cap.placeholder_text,
-            length_constraint=cap.length_constraint,
-            semantic_purpose=cap.semantic_purpose,
-            bbox_norm_0_999=bbox,
-            frames_appeared=ts_appeared,
-            confidence=cap.confidence,
-            reasoning=cap.reasoning[:200],
-            color_hex_raw=cap.color_hex,
-            anim_in_type_raw=cap.anim_in_type,
-            layout_raw=cap.layout,
-        )
-        # Entity-level event: append to Phase1AReport.captions. ``frame_url``
-        # is the anchor frame the caption first appears on so the workbench
-        # left pane can render the frame image + bbox overlay.
-        entity_ev = VisionEvent(
-            task_id=ctx.task_id,
-            source="vlm",
-            model_used=settings.model_vlm,
-            stage=STAGE,
-            frame_ts=anchor.ts,
-            frame_url=f"/data/{anchor.rel_path.lstrip('/')}",
-            bbox_norm=tuple(float(v) for v in bbox),
-            semantic_label=f"画面字幕：{cap.semantic_purpose} · {style.layout}",
-            reasoning=cap.reasoning[:200],
-            confidence=cap.confidence,
-            ir_target=IRTarget(ir_type="Phase1AReport", path="captions", op="append"),
-            ir_value=entry.model_dump(mode="json"),
-            parent_event_id=call_ev_id,
-            duration_ms=0,
-        )
-        await bus.publish(ctx.task_id, entity_ev)
-        events.append(entity_ev)
-        out.append(entry)
-    return out, events
+        target.ts_appeared = sorted(set(target.ts_appeared) | set(d.ts_appeared))
+        if d.anchor.ts < target.anchor.ts:
+            target.anchor = d.anchor
+            target.call_ev_id = d.call_ev_id  # follow the earliest sighting's call
+        if d.raw.confidence > target.raw.confidence:
+            # Adopt the more confident row's textual fields without losing
+            # the established temporal extent.
+            new_raw = d.raw.model_copy()
+            new_raw.frames_appeared = target.raw.frames_appeared  # kept for parity
+            target.raw = new_raw
+            target.bbox = d.bbox
+    return merged
+
+
+def _to_caption_entry(draft: _CaptionDraft) -> Phase1ACaptionEvent:
+    style = _to_caption_style(draft.raw, draft.bbox)
+    return Phase1ACaptionEvent(
+        style=style,
+        start=min(draft.ts_appeared),
+        end=max(draft.ts_appeared) + 0.5,  # tail buffer
+        placeholder_text=draft.raw.placeholder_text,
+        length_constraint=draft.raw.length_constraint,
+        semantic_purpose=draft.raw.semantic_purpose,
+        bbox_norm_0_999=draft.bbox,
+        frames_appeared=draft.ts_appeared,
+        confidence=draft.raw.confidence,
+        reasoning=draft.raw.reasoning[:200],
+        color_hex_raw=draft.raw.color_hex,
+        anim_in_type_raw=draft.raw.anim_in_type,
+        layout_raw=draft.raw.layout,
+    )
 
 
 # ---------- helpers ----------
-
-
-def _merge_captions(rows: list[_CaptionRaw]) -> list[_CaptionRaw]:
-    """Group rows referring to the same visual caption.
-
-    Heuristic: same ``semantic_purpose`` + bbox IoU > 0.5 → merge. Works
-    because the VLM was already asked to consolidate, but providers
-    occasionally return per-frame copies.
-    """
-    if not rows:
-        return []
-    groups: list[_CaptionRaw] = []
-    for r in rows:
-        merged = False
-        for g in groups:
-            if (
-                r.semantic_purpose == g.semantic_purpose
-                and _iou(r.position_norm_0_999, g.position_norm_0_999) > 0.5
-            ):
-                g.frames_appeared = sorted(set(g.frames_appeared) | set(r.frames_appeared))
-                if r.confidence > g.confidence:
-                    g.placeholder_text = r.placeholder_text or g.placeholder_text
-                    g.reasoning = r.reasoning or g.reasoning
-                merged = True
-                break
-        if not merged:
-            groups.append(r)
-    return groups
 
 
 def _iou(a: list[int], b: list[int]) -> float:

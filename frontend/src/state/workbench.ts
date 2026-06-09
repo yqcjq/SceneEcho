@@ -13,12 +13,23 @@ import type { VisionEvent } from "../types/workbench.js";
  * ``setSelected`` call flips ``autoFollow`` off so the user's pinned
  * selection is no longer hijacked by incoming events. ``reset`` restores
  * auto-follow.
+ *
+ * Dedup-by-event_id: ``appendEvent`` is idempotent. SSE delivers events
+ * live; a separate "history sync" path may re-deliver the same events
+ * after a task hits terminal status (or when the SSE ``done`` fires). The
+ * ``eventIds`` set lets both paths run without clobbering — whichever
+ * arrives first wins, the second is silently dropped. This is the
+ * first-principles answer to "cards don't appear until I refresh": rather
+ * than hunting the SSE race window, make the final state converge
+ * regardless of delivery path.
  */
 interface WorkbenchState {
   taskId: string | null;
   events: VisionEvent[];
   /** Reverse index: parent_event_id -> child event_ids. Rebuilt on every append. */
   childIndex: Map<string, string[]>;
+  /** O(1) dedup by event_id — SSE + history fetch can both deliver the same id. */
+  eventIds: Set<string>;
   irSnapshot: Record<string, unknown>;
   selectedEventId: string | null;
   vetoedIds: Set<string>;
@@ -107,6 +118,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   taskId: null,
   events: [],
   childIndex: new Map(),
+  eventIds: new Set<string>(),
   irSnapshot: {},
   selectedEventId: null,
   vetoedIds: new Set<string>(),
@@ -118,11 +130,15 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   appendEvent: (event) => {
     const state = get();
     if (state.paused) return;
+    if (state.eventIds.has(event.event_id)) return;
     // Preload the frame image off-state so it lands in the browser cache
     // before autoFollow selects this event. See preloadFrame() docstring.
     preloadFrame(event.frame_url);
+    const nextIds = new Set(state.eventIds);
+    nextIds.add(event.event_id);
     set({
       events: [...state.events, event],
+      eventIds: nextIds,
       irSnapshot: writeIr(state.irSnapshot, event),
       childIndex: indexChild(state.childIndex, event),
       // Tail the newest event only while the user hasn't taken manual control.
@@ -148,6 +164,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     set({
       taskId,
       events: [],
+      eventIds: new Set<string>(),
       irSnapshot: {},
       childIndex: new Map(),
       selectedEventId: null,

@@ -48,3 +48,4 @@ export function dataUrl(rel: string): string {
 }
 
 export * from "./events.js";
+export * from "./templates.js";

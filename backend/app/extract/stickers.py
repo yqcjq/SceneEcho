@@ -163,7 +163,13 @@ async def refine_sticker_bbox(
     sticker_idx: int,
     parent_event_id: str,
 ) -> VisionEvent | None:
-    """Tighten bbox to ±5px using Canny + frame-diff inside ±10% of VLM bbox.
+    """Tighten the bbox to the dominant sticker contour inside ±10% of VLM bbox.
+
+    Algorithm (二轮优化): Canny edges → ``findContours(RETR_EXTERNAL)`` →
+    score each contour by ``area / (1 + distance_to_roi_center)`` →
+    ``boundingRect`` of the winner. Replaces the previous min/max bbox
+    over *all* edge points, which was pathologically wide whenever the
+    ±10% ROI included any other visual content (faces, captions, texture).
 
     The function name is a "phase2"-style refine — the
     ``check_parent_event_id`` CI script keys on this naming convention.
@@ -171,7 +177,6 @@ async def refine_sticker_bbox(
     bus = get_event_bus()
     try:
         import cv2  # type: ignore[import-not-found]
-        import numpy as np  # type: ignore[import-not-found]
     except ImportError as e:
         log.warning("stickers.refine_dep_missing", error=str(e))
         return None
@@ -198,18 +203,16 @@ async def refine_sticker_bbox(
         roi = frame[y0:y1, x0:x1]
         if roi.size == 0:
             return None
-        edges = cv2.Canny(roi, 80, 160)
-        ys, xs = np.where(edges > 0)  # type: ignore[attr-defined]
-        if len(xs) < 8:
+        gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+        edges = cv2.Canny(gray, 80, 160)
+        # Light dilate so contour ends close — sticker outlines are often
+        # broken by anti-aliasing.
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        edges = cv2.dilate(edges, kernel, iterations=1)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        new_bbox = _pick_best_contour_bbox(contours, roi.shape[:2], W, H, x0, y0, cv2)
+        if new_bbox is None:
             return None
-        nx0, ny0 = int(xs.min()) + x0, int(ys.min()) + y0
-        nx1, ny1 = int(xs.max()) + x0, int(ys.max()) + y0
-        new_bbox = (
-            int(nx0 / W * 1000),
-            int(ny0 / H * 1000),
-            int((nx1 - nx0) / W * 1000),
-            int((ny1 - ny0) / H * 1000),
-        )
     finally:
         cap.release()
 
@@ -240,8 +243,11 @@ async def refine_sticker_bbox(
         frame_ts=anchor_ts,
         frame_url=frame_url,
         bbox_norm=tuple(float(v) for v in new_bbox),
-        semantic_label="CV 精化贴纸 bbox 至 ±5px",
-        reasoning="Canny + 帧差在 VLM bbox ±10% 范围内精化。",
+        semantic_label="CV 精化贴纸 bbox 至最大连通轮廓",
+        reasoning=(
+            "Canny 边缘 → findContours(RETR_EXTERNAL) → "
+            "按 area / (1 + 距 ROI 中心距离) 评分挑出最大主轮廓的 boundingRect。"
+        ),
         confidence=0.94,
         ir_target=IRTarget(
             ir_type="Phase1AReport",
@@ -253,6 +259,56 @@ async def refine_sticker_bbox(
     )
     await bus.publish(ctx.task_id, ev)
     return ev
+
+
+def _pick_best_contour_bbox(
+    contours,
+    roi_shape: tuple[int, int],
+    W: int,
+    H: int,
+    x0: int,
+    y0: int,
+    cv2,
+) -> tuple[int, int, int, int] | None:
+    """Score each contour by area weighted against distance to ROI center.
+
+    Sticker assumption: VLM's bbox is approximately right, so the true
+    sticker contour will (a) carry most of the ink in the ROI and (b) sit
+    near the ROI center. Scoring ``area / (1 + dist_to_center)`` punishes
+    far-flung noise blobs and tiny edge fragments equally. Tiny contours
+    (<10 px²) are pre-filtered to avoid divide-by-zero on degenerate moments.
+    """
+    if not contours:
+        return None
+    roi_h, roi_w = roi_shape
+    cx_roi = roi_w / 2.0
+    cy_roi = roi_h / 2.0
+    best_score = 0.0
+    best_rect: tuple[int, int, int, int] | None = None
+    for c in contours:
+        area = float(cv2.contourArea(c))
+        if area < 10:
+            continue
+        m = cv2.moments(c)
+        if m["m00"] == 0:
+            continue
+        cx = m["m10"] / m["m00"]
+        cy = m["m01"] / m["m00"]
+        dist = ((cx - cx_roi) ** 2 + (cy - cy_roi) ** 2) ** 0.5
+        score = area / (1.0 + dist)
+        if score > best_score:
+            bx, by, bw, bh = cv2.boundingRect(c)
+            best_score = score
+            best_rect = (bx, by, bw, bh)
+    if best_rect is None:
+        return None
+    bx, by, bw, bh = best_rect
+    return (
+        int((bx + x0) / W * 1000),
+        int((by + y0) / H * 1000),
+        int(bw / W * 1000),
+        int(bh / H * 1000),
+    )
 
 
 def _bbox_norm(raw: _StickerRaw) -> tuple[int, int, int, int]:

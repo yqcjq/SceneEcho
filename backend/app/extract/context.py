@@ -35,12 +35,19 @@ class Phase1AContext:
     _frames: list[FrameSample] | None = field(default=None, repr=False)
 
     async def scenes(self) -> list[Scene]:
-        """首次调用跑 PySceneDetect；后续返回缓存。"""
+        """首次调用跑 PySceneDetect；后续返回缓存。
+
+        把 ``frames_dir_rel`` 传给 ``detect_scenes`` 让它给每个 scene 写一张
+        代表帧到与 frame_sampler 共享的目录——切点事件的 ``frame_url`` 因此
+        直接可用，工作台左栏 D19 帧底图渲染条件得到满足。
+        """
         if self._scenes is None:
             from app.extract.scenes import detect_scenes
 
             self._scenes, _ = await detect_scenes(
-                self.normalized_path, task_id=self.task_id
+                self.normalized_path,
+                task_id=self.task_id,
+                frames_dir_rel=f"samples/{self.sample_id}/extracted/frames",
             )
         return self._scenes
 

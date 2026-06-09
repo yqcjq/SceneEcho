@@ -20,6 +20,7 @@ export const SubcapabilityLab: React.FC = () => {
   const [baseline, setBaseline] = React.useState<unknown>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [running, setRunning] = React.useState(false);
+  const [forceRefresh, setForceRefresh] = React.useState(false);
 
   React.useEffect(() => {
     listSubcaps()
@@ -53,7 +54,7 @@ export const SubcapabilityLab: React.FC = () => {
     setRunning(true);
     setError(null);
     try {
-      const r = await runSubcap(cur.name, fixture);
+      const r = await runSubcap(cur.name, fixture, { force_refresh: forceRefresh });
       navigate(r.workbench_url);
     } catch (err: any) {
       setError(String(err?.response?.data?.detail ?? err?.message ?? err));
@@ -132,6 +133,17 @@ export const SubcapabilityLab: React.FC = () => {
                     : "尚未录入基线"}
                 </pre>
               </div>
+
+              <label className="mb-4 flex items-center gap-2 text-xs text-secondary">
+                <input
+                  type="checkbox"
+                  checked={forceRefresh}
+                  onChange={(e) => setForceRefresh(e.target.checked)}
+                />
+                <span>
+                  强制重抽帧（清掉 <code className="font-mono">data/samples/{fixture || "{fixture}"}/extracted/</code>）
+                </span>
+              </label>
 
               <button
                 type="button"

@@ -4,6 +4,7 @@ import { BrowserRouter, Link, Navigate, Route, Routes } from "react-router-dom";
 import "./styles/global.css";
 import { SampleExtract } from "./pages/SampleExtract.js";
 import { SubcapabilityLab } from "./pages/SubcapabilityLab.js";
+import { TemplateLibrary } from "./pages/TemplateLibrary.js";
 import { Workbench } from "./pages/Workbench.js";
 import { WorkbenchLauncher } from "./pages/WorkbenchLauncher.js";
 
@@ -20,6 +21,7 @@ const Shell: React.FC<{ children: React.ReactNode }> = ({ children }) => (
         </div>
         <nav className="flex gap-6 text-sm text-secondary">
           <Link to="/sample-extract" className="hover:text-primary">样例</Link>
+          <Link to="/templates" className="hover:text-primary">模板库</Link>
           <Link to="/workbench/dev" className="hover:text-primary">工作台</Link>
           {import.meta.env.DEV && (
             <Link to="/lab" className="hover:text-primary">Lab</Link>
@@ -49,6 +51,22 @@ ReactDOM.createRoot(root).render(
           element={
             <Shell>
               <WorkbenchLauncher />
+            </Shell>
+          }
+        />
+        <Route
+          path="/templates"
+          element={
+            <Shell>
+              <TemplateLibrary />
+            </Shell>
+          }
+        />
+        <Route
+          path="/templates/:id"
+          element={
+            <Shell>
+              <TemplateLibrary />
             </Shell>
           }
         />

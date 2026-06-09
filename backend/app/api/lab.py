@@ -14,6 +14,7 @@ a ``baseline`` key under ``tests/baselines.json``.
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -284,6 +285,14 @@ def get_baseline(name: str) -> dict:
 class RunRequest(BaseModel):
     fixture_id: str
     dry_run: bool = False
+    # When true, ``data/samples/{fixture_id}/extracted/`` is removed before
+    # the run starts. The only durable cache in the lab loop is the sampled
+    # JPEGs under ``extracted/frames/`` (frame_sampler short-circuits on
+    # ``Path.exists()``); VLM calls themselves are never cached. Clearing
+    # extracted/ forces both scene-anchor frames and 1fps frames to be
+    # re-extracted from the source mp4, which is the right thing to do
+    # when normalized.mp4 changes or when debugging stale jpgs.
+    force_refresh: bool = False
 
 
 def _resolve_fixture_path(fixture_id: str) -> Path | None:
@@ -310,6 +319,17 @@ async def run_subcap(name: str, req: RunRequest, background_tasks: BackgroundTas
             f"fixture {req.fixture_id} missing normalized.mp4. "
             "请先通过 /samples 上传或 CLI ingest。",
         )
+    if req.force_refresh:
+        # Wipe the frame-jpg + per-task jsonl cache. Source.mp4 / normalized.mp4
+        # stay; only derived artifacts are removed so the next run regenerates
+        # everything from scratch. Done synchronously inside the handler so
+        # the BackgroundTask sees a clean slate.
+        extracted = get_settings().data_root / "samples" / req.fixture_id / "extracted"
+        if extracted.exists():
+            try:
+                shutil.rmtree(extracted)
+            except OSError as e:
+                log.warning("lab.force_refresh_failed", error=str(e))
     task_id = tasks_store.create_task(
         f"lab_{name}", resource_kind="sample", resource_id=req.fixture_id
     )

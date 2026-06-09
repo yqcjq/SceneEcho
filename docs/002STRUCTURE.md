@@ -65,10 +65,11 @@ SceneEcho/
 │  │  ├─ event_bus.py                       # 进程内事件总线：subscribe_with_snapshot / await put 反压 / jsonl 持久化 / jsonl tail seq 真理源 / lookup callback 注入
 │  │  ├─ api/
 │  │  │  ├─ __init__.py
-│  │  │  ├─ samples.py                      # POST /samples 上传归一化；POST /samples/{id}/render-demo
+│  │  │  ├─ samples.py                      # POST /samples 上传归一化；POST /samples/{id}/render-demo；POST /samples/{id}/extract (1B)
 │  │  │  ├─ projects.py                     # POST /projects 上传占位
 │  │  │  ├─ tasks.py                        # GET /tasks/{id}；POST /internal/task-progress
 │  │  │  ├─ events.py                       # GET /tasks/{id}/events SSE + /events/history
+│  │  │  ├─ templates.py                    # 1B KB CRUD: GET/PATCH/DELETE /templates(/{id}) + /events 回放
 │  │  │  ├─ dev_workbench.py                # ENABLE_DEV_MOCK gated：mock-stream / scenarios 列表
 │  │  │  └─ lab.py                          # ENABLE_DEV_MOCK gated：SubcapabilityLab 子能力 registry / run / baselines
 │  │  ├─ ir/
@@ -109,7 +110,18 @@ SceneEcho/
 │  │  │  ├─ transitions.py                  # 1A-V6 转场分类（VLM），写 Phase1AReport.transitions
 │  │  │  ├─ masks.py                        # 1A-V7 几何蒙版（CV HoughCircles/Canny/HoughLines 三帧多数决主路径 + VLM 兜底），写 Phase1AReport.masks
 │  │  │  ├─ color.py                        # 1A-V8 调色语义（VLM 标签 + OpenCV HSV 直方图微调），写 Phase1AReport.color
-│  │  │  └─ audio.py                        # 1A-A1 BGM（Demucs htdemucs 分离 + librosa BPM/能量/情绪），写 Phase1AReport.audio.{has_bgm,bpm,mood_tag}
+│  │  │  ├─ audio.py                        # 1A-A1 BGM（Demucs htdemucs 分离 + librosa BPM/能量/情绪），写 Phase1AReport.audio.{has_bgm,bpm,mood_tag}
+│  │  │  ├─ skeleton.py                     # 1B 骨架推断（位置阈值发现 + StyleRule 聚合），读 Phase1AReport 写 TemplateIR.skeleton
+│  │  │  └─ pipeline.py                     # 1B extract DAG 编排（asyncio.gather + _safe 降级 + KB save）
+│  │  ├─ kb/                                # 1B 知识库
+│  │  │  ├─ __init__.py
+│  │  │  ├─ store.py                        # SQLite templates 表 CRUD（与 tasks 表共用 kb.sqlite WAL）
+│  │  │  ├─ tagging.py                      # 1B Tags 推断（VLM 综合骨架摘要 + 3 帧）
+│  │  │  ├─ sanity.py                       # 1B 整体复查（VLM 验骨架/material_req/placeholder/zoom）
+│  │  │  └─ select.py                       # Phase 1B 占位：标签精确匹配；Phase 3 接 LLM rerank
+│  │  ├─ agent/                             # Phase 5 占位（aigc / nl_edit / sfx_preset 等）
+│  │  │  ├─ __init__.py
+│  │  │  └─ aigc.py                         # 贴纸生图 / B-roll 占位（Phase 5 填）
 │  │  ├─ understand/                        # Phase 1A 语义层分类器
 │  │  │  ├─ __init__.py
 │  │  │  └─ vision.py                       # classify_caption_function（caption_idx 入参，写 Phase1AReport.captions[idx].function；命名匹配 CI classify_ 前缀）
@@ -129,10 +141,13 @@ SceneEcho/
 │        ├─ test_llm_client.py              # _extract_json / 双 provider fallback / silent / dual-check / 路由
 │        ├─ test_extract_subcaps.py         # 1A 子能力 fallback 形状（缺包 / 空输入 / 缺帧；用 Phase1AContext 直接喂 [] cache）
 │        ├─ test_lab_api.py                 # SubcapabilityLab API 行为（registry / 403 / 404 / dry_run）
-│        └─ test_check_scripts.py           # 三脚本 grep 守卫在仓库自有代码上跑过
+│        ├─ test_check_scripts.py           # 三脚本 grep 守卫在仓库自有代码上跑过
+│        ├─ test_skeleton.py                # 1B 骨架推断（role 阈值 / material_req / 同 role 合并）
+│        └─ test_kb_store.py                # 1B KB store CRUD + IR round-trip + tags 双列同步
 │     └─ integration/
 │        ├─ __init__.py
-│        └─ test_subcap_shapes.py           # 1A mock-level integration：seeded ctx 跑全部 subcap，断言事件结构 + Phase1AReport ir_target + parent 链路 + schema round-trip
+│        ├─ test_subcap_shapes.py           # 1A mock-level integration：seeded ctx 跑全部 subcap，断言事件结构 + Phase1AReport ir_target + parent 链路 + schema round-trip
+│        └─ test_extract_1b.py              # 1B end-to-end pipeline：seeded ctx + 无 credentials → KB 落行 + 事件 ≥ 10 + done 事件压尾
 │
 ├─ renderer/                                 # Node Remotion 渲染服务
 │  ├─ package.json                          # pnpm @sceneecho/renderer 依赖与脚本
@@ -153,7 +168,9 @@ SceneEcho/
 │     └─ compositions/
 │        ├─ Root.tsx                        # <Composition id="Project"> + calculateMetadata
 │        ├─ Project.tsx                     # 顶层组合：OffthreadVideo 段落 + Caption overlay
-│        ├─ Caption.tsx                     # 单条字幕的位置/动画/描边渲染
+│        ├─ Caption.tsx                     # 单条字幕的位置/动画/描边渲染（1B 双模式 + anim_in 全套 + 多行）
+│        ├─ Mask.tsx                        # 1B 几何蒙版（SVG clipPath circle/rectangle/line_split）
+│        ├─ ColorLayer.tsx                  # 1B 调色层（CSS filter 预设按 dominant_lut_id）
 │        └─ projectMeta.ts                  # 从 IR 算 width/height/fps/durationInFrames（共用）
 │
 └─ frontend/                                 # React + Vite 前端
@@ -173,8 +190,9 @@ SceneEcho/
       │  ├─ tokens.css                      # Anthropic 风 design tokens（颜色/字体/间距/圆角/stage 染色）
       │  └─ global.css                      # @tailwind 注入 + 基础排版 + se-* 组件类（卡片/按钮/动画）
       ├─ api/
-      │  ├─ index.ts                        # axios 封装：uploadSample / renderDemo / pollTask / dataUrl + 转出 events 模块
+      │  ├─ index.ts                        # axios 封装：uploadSample / renderDemo / pollTask / dataUrl + 转出 events + templates
       │  ├─ events.ts                       # subscribeEvents (EventSource) / fetchEventHistory / mock-stream / scenarios
+      │  ├─ templates.ts                    # 1B KB API: triggerExtract / list / get / patchTags / patchPlaceholder / delete / getEvents
       │  └─ lab.ts                          # SubcapabilityLab API：listSubcaps / runSubcap / getBaseline
       ├─ state/
       │  ├─ index.ts                        # Zustand store：currentTask
@@ -188,7 +206,8 @@ SceneEcho/
       │     ├─ EventBadge.tsx               # stage 前缀染色徽章（badgeColor 导出）
       │     └─ BboxOverlay.tsx              # 0-999 → 像素的 SVG bbox + 标签气泡（bboxToRect 导出）
       ├─ pages/
-      │  ├─ SampleExtract.tsx               # 阶段 0 上传 + 渲染 demo + 内嵌 <video> 播放 + 工作台 / Lab 跳转链接
+      │  ├─ SampleExtract.tsx               # 阶段 0/1B 上传 + 渲染 demo + 「提取模板（1B）」按钮 + 工作台跳转
+      │  ├─ TemplateLibrary.tsx             # 1B `/templates` 列表 + `/templates/:id` 详情（骨架/sanity/placeholder 编辑/事件回放）
       │  ├─ Workbench.tsx                   # /workbench/:taskId 三栏页面：SSE 订阅 + history 预填
       │  ├─ WorkbenchLauncher.tsx           # /workbench/dev：列出 mock scenarios + 启动按钮
       │  └─ SubcapabilityLab.tsx            # /lab：DEV-only Phase 1A 子能力 × fixture 单点验证

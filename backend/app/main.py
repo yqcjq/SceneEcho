@@ -9,9 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import tasks_store
-from app.api import dev_workbench, events, lab, projects, samples, tasks
+from app.api import dev_workbench, events, lab, projects, samples, tasks, templates
 from app.config import get_settings
 from app.event_bus import get_event_bus
+from app.kb import store as kb_store
 from app.logging import configure_logging, get_logger
 
 settings = get_settings()
@@ -43,6 +44,7 @@ def _init_data_tree() -> None:
 async def lifespan(app: FastAPI):  # noqa: ARG001
     _init_data_tree()
     tasks_store.init_db()
+    kb_store.init_db()
     bus = get_event_bus()
     # Inject the tasks-store reader so event_bus never imports tasks_store
     # — the layered architecture stays unidirectional (event_bus is below
@@ -72,6 +74,7 @@ app.include_router(samples.router, prefix="/api", tags=["samples"])
 app.include_router(projects.router, prefix="/api", tags=["projects"])
 app.include_router(tasks.router, prefix="/api", tags=["tasks"])
 app.include_router(events.router, prefix="/api", tags=["events"])
+app.include_router(templates.router, prefix="/api", tags=["templates"])
 
 if settings.enable_dev_mock:
     app.include_router(dev_workbench.router, prefix="/api", tags=["dev"])

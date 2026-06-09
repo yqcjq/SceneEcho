@@ -19,6 +19,15 @@ class CaptionStyle(BaseModel):
     anim_in: str = "fade"
     anim_emphasis: str | None = None
     emphasis_words: list[str] = Field(default_factory=list)
+    # Phase 1B: VLM-supplied semantic placeholder ("4-6 字 CTA 短语示例：立即抢购")
+    # carried directly on the style. Skeleton copies it from the corresponding
+    # Phase1ACaptionEvent so renderer's template_preview mode + Phase 2's
+    # caption-fill LLM both read from one canonical field. Not the same as
+    # ``Unit.text`` — this is a hint for the fill prompt, never displayed in
+    # the final project_output render.
+    placeholder_text: list[str] = Field(default_factory=list)
+    length_constraint: dict[str, int] = Field(default_factory=dict)
+    semantic_purpose: str = "regular"
 
 
 class ZoomKeyframe(BaseModel):
@@ -28,7 +37,11 @@ class ZoomKeyframe(BaseModel):
 
 class VisualStyle(BaseModel):
     zoom_keyframes: list[ZoomKeyframe] = Field(default_factory=list)
+    # ``mask`` is the kind ("circle" / "rectangle" / "line_split"); the
+    # geometry lives in ``mask_params`` so the renderer can draw without
+    # making a second lookup. Both must be set together (skeleton.py enforces).
     mask: str | None = None
+    mask_params: dict | None = None
     color_lut: str | None = None
     title_bar: bool = False
 
@@ -92,3 +105,8 @@ class TemplateIR(BaseModel):
     tags: Tags = Field(default_factory=Tags)
     sanity_check: dict | None = None
     created_at: str = ""
+    # Phase 1B: per-field degradation flags so the UI can flag partial
+    # results without losing the rest of the template. Keys are dotted
+    # field names (e.g. "skeleton.0.style.caption" / "tags" / "audio").
+    # Set by ``pipeline.extract_template`` when a subcap raises.
+    degraded: dict[str, str] = Field(default_factory=dict)

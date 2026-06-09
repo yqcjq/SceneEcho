@@ -16,6 +16,12 @@ export interface RunSubcapResponse {
   dry_run: boolean;
 }
 
+export interface RunSubcapOptions {
+  dry_run?: boolean;
+  /** Wipe ``data/samples/{fixture}/extracted/`` (frame jpgs + jsonl) before running. */
+  force_refresh?: boolean;
+}
+
 export async function listSubcaps(): Promise<SubcapDef[]> {
   const { data } = await axios.get<{ subcaps: SubcapDef[] }>(
     "/api/lab/subcaps",
@@ -26,11 +32,15 @@ export async function listSubcaps(): Promise<SubcapDef[]> {
 export async function runSubcap(
   name: string,
   fixture_id: string,
-  dry_run = false,
+  opts: RunSubcapOptions = {},
 ): Promise<RunSubcapResponse> {
   const { data } = await axios.post<RunSubcapResponse>(
     `/api/lab/run-subcap/${encodeURIComponent(name)}`,
-    { fixture_id, dry_run },
+    {
+      fixture_id,
+      dry_run: opts.dry_run ?? false,
+      force_refresh: opts.force_refresh ?? false,
+    },
   );
   return data;
 }

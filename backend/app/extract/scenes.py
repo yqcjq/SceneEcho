@@ -4,6 +4,15 @@ The temporal floor that VLM cannot reach: ±0.04s precision via
 ``ContentDetector(threshold=27)``. One ``VisionEvent`` per detected cut so
 the workbench shows the timeline points lining up. Each scene appends to
 ``Phase1AReport.scenes``.
+
+Scene events also carry a ``frame_url`` pointing to a *representative*
+frame inside the scene (start + small offset), written to the canonical
+``extracted/frames/`` dir shared with ``frame_sampler``. This satisfies
+D19's "frame_url on entity events so the workbench left pane renders the
+frame" — without it, scene-cut cards show "no frame" even though we know
+exactly which frame represents the cut. The shared dir means
+``sample_frames`` later skips re-extraction (its ``abs_path.exists()``
+guard already handles idempotency).
 """
 
 from __future__ import annotations
@@ -11,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.config import get_settings
 from app.event_bus import get_event_bus
 from app.ir.phase1a_report import Phase1AScene
 from app.ir.vision_event import IRTarget, VisionEvent
@@ -18,6 +28,10 @@ from app.logging import get_logger
 
 STAGE = "1A.scenes"
 log = get_logger(__name__)
+
+# Offset into the scene used to pick the representative frame. Too close to
+# the cut catches the transition; too far loses "this is the cut" framing.
+_ANCHOR_OFFSET_SEC = 0.1
 
 
 @dataclass
@@ -42,8 +56,16 @@ async def detect_scenes(
     *,
     task_id: str,
     threshold: float = 27.0,
+    frames_dir_rel: str | None = None,
 ) -> tuple[list[Scene], list[VisionEvent]]:
     """Run PySceneDetect's ``ContentDetector`` and emit cut events.
+
+    When ``frames_dir_rel`` is provided (the lab + 1B pipeline path), each
+    scene also gets a representative frame extracted via ffmpeg and the
+    emitted event carries the matching ``frame_url``. ``Phase1AContext.scenes``
+    passes ``samples/{sample_id}/extracted/frames`` here so scene frames
+    land in the same dir ``sample_frames`` writes to — re-extraction by the
+    later sampler is a no-op due to ``Path.exists()`` short-circuit.
 
     Falls back to a single-scene result + warning event when the dependency
     is missing — keeps Phase 1A unit tests green without ``[extract]``
@@ -89,11 +111,19 @@ async def detect_scenes(
         if s.end_sec - s.start_sec > 0:
             ir_target = IRTarget(ir_type="Phase1AReport", path="scenes", op="append")
             ir_value = s.to_report_entry().model_dump(mode="json")
+        # Pick a representative frame inside the scene and pin frame_url to
+        # it. ``_anchor_frame_url`` returns None on any failure (no
+        # frames_dir_rel, ffmpeg missing, zero-length scene) — the event
+        # still publishes; the workbench just shows "no frame" instead.
+        anchor_ts, frame_url = _anchor_frame(
+            normalized_path, s, frames_dir_rel=frames_dir_rel
+        )
         ev = VisionEvent(
             task_id=task_id,
             source="cv",
             stage=STAGE,
-            frame_ts=s.start_sec,
+            frame_ts=anchor_ts,
+            frame_url=frame_url,
             semantic_label=f"切点 #{s.idx} @{s.start_sec:.2f}s",
             reasoning=(
                 f"PySceneDetect ContentDetector(threshold={threshold}) 在 "
@@ -138,3 +168,40 @@ def _video_duration(path: Path) -> float:
         return float(info.get("format", {}).get("duration", 0.0))
     except Exception:  # noqa: BLE001
         return 0.0
+
+
+def _anchor_frame(
+    normalized_path: Path,
+    scene: Scene,
+    *,
+    frames_dir_rel: str | None,
+) -> tuple[float | None, str | None]:
+    """Extract a representative jpg for the scene; return (ts, /data/<rel>).
+
+    Returns ``(None, None)`` when extraction is skipped (no out dir, zero
+    span, or ffmpeg failure). The caller publishes the event regardless —
+    a missing frame degrades the left pane to "no frame" but doesn't break
+    the timeline. Idempotent: re-runs reuse existing jpgs.
+    """
+    if frames_dir_rel is None:
+        return None, None
+    span = scene.end_sec - scene.start_sec
+    if span <= 0:
+        return None, None
+    # Pick min(start + 0.1, midpoint) so very short scenes still land inside.
+    anchor_ts = round(min(scene.start_sec + _ANCHOR_OFFSET_SEC, (scene.start_sec + scene.end_sec) / 2), 2)
+    settings = get_settings()
+    out_rel = f"{frames_dir_rel.rstrip('/')}/{anchor_ts:.2f}.jpg"
+    abs_path = settings.resolve(out_rel)
+    if not abs_path.exists():
+        try:
+            # Local import keeps the scenes module independent of
+            # frame_sampler import time (and avoids a cycle if downstream
+            # code ever imports both).
+            from app.extract.frame_sampler import extract_one_frame
+
+            extract_one_frame(normalized_path, abs_path, anchor_ts)
+        except Exception as e:  # noqa: BLE001
+            log.warning("scenes.anchor_frame_failed", scene=scene.idx, error=str(e))
+            return anchor_ts, None
+    return anchor_ts, f"/data/{out_rel.lstrip('/')}"
