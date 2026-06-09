@@ -68,7 +68,7 @@ IR（pydantic 模型）位于 `backend/app/ir/`，作为「人 / AI / 渲染器�
 ## 3. 调用方向约束
 
 - 前端只调 `/api/*`；不直连 renderer。
-- 后端 `api/` 只 import `app/{ir,render,tasks_store,config,logging,event_bus,llm,extract,understand}`；不反向依赖 frontend / renderer 进程。
+- 后端 `api/` 只 import `app/{ir,render,tasks_store,config,logging,event_bus,llm,extract,understand,kb,apply}`；不反向依赖 frontend / renderer 进程。
 - renderer 不调后端业务 API，仅通过 `POST /api/internal/task-progress` 上报进度，并通过 `GET {BACKEND_URL}/data/*` 拉取用户素材字节。
 - IR 类型方向：pydantic（唯一真相源）→ JSON Schema → 两端 zod/TS；CI 的 `type-sync` job 阻塞反向修改。
 - 跨服务文件传递只用相对 `DATA_ROOT` 的 POSIX 路径字符串，禁止绝对路径。
@@ -76,6 +76,7 @@ IR（pydantic 模型）位于 `backend/app/ir/`，作为「人 / AI / 渲染器�
 - `event_bus` 不依赖 `tasks_store`：`main.py` lifespan 注入 `tasks_store.get_task` 作为 lookup callback；`tasks_store.create_task` 仅静态调用 `EventBus.resolve_events_path` 计算路径，不引入运行时反向依赖。
 - `extract/*` 子能力模块只 import `app/{ir,event_bus,llm,extract,logging,config,render}`；不反向依赖 `api/` 或 `understand/`，调度 / 编排在 `api/lab.py`（dev）以及 `extract/pipeline.py`（1B 完整 DAG）里。
 - `kb/*` 只 import `app/{ir,event_bus,llm,extract,frame_sampler,config,logging}`；`api/templates.py` 调 `kb.store`，`extract/pipeline.py` 调 `kb.store` 落库。`kb` 不反向依赖 `api/`。
+- `apply/*` 只 import `app/{ir,event_bus,llm,kb,understand,render,config,logging,tasks_store}`；不反向依赖 `api/` 或 `extract/`。编排在 `apply/pipeline.py`，HTTP 入口在 `api/projects.py`。Phase 2 ★MVP 闭环全部走这条链。
 - `understand/vision.py` 是语义层，依赖 `extract/captions.py` 的 `CaptionEvent` dataclass + `llm/client.py` 的 `chat_vision`；caption_function 之类的"phase2 分类"由调用方在拿到 `extract` 输出后再调，并通过 `parent_event_id` 把事件挂到对应的 caption 实体事件下。
 - 重 ML 依赖（PySceneDetect / opencv-python-headless / librosa / Demucs / torch）放在 `pip install -e ".[extract]"` 可选 extras；每个 `extract/*` 模块在用前 `try: import ... except ImportError`，缺包时返回 fallback 形状 + 发 `severity="warning"` VisionEvent，不阻塞 pipeline。
 
@@ -216,6 +217,66 @@ python -m app.cli ingest-sample /local/path.mp4
      「回放工作台事件流」按钮 → /workbench/{last_extract_task_id} 重读 jsonl
 ```
 
+**链路 F：Phase 2 ★MVP 应用闭环 — 短素材 + 模板 → MP4**
+```
+浏览器 /editor 上传用户素材
+  → POST /api/projects (multipart)
+     → 拷贝到 projects/{pid}/user_material.mp4
+     → render.ffmpeg.normalize → normalized.mp4
+     → 返回 {project_id}
+浏览器点「VLM 推荐 top-3」
+  → POST /api/projects/{pid}/recommend-templates
+     → tasks_store.create_task("recommend_templates", resource_kind="project")
+        路径方案 B → events_jsonl_path = projects/{pid}/pipeline/events_{task_id}.jsonl
+     → 同步跑：understand.asr.transcribe → frame_sampler.sample_frames（首/中/末）
+            → kb.recommend.recommend_templates（一次 VLM call 看 ≤50 模板 + ASR 摘要 + 3 帧）
+            → 每条推荐发 stage="2.recommend" VisionEvent
+     → 返回 {recommendations:[{template_id,score,reason,...}], workbench_url}
+浏览器选模板，点「应用」
+  → POST /api/projects/{pid}/apply {template_id, allow_aigc_broll:false}
+     → tasks_store.create_task("apply_short", resource_kind="project")
+     → BackgroundTask: apply.pipeline.apply_short(pid, tid, task_id)
+        → kb_store.get_template → TemplateIR
+        → _safe("probe_duration") → ffprobe duration
+        → _safe("asr") → understand.asr.transcribe → TranscriptLedger
+        → _safe("mapping") → apply.mapping.map_short_to_template
+                              (Unit → voice slot 顺序绑定 + ±20% speed 钳制)
+        → _safe("gaps") → apply.gaps.detect_gaps
+                          (按 material_req 分类 text_fill / wrap_fill / reuse)
+        → _safe("fill") → apply.fill.fill_gaps
+                          (text LLM 受 placeholder/length_constraint/semantic_purpose 锚定；
+                           wrap/reuse 段速度让 output_span = slot.nominal 保持 timeline 连续)
+        → _safe("style") → apply.style.apply_style
+                          (per-PlacedSegment 深拷贝 slot.style；per-Unit Caption（D11
+                           严守 text = Unit.text）；text LLM 选 ≤3 个 emphasis_words
+                           且必为 Unit.text 子串；BGM 按 BGM_STRATEGY 选 features /
+                           original 两路径)
+        → 装配 ProjectIR + degraded 写 projects/{pid}/project.json
+        → 发 2.pipeline.done 事件
+浏览器看 RemotionPlayer 实时预览（CSS-based — <video src=normalized.mp4>
+            + playbackRate 跟随 seg.speed + CSS transform zoom + overlay div
+            for captions / stickers / emphasis）
+浏览器点「渲染出片」
+  → POST /api/projects/{pid}/render → BackgroundTask: render.client.render_project(ir, task_id)
+     → renderer.server.POST /render
+        → render.ts: preflight 扫所有资源（user_material / bgm_track /
+                     sticker.generated_image）；缺则 throw PreflightError
+        → inputProps = {projectIR, userMaterialUrl, bgmUrl}
+        → selectComposition + renderMedia
+        → compositions/Project.tsx:
+             <ColorLayer>
+               for each PlacedSegment:
+                 <Sequence>
+                   <ZoomLayer><OffthreadVideo playbackRate=speed/></ZoomLayer>
+                   <Mask if mask /><Sticker per applied_style.stickers/>
+                 </Sequence>
+             </ColorLayer>
+             <Caption per captions[]>  (emphasis_words 高亮)
+             <Audio src=bgmUrl if bgm_track />
+        → 写 projects/{pid}/outputs/render_{ts}.mp4
+浏览器 TaskProgress 看到 completed → 渲染 mp4 下载链接
+```
+
 ---
 
 ## 6. 关键约定
@@ -247,3 +308,6 @@ python -m app.cli ingest-sample /local/path.mp4
 - **D25 degraded 路径统一翻译**：`TemplateIR.degraded` 的键一律是 TemplateIR 相对路径。`pipeline.py` 顶部的 `SUBCAP_TO_IR_PATH` 表是单一真理源——subcap 自带的 field_key（含 Phase1AReport 路径，如 `zoom_curves.3` / `captions.5.verified_anim_in`）在写入 `ir.degraded` 前由 `_ir_path_for(field_key)` 翻译为 TemplateIR 路径（如 `skeleton.*.style.visual.zoom_keyframes` / `skeleton.*.style.caption`）。`*` 是 slot glob，UI banner 据此展示 + 跳转，不需要再认识 Phase1AReport 字段名。
 - **D26 SQLite 表初始化只在 lifespan**：`tasks_store.init_db` / `kb_store.init_db` 只由 `main.py` 的 lifespan 调用一次，CRUD 入口绝不 per-call init；测试用 `tests/conftest.py::task_with_events` fixture 镜像 lifespan，把两个 init 都跑一遍。两个 store 共用 `data/kb.sqlite` 的 WAL 连接，schema 全 `CREATE IF NOT EXISTS` 幂等，重复 init 不报错也不损失数据但会让单元 CRUD 跑出无谓的 DDL。
 - **D27 task 端点对外暴露 normalized 媒体 URL**：`GET /api/tasks/{id}` 按 `_RESOURCE_DIRS = {sample → samples, project → projects}` 把 `resource_kind/resource_id` 翻译为 `/data/{subdir}/{rid}/normalized.mp4` 字符串，文件不存在或资源 kind 未登记则返 `null`。前端 Workbench 据此挂载 `<video controls>` 实现「帧 / 原视频」切换；不新增独立媒体端点，复用已有 `/data/*` 静态路由。新增资源 kind 仅改这张表。
+- **D28 apply 流水线沿用 _safe 降级范式**：`backend/app/apply/pipeline.py::_safe(label, ir_path, coro)` 与 `extract/pipeline.py::_safe` 同构——每个 stage 抛异常 → 写 `ProjectIR.degraded[<ir_path>]` + 发 `severity="warning"` 事件 + 不阻塞下游。pipeline 顶层不 raise（除 `kb_store.get_template` 找不到模板这种程序错误外），最坏情况是 ProjectIR 多字段 degraded 仍可入磁盘。`STAGE_TO_IR_PATH` 是 ProjectIR.degraded 键的单一真理源（与 TemplateIR 的 `SUBCAP_TO_IR_PATH` 对称），翻译规则按 stage 首段查表 + 子路径折叠，UI banner 据此跳转。
+- **D29 D11 字幕硬约束扩展到 emphasis_words**：Caption.text 永远等于 Unit.text（D11 原约束）；Phase 2 `apply/style.py` 调 LLM 选 `emphasis_words` 时，prompt 显式要求 ≤3 个、必为 unit_text 的连续子串；调用方 `_emphasis_for_unit` 用 `[w for w in result.emphasis_words if w and w in unit.text]` 兜底过滤 LLM 越界产物。用户 Unit text 长于 `length_constraint.max_chars` 时不截断（违反 D11），改走 `layout="multi" + max_chars_per_line` 自然换行；超长情况 log warning。
+- **D30 RemotionPlayer 选 CSS-based 预览不打包 Remotion bundle 到 frontend**：`frontend/src/components/RemotionPlayer.tsx` 用 HTML `<video>` + `playbackRate` 跟随 segment.speed + CSS `transform: scale()` 跑 zoom_keyframes + overlay div 跑 caption / sticker / emphasis 高亮，共享 `/api/projects/{id}/preview-props` 的精简 props shape。理由：把 `renderer/src/compositions/*` 重新打包进 `frontend/` 会形成"compositions 双份源"——任何对 Project.tsx / Caption.tsx 的改动都要同步两份，第一性原理上违反单一真理源（D1 IR）。CSS-based 预览的视觉精度对 caption timing / zoom 曲线 / sticker 位置完全足够；最终 MP4 仍由 renderer 用真实 Remotion 渲染，二者在 IR 层对齐。

@@ -34,6 +34,10 @@ export interface CaptionProps {
   maxCharsPerLine?: number;
   /** Phase 1B placeholder-aware preview text (first element). */
   placeholderText?: string[];
+  /** Phase 2: substrings of ``text`` to render highlighted / shaken. */
+  emphasisWords?: string[];
+  /** Phase 2: emphasis animation kind (e.g. "高亮" / "抖动" / "放大"). */
+  animEmphasis?: string | null;
   renderMode?: CaptionRenderMode;
 }
 
@@ -45,6 +49,79 @@ const wrapByCharLimit = (text: string, maxChars: number): string => {
   }
   return lines.join("\n");
 };
+
+/**
+ * Phase 2 · emphasis-aware text splitter.
+ *
+ * Walks ``text`` and splits it into ``<span>`` fragments. Substrings that
+ * match any entry in ``emphasisWords`` get an emphasis-styled span (bigger
+ * size + accent color + optional shake). The split is greedy left-to-right;
+ * overlapping emphasis substrings prefer the longer match.
+ *
+ * When ``emphasisWords`` is empty we return a single string fragment so
+ * React doesn't allocate an array. This matches the Phase 1B behaviour
+ * (no emphasis support) byte-for-byte.
+ */
+function renderWithEmphasis(
+  text: string,
+  emphasisWords: string[],
+  animEmphasis: string | null,
+  frame: number,
+  fps: number,
+  startFrame: number,
+): React.ReactNode {
+  if (!emphasisWords || emphasisWords.length === 0) return text;
+  const sorted = [...emphasisWords].sort((a, b) => b.length - a.length);
+  const fragments: React.ReactNode[] = [];
+  let i = 0;
+  while (i < text.length) {
+    let matched = false;
+    for (const ew of sorted) {
+      if (!ew) continue;
+      if (text.startsWith(ew, i)) {
+        // Drive shake / scale animation by frame so the renderer remains
+        // deterministic (no Date.now() etc — Remotion requirement).
+        const t = (frame - startFrame) / Math.max(1, fps);
+        let transform = "";
+        if (animEmphasis === "抖动" || animEmphasis === "shake") {
+          const dx = Math.sin(t * 20) * 3;
+          transform = `translateX(${dx}px)`;
+        } else if (animEmphasis === "放大" || animEmphasis === "scale") {
+          const s = 1.0 + Math.max(0, Math.sin(t * 8)) * 0.18;
+          transform = `scale(${s})`;
+        }
+        fragments.push(
+          <span
+            key={`em-${i}`}
+            style={{
+              color: "#CC785C", // accent-primary
+              display: "inline-block",
+              transform: transform || undefined,
+              transformOrigin: "50% 50%",
+              fontWeight: 900,
+            }}
+          >
+            {ew}
+          </span>,
+        );
+        i += ew.length;
+        matched = true;
+        break;
+      }
+    }
+    if (matched) continue;
+    // Group consecutive non-emphasis characters into one text fragment so
+    // we don't emit one span per character.
+    const startSlice = i;
+    while (i < text.length) {
+      const hits = sorted.some((ew) => ew && text.startsWith(ew, i));
+      if (hits) break;
+      i++;
+    }
+    fragments.push(text.slice(startSlice, i));
+  }
+  return fragments;
+}
 
 export const Caption: React.FC<CaptionProps> = ({
   text,
@@ -60,6 +137,8 @@ export const Caption: React.FC<CaptionProps> = ({
   layout = "single",
   maxCharsPerLine = 12,
   placeholderText = [],
+  emphasisWords = [],
+  animEmphasis = null,
   renderMode = "project_output",
 }) => {
   const frame = useCurrentFrame();
@@ -140,6 +219,15 @@ export const Caption: React.FC<CaptionProps> = ({
         `${strokeWidth}px ${strokeWidth}px 0 ${strokeColor}`
       : undefined;
 
+  const renderedFragments = renderWithEmphasis(
+    wrapped,
+    emphasisWords,
+    animEmphasis,
+    frame,
+    fps,
+    startFrame,
+  );
+
   return (
     <AbsoluteFill>
       <div
@@ -159,7 +247,7 @@ export const Caption: React.FC<CaptionProps> = ({
           maxWidth: "90%",
         }}
       >
-        {wrapped}
+        {renderedFragments}
       </div>
     </AbsoluteFill>
   );

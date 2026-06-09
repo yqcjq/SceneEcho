@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { BrowserRouter, Link, Navigate, Route, Routes } from "react-router-dom";
 import "./styles/global.css";
+import { Editor } from "./pages/Editor.js";
 import { SampleExtract } from "./pages/SampleExtract.js";
 import { SubcapabilityLab } from "./pages/SubcapabilityLab.js";
 import { TemplateLibrary } from "./pages/TemplateLibrary.js";
@@ -22,6 +23,7 @@ const Shell: React.FC<{ children: React.ReactNode }> = ({ children }) => (
         <nav className="flex gap-6 text-sm text-secondary">
           <Link to="/sample-extract" className="hover:text-primary">样例</Link>
           <Link to="/templates" className="hover:text-primary">模板库</Link>
+          <Link to="/editor" className="hover:text-primary">出片</Link>
           <Link to="/workbench/dev" className="hover:text-primary">工作台</Link>
           {import.meta.env.DEV && (
             <Link to="/lab" className="hover:text-primary">Lab</Link>
@@ -67,6 +69,22 @@ ReactDOM.createRoot(root).render(
           element={
             <Shell>
               <TemplateLibrary />
+            </Shell>
+          }
+        />
+        <Route
+          path="/editor"
+          element={
+            <Shell>
+              <Editor />
+            </Shell>
+          }
+        />
+        <Route
+          path="/editor/:projectId"
+          element={
+            <Shell>
+              <Editor />
             </Shell>
           }
         />

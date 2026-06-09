@@ -23,6 +23,7 @@ export const RemotionRoot: React.FC = () => {
             canvas: { width: 1080, height: 1920, fps: 30 },
           },
           userMaterialUrl: "",
+          bgmUrl: null,
         }}
         calculateMetadata={({ props }) => {
           const meta = projectMeta((props as any).projectIR);

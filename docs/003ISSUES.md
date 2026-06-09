@@ -417,3 +417,40 @@ Phase 1B 成品试用（在 `/sample-extract` 上传 10s+ 视频触发提取并�
 -> docs/decisions/（无，单点 UI 修复无方案分叉）
 -> 004CHANGELOG.md [2026-06-09-4]
 
+
+
+---
+
+## [ISS-012] Phase 2 ★MVP 闭环 — short 口播 + KB 模板 → 自动出片
+
+**状态**：[已解决]
+**优先级**：[P1 严重]
+**类型**：[功能异常]
+**发现日期**：2026-06-09
+**解决日期**：2026-06-09
+
+**现象**：
+PLAN.md 1570-1666 行声明阶段 2 ★MVP 闭环：用户传 10–20s 一镜到底口播短素材 + 从 KB 指定一个模板 → ASR 对齐 → 映射到模板骨架 → 套字幕风格（含多行 + placeholder 引导）+ 缩放 + BGM（features 或 original）+ 贴纸（占位）→ 渲染 MP4 返回；推荐 + apply 全过程在工作台可见。落地前 Phase 0 / 0.5 / 1A / 1B 已完成，但 backend 没有 `apply/` 包、没有 ASR / 推荐 / 缺口补全 / 字幕填充 / BGM 选曲 / 渲染端缺多 segment 支持，前端没有 Editor 页面。
+
+**后果**：
+不开 Phase 2 就没有"出片"产品形态——KB 里只有模板没有产物，AI 工作台只看得到 extract 链路看不到 apply 链路，整个项目停在"识别得到但用不到"的尴尬位置。
+
+**初步判断**：
+已确认。Phase 2 是项目第一个端到端有产物的阶段，必须完整落地。设计沿用 1B 的 `_safe(label, ir_path, coro)` 降级范式，新增 `apply/` 包与 1B 的 `extract/` 包对称。
+
+**关联**：
+-> backend/app/ir/project.py（ProjectIR.degraded 字段）
+-> backend/app/understand/asr.py（WhisperX lazy import + 等距 fallback）
+-> backend/app/kb/recommend.py（VLM 模板推荐 top-k）
+-> backend/app/apply/{__init__,mapping,gaps,fill,style,pipeline}.py（apply DAG）
+-> backend/app/render/ffmpeg.py（mix_bgm + extract_audio + compose_segments）
+-> backend/app/api/projects.py（recommend / apply / render / preview-props / mix-bgm 端点）
+-> backend/app/llm/prompts/{2_recommend,2_caption_emphasis,2_fill_gap}.md
+-> renderer/src/compositions/{Project,Caption,ZoomLayer,Sticker}.tsx + preflight.ts
+-> frontend/src/{api/index.ts,components/RemotionPlayer.tsx,pages/Editor.tsx,main.tsx}
+-> backend/tests/{integration/test_apply_phase2,unit/test_apply}.py
+-> 004CHANGELOG.md [2026-06-09-5]
+
+**解决方案**：
+按 PLAN 完整落地阶段 2：新增 `apply/` 包 6 文件（mapping / gaps / fill / style / pipeline + __init__）；新增 `understand/asr.py`、`kb/recommend.py` 各 1 文件；扩 `render/ffmpeg.py`（mix_bgm + extract_audio + compose_segments 三函数）；扩 `api/projects.py` 五端点（recommend / apply / get / preview-props / render / mix-bgm）；renderer Project.tsx 重写为多 Sequence 多 ZoomLayer 多 Sticker per-segment；新增 ZoomLayer.tsx / Sticker.tsx / preflight.ts；renderer Caption.tsx 加 emphasis_words 子串高亮；新增 prompts 三份（2_recommend / 2_caption_emphasis / 2_fill_gap）；前端新增 `/editor` 页 + `RemotionPlayer` CSS-based 预览组件 + `/api` 客户端方法；ProjectIR 加 `degraded` 字段与 TemplateIR 对称；新增集成 + 单元测试覆盖 PLAN 验证 2 / 3 / 4 / 5 / 11。Caption.text === Unit.text 严守 D11；fill 段速度让 output_span = slot.nominal 保持 timeline 连续；ASR 缺包走 fallback 不阻塞 pipeline；BGM 走 BGM_STRATEGY 双策略；RemotionPlayer 选 CSS-based 而非打包 Remotion bundle 进 frontend——避免组件源双份维护（PLAN 1644-1649 设计意图同样可达）。
+

@@ -1,3 +1,53 @@
+## [2026-06-09-5] feat(phase2): close MVP loop — ASR + recommend + apply + multi-segment render [ISS-012]
+
+### 改动
+
+Phase 2 ★MVP 端到端闭环落地：短素材（10–20s 一镜到底口播）+ KB 模板 → ASR 对齐 → 映射 → 缺口补全 → 套风格（含字幕 emphasis_words + zoom keyframes + 贴纸占位 + BGM features/original 选择）→ Remotion 多 PlacedSegment 渲染 → MP4。`apply/` 新包沿用 1B 的 `_safe(label, ir_path, coro)` 降级范式 + `STAGE_TO_IR_PATH` 翻译表，让 `ProjectIR.degraded` 与 `TemplateIR.degraded` 命名空间对称；前端 `/editor` 五步闭环页 + CSS-based `RemotionPlayer` 即时预览（不打包 Remotion bundle 到前端，避免重复源）。
+
+- backend/app/ir/project.py: `ProjectIR` 新增 `degraded: dict[str, str]` 与 TemplateIR 对称
+- backend/app/understand/asr.py（新增）: WhisperX large-v3 lazy import；缺包/CUDA OOM/空输出时 fallback 到 ffprobe duration + 等距 ~3s 分段，发 `severity=warning` 事件不阻塞 pipeline
+- backend/app/kb/recommend.py（新增）: 一次 VLM call 看 ≤50 模板 + 3 帧 + ASR 摘要前 200 字，输出 top-k 推荐；每条推荐发 stage="2.recommend" 事件；VLM 返空 / template_id 越界时按 KB 目录顺序兜底
+- backend/app/apply/__init__.py / mapping.py / gaps.py / fill.py / style.py / pipeline.py（新增）：mapping 按 Unit 时间顺序绑定 voice slot；speed 钳制 ±20%；溢出 / 不足分别一次性 warning；gaps 按 material_req 分类 text_fill / wrap_fill / reuse；fill 用 placeholder + length_constraint + semantic_purpose 作 LLM 文案锚点，wrap/reuse 段速度让 output_span = slot.nominal 保持 timeline 连续；style 逐 Unit 调 LLM 选 emphasis_words（≤3 个、必为 Unit.text 子串、D11 严守 Caption.text = Unit.text）；BGM 按 BGM_STRATEGY 走 features (bgm_index.json 最近邻) / original 双路径
+- backend/app/render/ffmpeg.py: 新增 `extract_audio` / `mix_bgm`(sidechaincompress + ducking) / `compose_segments`(filter_complex trim+atempo+concat)
+- backend/app/api/projects.py: `POST /projects` 已有；新增 `/recommend-templates` (sync VLM call + 帧采样事件流) / `/apply` (BackgroundTask 跑 apply_short) / `GET /projects/{id}` (返回 ProjectIR) / `GET .../preview-props` (精简 props 喂前端 player) / `POST .../render` / `POST .../mix-bgm` (dev hook)
+- backend/app/llm/prompts/{2_recommend, 2_caption_emphasis, 2_fill_gap}.md（新增）：三组 Phase 2 prompt 模板，placeholder/length_constraint/semantic_purpose 作视觉锚点
+- renderer/src/compositions/Project.tsx: 重写从"取 segments[0]"假设升级为多 Sequence 渲染——每段 ZoomLayer + per-seg Mask + per-seg Sticker；全局 ColorLayer 包 video stack；BGM `<Audio>` 走 inputProps.bgmUrl；OffthreadVideo 加 playbackRate 跟随 speed
+- renderer/src/compositions/Caption.tsx: 新增 emphasis_words / animEmphasis 支持；emphasis 子串拆分为带 accent-primary 色 / 抖动 / 放大动画的内联 span
+- renderer/src/compositions/{ZoomLayer,Sticker}.tsx（新增）：ZoomLayer 用 interpolate 跑 zoom_keyframes，CSS transform scale；Sticker 双模式：generated_image 不空走 `<Img>`，空走虚线占位框 + Phase 5 替换 badge
+- renderer/src/preflight.ts（新增）：渲染前扫描 user_material / bgm_track / 所有 sticker.generated_image；缺则 throw PreflightError，render.ts 调用之，避免 Chromium 404 帧静默落盘
+- renderer/src/render.ts: 接入 preflight；inputProps 新增 bgmUrl；用 publicDataUrl helper 统一拼 BACKEND_URL/data/... URL
+- renderer/src/compositions/projectMeta.ts: 计算 durationInFrames 时考虑 speed 与 captions.end（fill caption 可能延伸到段尾外）
+- frontend/src/api/index.ts: 新增 `uploadProject / recommendTemplates / applyTemplate / getProject / getPreviewProps / renderProject` + 对应类型
+- frontend/src/components/RemotionPlayer.tsx（新增）：CSS-based 预览组件——共享 ProjectIR + preview-props shape，用 HTML `<video>` + `playbackRate` 跟随 segment 速度，CSS transform 跑 zoom，overlay div 跑 caption / sticker / emphasis 高亮。不打包 Remotion bundle 进 frontend（避免双份组件源）
+- frontend/src/pages/Editor.tsx（新增）：5 步闭环页（上传 → 推荐 → 应用 → 预览 → 渲染）；每个任务节点带 workbench 跳转链接
+- frontend/src/main.tsx: 注册 `/editor` / `/editor/:projectId` 路由 + 顶栏「出片」入口
+- backend/tests/integration/test_apply_phase2.py（新增）：覆盖 PLAN 验证 2 / 3 / 4 / 5 / 11——sync<0.15s / speed 钳制 / 缺口补全 / canvas letterbox / Caption.text 不截断
+- backend/tests/unit/test_apply.py（新增）：ASR fallback / _clamp_speed / detect_gaps 分类 / ProjectIR.degraded round-trip
+
+### 涉及文件
+
+- backend/app/ir/project.py：ProjectIR.degraded 字段
+- backend/app/understand/asr.py：WhisperX + fallback
+- backend/app/kb/recommend.py：VLM top-k 推荐
+- backend/app/apply/{mapping,gaps,fill,style,pipeline}.py：apply DAG + 降级范式
+- backend/app/render/ffmpeg.py：mix_bgm / compose_segments / extract_audio
+- backend/app/api/projects.py：recommend / apply / render / preview-props / mix-bgm 端点
+- backend/app/llm/prompts/{2_recommend,2_caption_emphasis,2_fill_gap}.md：Phase 2 prompt 模板
+- renderer/src/compositions/{Project,Caption}.tsx：多 segment + emphasis_words
+- renderer/src/compositions/{ZoomLayer,Sticker}.tsx：新组件
+- renderer/src/{preflight,render}.ts：资源校验 + bgmUrl 注入
+- frontend/src/{api/index.ts,main.tsx}：Phase 2 API + 路由
+- frontend/src/components/RemotionPlayer.tsx：CSS-based 预览
+- frontend/src/pages/Editor.tsx：MVP 出片闭环
+- backend/tests/{integration/test_apply_phase2,unit/test_apply}.py：验证项
+
+### 关联
+
+-> ISS-012
+-> decisions/（无，沿用 1B 已有架构范式，无方案分叉）
+
+---
+
 ## [2026-06-09-4] fix(workbench): wire video toggle, stage grouping, and IR full-value detail strip [ISS-011]
 
 ### 改动

@@ -6,6 +6,7 @@ import { dirname, resolve } from "node:path";
 import { projectMeta } from "./compositions/projectMeta.js";
 import { withTask } from "./logger.js";
 import { dataRoot, rendererSrcDir, resolveDataPath } from "./paths.js";
+import { PreflightError, preflight } from "./preflight.js";
 import { reportProgress } from "./progress.js";
 
 const BACKEND_URL = process.env.BACKEND_URL ?? "http://localhost:18521";
@@ -25,6 +26,11 @@ export interface RenderResult {
   duration_sec: number;
 }
 
+function publicDataUrl(rel: string): string {
+  const cleaned = String(rel).replace(/\\/g, "/").replace(/^\/+/, "");
+  return `${BACKEND_URL}/data/${cleaned.split("/").map(encodeURIComponent).join("/")}`;
+}
+
 export async function renderProjectIR(
   projectIR: any,
   taskId: string,
@@ -32,19 +38,29 @@ export async function renderProjectIR(
   const log = withTask(taskId);
   const meta = projectMeta(projectIR);
 
+  // Preflight: every external resource referenced in the IR must exist.
+  // Failing fast here beats Chromium silently substituting a 404 frame.
+  const pf = preflight(projectIR);
+  if (!pf.ok) {
+    log.error({ missing: pf.missing }, "preflight_failed");
+    throw new PreflightError(pf.missing);
+  }
+
   // Remotion 4.x only fetches http(s) assets, so serve user material via the
   // backend's /data static mount instead of a file:// URL.
   const userMaterialAbs = resolveDataPath(projectIR.user_material);
-  const rel = String(projectIR.user_material).replace(/\\/g, "/").replace(/^\/+/, "");
-  const userMaterialUrl = `${BACKEND_URL}/data/${rel.split("/").map(encodeURIComponent).join("/")}`;
+  const userMaterialUrl = publicDataUrl(projectIR.user_material);
+  const bgmUrl: string | null = projectIR.bgm_track
+    ? publicDataUrl(projectIR.bgm_track)
+    : null;
 
-  log.info({ meta, userMaterialAbs, userMaterialUrl }, "render_start");
+  log.info({ meta, userMaterialAbs, userMaterialUrl, bgmUrl }, "render_start");
   await reportProgress(taskId, 0.1, "bundling");
 
   const bundleUrl = await getBundleUrl();
   await reportProgress(taskId, 0.3, "selecting");
 
-  const inputProps = { projectIR, userMaterialUrl };
+  const inputProps = { projectIR, userMaterialUrl, bgmUrl };
   // calculateMetadata in Root.tsx handles width/height/fps/duration.
   const composition = await selectComposition({
     serveUrl: bundleUrl,

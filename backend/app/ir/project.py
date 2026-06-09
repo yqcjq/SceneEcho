@@ -49,3 +49,11 @@ class ProjectIR(BaseModel):
     allow_aigc_broll: bool = False
     bgm_track: str | None = None
     version: int = 1
+    # Phase 2: per-field degradation flags, same shape as TemplateIR.degraded.
+    # Keys are dotted ProjectIR paths (e.g. "captions" / "sections.0.segments"
+    # / "bgm_track" / "ledger"). The apply pipeline wraps every step with
+    # ``_safe(label, ir_path, coro)``; failures land here so the workbench
+    # banner + Editor right-pane can flag partial results without losing the
+    # rest of the project. Unlike TemplateIR.degraded, this is per-project
+    # state, persisted with the rest of ProjectIR into projects/{id}/project.json.
+    degraded: dict[str, str] = Field(default_factory=dict)

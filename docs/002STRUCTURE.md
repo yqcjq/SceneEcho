@@ -66,7 +66,7 @@ SceneEcho/
 │  │  ├─ api/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ samples.py                      # POST /samples 上传归一化；POST /samples/{id}/render-demo；POST /samples/{id}/extract (1B)
-│  │  │  ├─ projects.py                     # POST /projects 上传占位
+│  │  │  ├─ projects.py                     # POST /projects 上传；/recommend-templates / /apply / GET /projects/{id} / /preview-props / /render / /mix-bgm (Phase 2)
 │  │  │  ├─ tasks.py                        # GET /tasks/{id}（含 normalized_media_url · D27）；POST /internal/task-progress
 │  │  │  ├─ events.py                       # GET /tasks/{id}/events SSE + /events/history
 │  │  │  ├─ templates.py                    # 1B KB CRUD: GET/PATCH/DELETE /templates(/{id}) + /events 回放
@@ -94,6 +94,9 @@ SceneEcho/
 │  │  │     ├─ 1a_masks.md                  # Phase 1A 几何蒙版有无 + 参数 prompt
 │  │  │     ├─ 1a_color_lut.md              # Phase 1A 调色语义标签 + dominant_lut_id prompt
 │  │  │     ├─ 1a_caption_function.md       # Phase 1A 字幕功能分类 prompt（标题/强调/卖点/CTA/regular/过渡）
+│  │  │     ├─ 2_recommend.md               # Phase 2 模板智能推荐 prompt（top-k VLM 排序 + 中文 reason）
+│  │  │     ├─ 2_caption_emphasis.md        # Phase 2 字幕 emphasis_words 选取（必为 unit_text 子串）
+│  │  │     ├─ 2_fill_gap.md                # Phase 2 缺口字幕文案补全（受 length_constraint 约束）
 │  │  │     └─ scenarios/                   # Phase 0.5 mock 事件脚本（dev_workbench 消费）
 │  │  │        ├─ captions_demo.json
 │  │  │        ├─ stickers_demo.json
@@ -118,13 +121,22 @@ SceneEcho/
 │  │  │  ├─ store.py                        # SQLite templates 表 CRUD（与 tasks 表共用 kb.sqlite WAL；init_db 只在 lifespan 调用 D26）
 │  │  │  ├─ tagging.py                      # 1B Tags 推断（VLM 综合骨架摘要 + 3 帧）
 │  │  │  ├─ sanity.py                       # 1B 整体复查（VLM 验骨架/material_req/placeholder/zoom）
+│  │  │  ├─ recommend.py                    # Phase 2 VLM 模板智能推荐 top-k（catalog + ASR 摘要 + 3 帧）
 │  │  │  └─ select.py                       # Phase 1B 占位：标签精确匹配；Phase 3 接 LLM rerank
+│  │  ├─ apply/                             # Phase 2 应用层（user material + template → ProjectIR）
+│  │  │  ├─ __init__.py
+│  │  │  ├─ mapping.py                      # 2.map — Unit → voice slot 时间顺序绑定 + ±20% speed 钳制
+│  │  │  ├─ gaps.py                         # 2.gaps — slot 未覆盖检测，按 material_req 分类 fill_strategy
+│  │  │  ├─ fill.py                         # 2.fill — text_fill (LLM) / wrap_fill / reuse 三策略；output_span = slot.nominal
+│  │  │  ├─ style.py                        # 2.style — 套 StyleRule 到 PlacedSegment + LLM 选 emphasis_words + BGM 选曲
+│  │  │  └─ pipeline.py                     # 2.pipeline — apply_short DAG 编排（_safe 降级 + STAGE_TO_IR_PATH 翻译 + project.json 落盘）
 │  │  ├─ agent/                             # Phase 5 占位（aigc / nl_edit / sfx_preset 等）
 │  │  │  ├─ __init__.py
 │  │  │  └─ aigc.py                         # 贴纸生图 / B-roll 占位（Phase 5 填）
-│  │  ├─ understand/                        # Phase 1A 语义层分类器
+│  │  ├─ understand/                        # Phase 1A 语义层分类器 + Phase 2 ASR
 │  │  │  ├─ __init__.py
-│  │  │  └─ vision.py                       # classify_caption_function（caption_idx 入参，写 Phase1AReport.captions[idx].function；命名匹配 CI classify_ 前缀）
+│  │  │  ├─ vision.py                       # classify_caption_function（caption_idx 入参，写 Phase1AReport.captions[idx].function；命名匹配 CI classify_ 前缀）
+│  │  │  └─ asr.py                          # Phase 2 WhisperX large-v3 + forced align；缺包 fallback 等距 ~3s 分段
 │  │  └─ render/
 │  │     ├─ __init__.py
 │  │     ├─ client.py                       # httpx 调 renderer /render；renderer_health 探活
@@ -143,11 +155,13 @@ SceneEcho/
 │        ├─ test_lab_api.py                 # SubcapabilityLab API 行为（registry / 403 / 404 / dry_run）
 │        ├─ test_check_scripts.py           # 三脚本 grep 守卫在仓库自有代码上跑过
 │        ├─ test_skeleton.py                # 1B 骨架推断（role 阈值 / material_req / 同 role 合并）
-│        └─ test_kb_store.py                # 1B KB store CRUD + IR round-trip + tags 双列同步
+│        ├─ test_kb_store.py                # 1B KB store CRUD + IR round-trip + tags 双列同步
+│        └─ test_apply.py                   # Phase 2 ASR fallback / _clamp_speed / detect_gaps 分类 / ProjectIR.degraded round-trip
 │     └─ integration/
 │        ├─ __init__.py
 │        ├─ test_subcap_shapes.py           # 1A mock-level integration：seeded ctx 跑全部 subcap，断言事件结构 + Phase1AReport ir_target + parent 链路 + schema round-trip
-│        └─ test_extract_1b.py              # 1B end-to-end pipeline：seeded ctx + 无 credentials → KB 落行 + 事件 ≥ 10 + done 事件压尾
+│        ├─ test_extract_1b.py              # 1B end-to-end pipeline：seeded ctx + 无 credentials → KB 落行 + 事件 ≥ 10 + done 事件压尾
+│        └─ test_apply_phase2.py            # Phase 2 验证 2/3/4/5/11：字幕同步 / speed 钳制 / 缺口补全 / canvas letterbox / Caption.text 不截断
 │
 ├─ renderer/                                 # Node Remotion 渲染服务
 │  ├─ package.json                          # pnpm @sceneecho/renderer 依赖与脚本
@@ -167,11 +181,14 @@ SceneEcho/
 │     │  └─ ir.ts                           # 生成产物：zod schemas + 推导 TS 类型（gitignored）
 │     └─ compositions/
 │        ├─ Root.tsx                        # <Composition id="Project"> + calculateMetadata
-│        ├─ Project.tsx                     # 顶层组合：OffthreadVideo 段落 + Caption overlay
-│        ├─ Caption.tsx                     # 单条字幕的位置/动画/描边渲染（1B 双模式 + anim_in 全套 + 多行）
+│        ├─ Project.tsx                     # 顶层组合：多 Sequence × per-seg ZoomLayer/Mask/Sticker + 全局 ColorLayer + Caption overlay + BGM Audio (Phase 2)
+│        ├─ Caption.tsx                     # 单条字幕的位置/动画/描边渲染（1B 双模式 + anim_in 全套 + 多行 + Phase 2 emphasis_words 高亮）
 │        ├─ Mask.tsx                        # 1B 几何蒙版（SVG clipPath circle/rectangle/line_split）
 │        ├─ ColorLayer.tsx                  # 1B 调色层（CSS filter 预设按 dominant_lut_id）
-│        └─ projectMeta.ts                  # 从 IR 算 width/height/fps/durationInFrames（共用）
+│        ├─ ZoomLayer.tsx                   # Phase 2 缩放层（interpolate zoom_keyframes + CSS transform scale）
+│        ├─ Sticker.tsx                     # Phase 2 贴纸层（generated_image 双模式：Img / 虚线占位 + Phase 5 替换 badge）
+│        └─ projectMeta.ts                  # 从 IR 算 width/height/fps/durationInFrames（含 speed + caption.end 修正）
+│     └─ preflight.ts                       # Phase 2 渲染前资源校验（user_material / bgm_track / sticker.generated_image 缺则 throw）
 │
 └─ frontend/                                 # React + Vite 前端
    ├─ package.json                          # pnpm @sceneecho/frontend 依赖与脚本（含 tailwind / radix / lucide / react-arborist / immer / lodash / vitest）
@@ -199,6 +216,7 @@ SceneEcho/
       │  └─ workbench.ts                    # 工作台 store：events / irSnapshot (immer + lodash.set) / childIndex / vetoedIds / autoFollow / 选中 / 过滤 / visionPaneMode / streamViewMode
       ├─ components/
       │  ├─ TaskProgress.tsx                # task_id 轮询 + 进度条 + 错误展示
+      │  ├─ RemotionPlayer.tsx              # Phase 2 CSS-based 预览（<video> + playbackRate + CSS zoom/caption/sticker 叠层，不打包 Remotion bundle）
       │  └─ workbench/
       │     ├─ WorkbenchVisionPane.tsx      # 左栏：选中事件帧 + bbox overlay + 「帧/原视频」toggle（video 单挂载，按 frame_ts 命令式 seek，autoFollow 时不打断连续观看）
       │     ├─ WorkbenchEventStream.tsx     # 中栏：默认按 stage 分组（可切按到达顺序）+ ↑↓/Enter/X 快捷键 + URL stage_filter/time_range + 否决线穿 + reasoning pre-wrap 自然多行
@@ -208,6 +226,7 @@ SceneEcho/
       ├─ pages/
       │  ├─ SampleExtract.tsx               # 阶段 0/1B 上传 + 渲染 demo + 「提取模板（1B）」按钮 + 工作台跳转
       │  ├─ TemplateLibrary.tsx             # 1B `/templates` 列表 + `/templates/:id` 详情（骨架/sanity/placeholder 编辑/事件回放）
+      │  ├─ Editor.tsx                      # Phase 2 出片闭环：上传 → 推荐 → 应用 → 预览 → 渲染（5 步），每步带工作台跳转
       │  ├─ Workbench.tsx                   # /workbench/:taskId 三栏页面：SSE 订阅 + history 预填
       │  ├─ WorkbenchLauncher.tsx           # /workbench/dev：列出 mock scenarios + 启动按钮
       │  └─ SubcapabilityLab.tsx            # /lab：DEV-only Phase 1A 子能力 × fixture 单点验证

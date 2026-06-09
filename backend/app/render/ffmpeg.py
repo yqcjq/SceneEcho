@@ -108,3 +108,166 @@ def extract_thumbnail(src_path: str | Path, dst_path: str | Path, at: float = 0.
     ]
     subprocess.run(cmd, capture_output=True, text=True, check=True)
     return dst
+
+
+def extract_audio(src_path: str | Path, dst_path: str | Path) -> Path:
+    """Extract the audio track of a media file as 44.1k stereo WAV.
+
+    Used by Phase 2's BGM mixer to feed the voice track into FFmpeg's
+    ``sidechaincompress`` filter. WAV is cheap to read and the size is
+    fine for short user material (10-20s ≈ 4-8 MB).
+    """
+    dst = Path(dst_path)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        ffmpeg_bin(),
+        "-y",
+        "-i",
+        str(src_path),
+        "-vn",
+        "-ac",
+        "2",
+        "-ar",
+        "44100",
+        "-c:a",
+        "pcm_s16le",
+        str(dst),
+    ]
+    subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return dst
+
+
+def mix_bgm(
+    voice_track: str | Path,
+    bgm_path: str | Path,
+    output: str | Path,
+    *,
+    duck_db: float = 12.0,
+    is_instrumental: bool = True,
+) -> Path:
+    """Sidechain-compress BGM against the voice track and write the mix.
+
+    PLAN 1611: ``sidechaincompress`` filter with the voice track as the
+    sidechain input — whenever the voice exceeds the threshold, the BGM
+    is attenuated by ``duck_db`` dB. ``is_instrumental=False`` (BGM with
+    vocals) ducks more aggressively (lower threshold, longer release)
+    because the lyric overlap is the worst case for口播 clarity.
+
+    The output is BGM-only, ducked relative to the voice. The renderer
+    plays this alongside the unmuted user-material video so the voice
+    is audible without double-mixing.
+    """
+    dst = Path(output)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    # Threshold / ratio / attack / release / makeup tuned for口播-over-BGM.
+    # 默认人声 RMS ≈ -18 dBFS, BGM ≈ -22 dBFS. threshold=0.05 (~-26 dBFS)
+    # makes the compressor trigger on normal speech bursts.
+    threshold = 0.03 if not is_instrumental else 0.05
+    ratio = 16 if not is_instrumental else 8
+    release = 400 if not is_instrumental else 250
+    duck_amount = max(0.0, duck_db)
+    # Filter graph:
+    #   [bgm][voice] sidechaincompress=...    -> ducked BGM
+    #   then volume drop to bring overall level under voice.
+    sidechain = (
+        f"[0:a]aresample=44100,asetpts=PTS-STARTPTS[bgm0];"
+        f"[1:a]aresample=44100,asetpts=PTS-STARTPTS[voice0];"
+        f"[bgm0][voice0]sidechaincompress="
+        f"threshold={threshold}:ratio={ratio}:attack=5:release={release}"
+        f":makeup=1:level_sc=1[duck];"
+        f"[duck]volume=-{duck_amount}dB[out]"
+    )
+    cmd = [
+        ffmpeg_bin(),
+        "-y",
+        "-i",
+        str(bgm_path),
+        "-i",
+        str(voice_track),
+        "-filter_complex",
+        sidechain,
+        "-map",
+        "[out]",
+        "-c:a",
+        "aac",
+        "-ar",
+        "44100",
+        "-b:a",
+        "192k",
+        str(dst),
+    ]
+    log.info("ffmpeg_mix_bgm", bgm=str(bgm_path), voice=str(voice_track), dst=str(dst))
+    subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return dst
+
+
+def compose_segments(
+    segments: list[dict],
+    src_video: str | Path,
+    output: str | Path,
+    *,
+    fps: int = 30,
+) -> Path:
+    """Cut + concat PlacedSegments from a single source video.
+
+    Each segment dict has ``src_timerange=(start, end)`` and ``speed``.
+    Per PLAN 1612 this composes the bare video (no captions, no stickers,
+    no zoom — those layers live in the renderer). Used by Phase 2's
+    fallback non-Remotion render path (when the renderer service is down)
+    and by Phase 3's pre-render stitch.
+
+    For Phase 2 the renderer's Remotion pipeline does the segment stitching
+    itself, so this is a defensive utility. Kept here so the apply pipeline
+    can produce a "raw cut" mp4 for debugging before sending to Remotion.
+    """
+    dst = Path(output)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if not segments:
+        raise ValueError("compose_segments: empty segments")
+
+    # Build a filter_complex that selects each src_timerange + speed-adjusts
+    # via setpts/atempo, then concats them.
+    parts: list[str] = []
+    concat_inputs: list[str] = []
+    for i, seg in enumerate(segments):
+        src_start, src_end = seg["src_timerange"]
+        speed = float(seg.get("speed", 1.0))
+        atempo = max(0.5, min(2.0, speed))
+        setpts = 1.0 / atempo
+        parts.append(
+            f"[0:v]trim=start={src_start}:end={src_end},"
+            f"setpts={setpts}*(PTS-STARTPTS)[v{i}];"
+            f"[0:a]atrim=start={src_start}:end={src_end},"
+            f"atempo={atempo},asetpts=PTS-STARTPTS[a{i}]"
+        )
+        concat_inputs.append(f"[v{i}][a{i}]")
+    concat = (
+        "".join(p + ";" for p in parts)
+        + f"{''.join(concat_inputs)}concat=n={len(segments)}:v=1:a=1[v][a]"
+    )
+    cmd = [
+        ffmpeg_bin(),
+        "-y",
+        "-i",
+        str(src_video),
+        "-filter_complex",
+        concat,
+        "-map",
+        "[v]",
+        "-map",
+        "[a]",
+        "-r",
+        str(fps),
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-movflags",
+        "+faststart",
+        str(dst),
+    ]
+    log.info("ffmpeg_compose_segments", count=len(segments), dst=str(dst))
+    subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return dst
