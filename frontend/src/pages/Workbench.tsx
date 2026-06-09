@@ -161,7 +161,7 @@ export const Workbench: React.FC = () => {
       */}
       <div className="grid flex-1 overflow-hidden border-t border-border md:grid-cols-3 md:grid-rows-1">
         <div className="border-r border-border">
-          <WorkbenchVisionPane />
+          <WorkbenchVisionPane videoUrl={task?.normalized_media_url ?? null} />
         </div>
         <div className="border-r border-border">
           <WorkbenchEventStream />

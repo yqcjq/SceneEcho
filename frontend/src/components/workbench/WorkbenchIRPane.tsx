@@ -1,4 +1,5 @@
 import React from "react";
+import get from "lodash/get.js";
 import { Tree } from "react-arborist";
 import { useWorkbenchStore } from "../../state/workbench.js";
 
@@ -59,6 +60,25 @@ export const WorkbenchIRPane: React.FC = () => {
       : lastEvent.ir_target.path
     : null;
 
+  // The currently "pinned" leaf path — click any leaf row to mirror its
+  // full value into the detail strip at the bottom of the pane. We store
+  // only the path (not a snapshot of the value): the strip re-resolves via
+  // lodash.get on every render, so streaming events that rewrite the
+  // pinned field keep the strip in sync without an extra subscription.
+  const [pinnedPath, setPinnedPath] = React.useState<{
+    path: string;
+    name: string;
+  } | null>(null);
+  // Reading lodash paths with bracketed indices is tolerated by ``get``:
+  // ``captions[0].reasoning`` resolves the same as ``captions.0.reasoning``.
+  const pinnedValueRaw = pinnedPath ? get(ir, pinnedPath.path) : undefined;
+  const pinnedValueText =
+    pinnedValueRaw === undefined
+      ? null
+      : typeof pinnedValueRaw === "string"
+      ? pinnedValueRaw
+      : JSON.stringify(pinnedValueRaw, null, 2);
+
   // Pick the IR-type label from the most recent event so 1A subcap runs
   // show "Phase1AReport" while 1B/2 runs show "TemplateIR / ProjectIR".
   // Multiple ir_types in a single task are still rendered into one snapshot
@@ -111,7 +131,7 @@ export const WorkbenchIRPane: React.FC = () => {
         <h2 className="font-serif text-lg text-primary">
           AI 写入 IR · <span className="font-mono text-sm text-secondary">{irTypeLabel}</span>
         </h2>
-        <p className="text-tertiary text-xs">点击节点展开；最近写入字段 800ms 高亮</p>
+        <p className="text-tertiary text-xs">点击展开/收起节点；点击叶子值查看全文；最近写入字段 800ms 高亮</p>
       </div>
       <div ref={containerRef} className="flex-1 overflow-hidden">
         {root.length === 0 ? (
@@ -130,13 +150,30 @@ export const WorkbenchIRPane: React.FC = () => {
           >
             {({ node, style }) => {
               const isFlash = flashPath !== null && node.data.id === flashPath;
+              const isLeaf = !!node.data.isLeaf;
+              const isPinned =
+                isLeaf && pinnedPath !== null && pinnedPath.path === node.data.id;
               return (
                 <div
                   style={style}
-                  className={`flex items-center gap-2 px-2 text-sm ${isFlash ? "se-ir-flash rounded-sm" : ""}`}
-                  onClick={() => node.toggle()}
+                  data-testid={isLeaf ? "ir-leaf" : "ir-branch"}
+                  data-ir-path={node.data.id}
+                  className={`flex items-center gap-2 px-2 text-sm ${
+                    isFlash ? "se-ir-flash rounded-sm" : ""
+                  } ${isPinned ? "bg-accent-subtle" : ""}`}
+                  onClick={() => {
+                    // Leaf rows pin to the detail strip; branch rows toggle
+                    // expand. Splitting on isLeaf avoids the click being
+                    // ambiguous and lets the user reliably re-open the strip
+                    // by clicking the same leaf again (idempotent).
+                    if (isLeaf) {
+                      setPinnedPath({ path: node.data.id, name: node.data.name });
+                    } else {
+                      node.toggle();
+                    }
+                  }}
                 >
-                  {!node.data.isLeaf ? (
+                  {!isLeaf ? (
                     <span className="text-tertiary text-xs w-3 shrink-0">
                       {node.isOpen ? "▾" : "▸"}
                     </span>
@@ -151,7 +188,11 @@ export const WorkbenchIRPane: React.FC = () => {
                     // min-w-0 a flex item's min-width is `auto` (= content
                     // width), so the row grows past the tree's rendered width
                     // and react-arborist falls back to horizontal scroll.
-                    <span className="ml-2 min-w-0 flex-1 truncate text-xs text-primary">
+                    <span
+                      className={`ml-2 min-w-0 flex-1 truncate text-xs ${
+                        isLeaf ? "cursor-pointer text-primary" : "text-primary"
+                      }`}
+                    >
                       {node.data.preview}
                     </span>
                   ) : null}
@@ -161,6 +202,44 @@ export const WorkbenchIRPane: React.FC = () => {
           </Tree>
         )}
       </div>
+      {pinnedPath ? (
+        <div
+          data-testid="ir-detail-strip"
+          // Bottom inline detail strip — bounded by max-h so it never eats
+          // the tree's screen real estate, and ``overflow-y-auto`` lets very
+          // long strings scroll within the strip rather than push the tree
+          // off-screen.
+          className="border-t border-border bg-subtle px-4 py-3"
+          style={{ maxHeight: "40%", overflowY: "auto" }}
+        >
+          <div className="mb-2 flex items-start justify-between gap-2">
+            <div className="min-w-0">
+              <p className="font-mono text-[11px] text-tertiary break-all">
+                {pinnedPath.path}
+              </p>
+              <p className="font-mono text-xs text-secondary">{pinnedPath.name}</p>
+            </div>
+            <button
+              type="button"
+              data-testid="ir-detail-close"
+              onClick={() => setPinnedPath(null)}
+              className="se-btn-ghost shrink-0 text-[11px]"
+            >
+              关闭
+            </button>
+          </div>
+          {pinnedValueText === null ? (
+            <p className="text-xs italic text-tertiary">字段不存在或已被移除。</p>
+          ) : (
+            <p
+              data-testid="ir-detail-value"
+              className="whitespace-pre-wrap break-words text-xs text-primary"
+            >
+              {pinnedValueText}
+            </p>
+          )}
+        </div>
+      ) : null}
     </div>
   );
 };

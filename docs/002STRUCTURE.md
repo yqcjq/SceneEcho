@@ -67,7 +67,7 @@ SceneEcho/
 │  │  │  ├─ __init__.py
 │  │  │  ├─ samples.py                      # POST /samples 上传归一化；POST /samples/{id}/render-demo；POST /samples/{id}/extract (1B)
 │  │  │  ├─ projects.py                     # POST /projects 上传占位
-│  │  │  ├─ tasks.py                        # GET /tasks/{id}；POST /internal/task-progress
+│  │  │  ├─ tasks.py                        # GET /tasks/{id}（含 normalized_media_url · D27）；POST /internal/task-progress
 │  │  │  ├─ events.py                       # GET /tasks/{id}/events SSE + /events/history
 │  │  │  ├─ templates.py                    # 1B KB CRUD: GET/PATCH/DELETE /templates(/{id}) + /events 回放
 │  │  │  ├─ dev_workbench.py                # ENABLE_DEV_MOCK gated：mock-stream / scenarios 列表
@@ -196,13 +196,13 @@ SceneEcho/
       │  └─ lab.ts                          # SubcapabilityLab API：listSubcaps / runSubcap / getBaseline
       ├─ state/
       │  ├─ index.ts                        # Zustand store：currentTask
-      │  └─ workbench.ts                    # 工作台 store：events / irSnapshot (immer + lodash.set) / childIndex / vetoedIds / autoFollow / 选中 / 过滤
+      │  └─ workbench.ts                    # 工作台 store：events / irSnapshot (immer + lodash.set) / childIndex / vetoedIds / autoFollow / 选中 / 过滤 / visionPaneMode / streamViewMode
       ├─ components/
       │  ├─ TaskProgress.tsx                # task_id 轮询 + 进度条 + 错误展示
       │  └─ workbench/
-      │     ├─ WorkbenchVisionPane.tsx      # 左栏：选中事件帧 + bbox overlay
-      │     ├─ WorkbenchEventStream.tsx     # 中栏：事件卡片倒序 + ↑↓/Enter/X 快捷键 + URL stage_filter/time_range + 否决线穿
-      │     ├─ WorkbenchIRPane.tsx          # 右栏：react-arborist 渲染 IR 树（ResizeObserver 测父高度）+ 命中字段(含 field) 800ms 闪烁
+      │     ├─ WorkbenchVisionPane.tsx      # 左栏：选中事件帧 + bbox overlay + 「帧/原视频」toggle（video 单挂载，按 frame_ts 命令式 seek，autoFollow 时不打断连续观看）
+      │     ├─ WorkbenchEventStream.tsx     # 中栏：默认按 stage 分组（可切按到达顺序）+ ↑↓/Enter/X 快捷键 + URL stage_filter/time_range + 否决线穿 + reasoning pre-wrap 自然多行
+      │     ├─ WorkbenchIRPane.tsx          # 右栏：react-arborist 渲染 IR 树 + 命中字段 800ms 高亮 + 点击叶子 pin 到底部 detail strip（lodash.get 实时取值显示全文）
       │     ├─ EventBadge.tsx               # stage 前缀染色徽章（badgeColor 导出）
       │     └─ BboxOverlay.tsx              # 0-999 → 像素的 SVG bbox + 标签气泡（bboxToRect 导出）
       ├─ pages/

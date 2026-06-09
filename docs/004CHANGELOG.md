@@ -1,4 +1,35 @@
-## [2026-06-09-3] docs: plan v3.3 — add media timeline, extract history entry, workbench UX issue ISS-011
+## [2026-06-09-4] fix(workbench): wire video toggle, stage grouping, and IR full-value detail strip [ISS-011]
+
+### 改动
+
+ISS-011 三处工作台体感缺陷一次性收口：右栏右上角加「帧截图 / 原视频」切换；中栏默认按 `stage` 分组（保留按到达顺序视图）；中栏 reasoning 段改 `whitespace-pre-wrap` 自然多行不再截断；右栏 IR 树点击叶子节点会把全文展示在底部 detail strip（lodash.get 实时取最新值，事件流写入会即时刷新）。
+
+- backend/app/api/tasks.py：`GET /tasks/{id}` 增 `normalized_media_url` 字段——按 `_RESOURCE_DIRS` 表把 `resource_kind/resource_id` 翻译为 `/data/{samples|projects}/{rid}/normalized.mp4`，文件不存在则返 `null`，不新增端点
+- frontend/src/api/index.ts：`TaskStatus` 接口补 `resource_kind / resource_id / normalized_media_url`
+- frontend/src/state/workbench.ts：store 加 `visionPaneMode / streamViewMode` 两个 UI 态 + 对应 setter；`reset` 时一并恢复默认
+- frontend/src/components/workbench/WorkbenchVisionPane.tsx：拆 `FramePanel` / `VideoPanel`；新 prop `videoUrl: string | null`；header 加 frame/video toggle；video 单挂载 + 按 `frame_ts` 命令式 seek（避免重挂载黑屏闪烁）；`autoFollow=true` 时跳过 seek 不打断连续观看；videoUrl 消失时自动回落 frame 视图
+- frontend/src/components/workbench/WorkbenchEventStream.tsx：默认按 `stage` 分组（`groupByStage` 按 first sequence 排）+ 可折叠段头；保留 `by_arrival` 视图为可切；reasoning 仅 `whitespace-pre-wrap` 自然换行，无截断无 toggle
+- frontend/src/components/workbench/WorkbenchIRPane.tsx：底部 detail strip——点击叶子节点 pin 其 lodash 路径，`lodash.get(ir, path)` 实时解析当前值（流式写入同步刷新）；string 直显，object/array 走 JSON.stringify(2)；`max-h:40%` + 滚动避免吃掉 tree；branch 节点继续 toggle 展开
+- frontend/src/pages/Workbench.tsx：传 `task?.normalized_media_url ?? null` 到 `<WorkbenchVisionPane videoUrl=...>`
+
+### 涉及文件
+
+- backend/app/api/tasks.py：tasks endpoint 拼 `normalized_media_url`
+- frontend/src/api/index.ts：TaskStatus 类型扩字段
+- frontend/src/state/workbench.ts：visionPaneMode / streamViewMode + setter + reset 恢复
+- frontend/src/components/workbench/WorkbenchVisionPane.tsx：frame/video toggle + 拆子组件 + autoFollow 守卫
+- frontend/src/components/workbench/WorkbenchEventStream.tsx：stage 分组 + reasoning pre-wrap 自然换行
+- frontend/src/components/workbench/WorkbenchIRPane.tsx：叶子点击 pin + 底部 detail strip + lodash.get 实时取值
+- frontend/src/pages/Workbench.tsx：videoUrl prop 透传
+
+### 关联
+
+-> ISS-011
+-> decisions/（无，单点 UI 修复无方案分叉）
+
+---
+
+
 
 ### 改动
 

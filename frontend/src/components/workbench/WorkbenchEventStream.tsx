@@ -33,6 +33,7 @@ const EventRow: React.FC<RowProps> = ({
   return (
     <button
       ref={rowRef}
+      type="button"
       data-testid="event-row"
       data-event-id={event.event_id}
       data-vetoed={vetoed ? "true" : "false"}
@@ -59,7 +60,19 @@ const EventRow: React.FC<RowProps> = ({
         {event.semantic_label}
       </div>
       {event.reasoning ? (
-        <p className="mt-1 line-clamp-3 text-xs text-secondary">{event.reasoning}</p>
+        // pre-wrap preserves the model's natural line breaks and lets the
+        // paragraph flow over as many lines as needed. The card has finite
+        // width but unlimited height — no CSS clamp, no toggle: VLM
+        // reasoning is the explainability promise (D19), so it stays fully
+        // visible in the card. The right-pane IR tree handles the
+        // "fixed-height-row leaf can't show long strings" problem
+        // separately via its detail strip.
+        <p
+          data-testid="event-reasoning"
+          className="mt-1 whitespace-pre-wrap text-xs text-secondary"
+        >
+          {event.reasoning}
+        </p>
       ) : null}
       <div className="mt-2 flex items-center justify-between text-xs text-tertiary">
         <span className="font-mono">
@@ -80,6 +93,32 @@ const EventRow: React.FC<RowProps> = ({
   );
 };
 
+interface StageGroup {
+  stage: string;
+  firstSeq: number;
+  events: VisionEvent[];
+}
+
+/**
+ * Bucket events by ``stage`` (full string, e.g. ``1A.captions``). Within a
+ * bucket events stay in arrival order (the order they hit the store).
+ * Buckets are themselves ordered by the ``sequence`` of each bucket's first
+ * event — this gives a stable, pipeline-ish ordering without depending on
+ * ``media_ts`` (which Phase 1A doesn't yet emit per D17).
+ */
+function groupByStage(events: VisionEvent[]): StageGroup[] {
+  const map = new Map<string, StageGroup>();
+  for (const e of events) {
+    let g = map.get(e.stage);
+    if (!g) {
+      g = { stage: e.stage, firstSeq: e.sequence, events: [] };
+      map.set(e.stage, g);
+    }
+    g.events.push(e);
+  }
+  return Array.from(map.values()).sort((a, b) => a.firstSeq - b.firstSeq);
+}
+
 export const WorkbenchEventStream: React.FC = () => {
   // Pull only primitive references from the store. Derived collections live
   // in component-local useMemo so each subscription returns a stable
@@ -94,7 +133,22 @@ export const WorkbenchEventStream: React.FC = () => {
   const toggleVetoed = useWorkbenchStore((s) => s.toggleVetoed);
   const vetoedIds = useWorkbenchStore((s) => s.vetoedIds);
   const setFilter = useWorkbenchStore((s) => s.setFilter);
+  const viewMode = useWorkbenchStore((s) => s.streamViewMode);
+  const setViewMode = useWorkbenchStore((s) => s.setStreamViewMode);
   const [searchParams] = useSearchParams();
+  // Per-stage collapse state for grouped view. Defaults to "open" via the
+  // null-coalesce in ``isCollapsed`` — we only flip on explicit user click.
+  const [collapsedStages, setCollapsedStages] = React.useState<Set<string>>(
+    () => new Set(),
+  );
+  const toggleStageCollapsed = React.useCallback((stage: string) => {
+    setCollapsedStages((prev) => {
+      const next = new Set(prev);
+      if (next.has(stage)) next.delete(stage);
+      else next.add(stage);
+      return next;
+    });
+  }, []);
 
   const events = React.useMemo<VisionEvent[]>(() => {
     return allEvents.filter((e) => {
@@ -107,11 +161,24 @@ export const WorkbenchEventStream: React.FC = () => {
     });
   }, [allEvents, filterStage, timeRange]);
 
-  // Visual (top-to-bottom) order: newest first. The keyboard handler
-  // navigates this array directly so ↓ / ↑ track what's literally on screen
-  // — chronological-index navigation made the directions feel inverted
-  // because we render with .reverse().
-  const ordered = React.useMemo(() => [...events].reverse(), [events]);
+  /**
+   * Visible flat order — what the keyboard navigates over. Two modes:
+   *
+   * - ``by_arrival``: newest first (.reverse), matching the original
+   *   "real-time tail" UX. Used for debugging.
+   * - ``by_stage`` (default): events grouped by ``stage``; within a group,
+   *   arrival order; collapsed groups contribute zero rows. This reads in
+   *   roughly pipeline order (stage A's first event fired before stage B's),
+   *   which gives the user a "video from start to end" mental model that
+   *   the asyncio.gather fan-out in extract_template otherwise destroys.
+   */
+  const groups = React.useMemo(() => groupByStage(events), [events]);
+  const ordered = React.useMemo<VisionEvent[]>(() => {
+    if (viewMode === "by_arrival") return [...events].reverse();
+    return groups.flatMap((g) =>
+      collapsedStages.has(g.stage) ? [] : g.events,
+    );
+  }, [viewMode, events, groups, collapsedStages]);
 
   React.useEffect(() => {
     const stage = searchParams.get("stage_filter");
@@ -176,43 +243,103 @@ export const WorkbenchEventStream: React.FC = () => {
     return () => window.removeEventListener("keydown", onKey);
   }, [setSelected, toggleVetoed]);
 
-  if (events.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center text-secondary">
-        <p className="text-sm">暂无事件，等待中…</p>
-      </div>
-    );
-  }
+  const lookupParent = React.useCallback(
+    (id: string | null) => {
+      if (!id) return null;
+      const parent = allEvents.find((e) => e.event_id === id);
+      return parent ? `${parent.stage} · ${parent.semantic_label}` : null;
+    },
+    [allEvents],
+  );
 
-  const lookupParent = (id: string | null) => {
-    if (!id) return null;
-    const parent = allEvents.find((e) => e.event_id === id);
-    return parent ? `${parent.stage} · ${parent.semantic_label}` : null;
-  };
+  const renderRow = (event: VisionEvent) => (
+    <EventRow
+      key={event.event_id}
+      event={event}
+      parentLabel={lookupParent(event.parent_event_id)}
+      selected={event.event_id === selectedId}
+      vetoed={vetoedIds.has(event.event_id)}
+      onSelect={() => setSelected(event.event_id)}
+      rowRef={(el) => {
+        if (el) rowRefs.current.set(event.event_id, el);
+        else rowRefs.current.delete(event.event_id);
+      }}
+    />
+  );
 
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-border px-4 py-3">
-        <h2 className="font-serif text-lg text-primary">VLM 怎么想</h2>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="font-serif text-lg text-primary">VLM 怎么想</h2>
+          <div
+            role="tablist"
+            aria-label="event stream view mode"
+            className="inline-flex shrink-0 rounded-sm border border-border bg-subtle p-0.5 text-[11px] font-mono"
+          >
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === "by_stage"}
+              data-testid="stream-mode-by-stage"
+              onClick={() => setViewMode("by_stage")}
+              className={`rounded-[2px] px-2 py-0.5 ${
+                viewMode === "by_stage" ? "bg-accent text-text-inverted" : "text-secondary"
+              }`}
+            >
+              按阶段
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={viewMode === "by_arrival"}
+              data-testid="stream-mode-by-arrival"
+              onClick={() => setViewMode("by_arrival")}
+              className={`rounded-[2px] px-2 py-0.5 ${
+                viewMode === "by_arrival" ? "bg-accent text-text-inverted" : "text-secondary"
+              }`}
+            >
+              按到达顺序
+            </button>
+          </div>
+        </div>
         <p className="text-tertiary text-xs">
           {allEvents.length} 事件 · ↑↓ 切换 · Enter 跳到帧 · X 否决
         </p>
       </div>
       <div className="flex-1 overflow-y-auto px-3 py-3">
-        {ordered.map((e) => (
-          <EventRow
-            key={e.event_id}
-            event={e}
-            parentLabel={lookupParent(e.parent_event_id)}
-            selected={e.event_id === selectedId}
-            vetoed={vetoedIds.has(e.event_id)}
-            onSelect={() => setSelected(e.event_id)}
-            rowRef={(el) => {
-              if (el) rowRefs.current.set(e.event_id, el);
-              else rowRefs.current.delete(e.event_id);
-            }}
-          />
-        ))}
+        {events.length === 0 ? (
+          <div className="flex h-full items-center justify-center text-secondary">
+            <p className="text-sm">暂无事件，等待中…</p>
+          </div>
+        ) : viewMode === "by_arrival" ? (
+          ordered.map(renderRow)
+        ) : (
+          groups.map((g) => {
+            const collapsed = collapsedStages.has(g.stage);
+            return (
+              <section
+                key={g.stage}
+                data-testid="stage-group"
+                data-stage={g.stage}
+                className="mb-3"
+              >
+                <button
+                  type="button"
+                  onClick={() => toggleStageCollapsed(g.stage)}
+                  className="flex w-full items-center gap-2 px-1 py-1 text-left text-xs text-secondary hover:text-primary"
+                >
+                  <span className="font-mono text-[11px]">{collapsed ? "▸" : "▾"}</span>
+                  <EventBadge stage={g.stage} />
+                  <span className="text-tertiary">{g.events.length}</span>
+                </button>
+                {!collapsed ? (
+                  <div className="mt-1">{g.events.map(renderRow)}</div>
+                ) : null}
+              </section>
+            );
+          })
+        )}
       </div>
     </div>
   );

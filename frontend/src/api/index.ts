@@ -20,6 +20,10 @@ export interface TaskStatus {
   status: "pending" | "running" | "completed" | "failed";
   progress: number;
   stage: string;
+  resource_kind: string | null;
+  resource_id: string | null;
+  /** /data/* URL of the resource's normalized.mp4, or null if absent. */
+  normalized_media_url: string | null;
   result: { output_path?: string; absolute_path?: string; duration_sec?: number } | null;
   error: string | null;
 }

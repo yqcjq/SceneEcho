@@ -370,3 +370,50 @@ Phase 1B 第一版交付（[2026-06-09-1]）二次核查发现以下问题，按
 
 **解决方案**：
 将全局音频升到 `TemplateIR.audio`，删除 `StyleRule.audio`；引入 `SUBCAP_TO_IR_PATH` 把 1A subcap field_key 翻译为 TemplateIR 路径后再写 `ir.degraded`；`extract/color.py::to_color_report` 公开复用、`pipeline.py` 删除重复定义；`kb/store.py` 移除 per-call `init_db()`、`conftest.py` 镜像 lifespan 补 fixture；`kb/sanity.py` 用结构化 `_summarize_for_audit` 替代字符串截断；pipeline.py masks 也走 `{str(k): v}`；私有 `ctx._frames` 改公共 `await ctx.frames()`；TemplateLibrary 详情页加 `<TagsEditor>` 接通后端 PATCH /tags；`_classify_role` 改名 `_role_for_position` 绕过 CI 守卫误判。`pnpm gen:types` 同步两端 zod；80/80 backend 测试 + 11/11 frontend 测试 + renderer/frontend typecheck 全绿。
+
+
+---
+
+## [ISS-011] Phase 1B 工作台体感反馈 — 原视频缺位 / VLM 卡片乱序 / Reasoning 截断
+
+**状态**：[已解决]
+**优先级**：[P2 一般]
+**类型**：[体验]
+**发现日期**：2026-06-09
+**解决日期**：2026-06-09
+**解决方案**：右栏增 frame/video toggle（后端 `/api/tasks/{id}` 补 `normalized_media_url`，前端按需挂载 `<video controls>`，`autoFollow=false` 时按选中事件 `frame_ts` 命令式 seek，autoFollow 时不打断连续观看）；中栏默认按 `stage` 分组（`groupByStage` 按 first sequence 排，组内沿用到达顺序），保留按到达顺序视图作可切；中栏 reasoning 改 `whitespace-pre-wrap` 自然多行（卡片本来就完整显示，移除原误加的 toggle）；右栏 IRPane 底部加 inline detail strip——点击叶子节点 pin 路径，`lodash.get(ir, path)` 实时取值显示全文（流式写入同步刷新），string 直显 / object 走 JSON stringify。
+
+**现象**：
+Phase 1B 成品试用（在 `/sample-extract` 上传 10s+ 视频触发提取并进入 `/workbench/{task_id}`）暴露三处工作台体感缺陷，本质同源——三栏页面对"AI 决策可视化"做得彻底，但对"决策与原素材 / 视频时间 / 推理全文"的锚定全部缺位。打包为一条 issue 一次性收口：
+
+1. **右栏 `WorkbenchVisionPane` 无原视频回看入口**：左栏只显示选中事件对应的单帧截图（`frame_url`），整段原视频在工作台范围内完全不可访问。用户在中栏读 VLM 卡片时无法回放原视频确认"AI 现在描述的是视频里的哪一段"，长视频甚至会让用户怀疑"我刚才到底传了哪个文件"。
+
+2. **中栏 `WorkbenchEventStream` 按事件到达顺序排，并发场景下严重乱序**：`extract_template` 多子能力（captions / stickers / zoom / transitions / masks / color / audio）`asyncio.gather` 并发跑，VLM 单次延迟 2–10s。中栏按事件 push 到 store 的顺序追加渲染——视频长度 ≥ 10s 时，用户看到的卡片排列与原视频时间顺序完全不一致（8s 字幕 → 2s 贴纸 → 6s zoom 跳来跳去），无法按"视频从头到尾发生了什么"的心智模型理解 AI 决策。
+
+3. **右栏 `WorkbenchIRPane` Reasoning 字段被省略号截断**：VLM 返回的 `reasoning` 经常 100+ 字中文推理，遇到 CSS `text-overflow: ellipsis` 被截断为单行 + `…`；既不支持换行、也不支持横向滚动、也不支持点击展开。用户能看到"AI 决定了什么"但看不到"AI 为什么这么决定"，与产品定位（可解释性）直接冲突。
+
+**后果**：
+工作台的可解释性叙事缺多处关键锚点——决策锚不回原始素材（1）、锚不回视频时间顺序（2）、锚不到完整推理（3）。三处叠加后，用户对中栏卡片的判断完全脱离原始上下文，工作台从"白盒"退化为"半盒"。
+
+**初步判断**：
+已确认。三处均为前端展示层缺陷，与后端事件流 / IR 设计无关：
+- 第 1 项纯属漏做："AI 决策可视化"设计聚焦三栏抽象，未把"原素材回看"列入需求。
+- 第 2 项属设计耦合："传输模型 ≠ 展示模型"未做区分——SSE 按到达顺序广播是物理事实，但展示层不应继承。
+- 第 3 项纯样式 bug，单点修复。
+
+修复方向已与用户对齐：
+- **第 1 项**：右栏 `WorkbenchVisionPane` 顶部加一个 toggle 按钮，开启后**把当前的单帧截图区域替换为 `<video src={normalized_mp4_url} controls>`**（位置不变、与帧同位复用，不另开浮层 / 不另占栏位）。视频源走 `samples/{sid}/normalized.mp4` 或 `projects/{pid}/normalized.mp4` 静态路径，按 task 的 `resource_kind / resource_id` 反查；`/data/*` 静态路由已存在可直接拼。
+- **第 2 项**：中栏改"按 `stage` 分组的折叠区"为默认视图（caption_style / caption_anim / sticker / zoom / transition / mask / color / tag / sanity / asr / dedup / segment / ...），组内按到达顺序追加；保留"按到达顺序"视图为可切换备选给调试用户。组内按 `media_ts` 升序排序的能力依赖 PLAN v3.3 Phase 2.6 才补的 `VisionEvent.media_ts` 字段——本 issue 不强依赖，先按 stage 分组也可独立交付；待 `media_ts` 字段补齐后再开第二轮升级组内排序。
+- **第 3 项**：reasoning 区域改 `white-space: pre-wrap` + 默认折叠 3 行（`-webkit-line-clamp: 3` 或 max-height 计算）+ 右下角 "展开全文 / 收起" 按钮；展开后纵向自然撑开。不引入浮层，保持卡片内布局连贯。
+
+**关联**：
+-> frontend/src/components/workbench/WorkbenchVisionPane.tsx（顶部 video/frame toggle + 视频/帧切换渲染 + autoFollow 守卫）
+-> frontend/src/components/workbench/WorkbenchEventStream.tsx（新增 group_by_stage 默认视图 + 视图模式切换 + reasoning pre-wrap 自然多行）
+-> frontend/src/components/workbench/WorkbenchIRPane.tsx（叶子点击 pin 路径 + 底部 detail strip + lodash.get 实时取值）
+-> frontend/src/state/workbench.ts（新增 visionPaneMode / streamViewMode 两个 UI 态）
+-> backend/app/api/tasks.py（GET /tasks/{id} 补 normalized_media_url 字段；按 resource_kind 表翻译 /data/* 路径，文件不存在则返 null）
+-> frontend/src/api/index.ts（TaskStatus 接口补 resource_kind / resource_id / normalized_media_url）
+-> frontend/src/pages/Workbench.tsx（透传 normalized_media_url 到 WorkbenchVisionPane）
+-> docs/decisions/（无，单点 UI 修复无方案分叉）
+-> 004CHANGELOG.md [2026-06-09-4]
+

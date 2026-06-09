@@ -37,12 +37,18 @@ interface WorkbenchState {
   timeRange: [number, number] | null;
   paused: boolean;
   autoFollow: boolean;
+  /** Right-pane content: single-frame screenshot (default) vs full normalized.mp4 playback. */
+  visionPaneMode: "frame" | "video";
+  /** Middle-pane layout: stage-grouped (default) vs flat arrival-order list. */
+  streamViewMode: "by_stage" | "by_arrival";
 
   appendEvent: (event: VisionEvent) => void;
   setSelected: (id: string | null) => void;
   toggleVetoed: (id: string) => void;
   setFilter: (stage: string | null, range: [number, number] | null) => void;
   togglePause: () => void;
+  setVisionPaneMode: (mode: "frame" | "video") => void;
+  setStreamViewMode: (mode: "by_stage" | "by_arrival") => void;
   reset: (taskId: string | null) => void;
 }
 
@@ -126,6 +132,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   timeRange: null,
   paused: false,
   autoFollow: true,
+  visionPaneMode: "frame",
+  streamViewMode: "by_stage",
 
   appendEvent: (event) => {
     const state = get();
@@ -160,6 +168,8 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
 
   setFilter: (stage, range) => set({ filterStage: stage, timeRange: range }),
   togglePause: () => set({ paused: !get().paused }),
+  setVisionPaneMode: (mode) => set({ visionPaneMode: mode }),
+  setStreamViewMode: (mode) => set({ streamViewMode: mode }),
   reset: (taskId) =>
     set({
       taskId,
@@ -173,5 +183,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       timeRange: null,
       paused: false,
       autoFollow: true,
+      visionPaneMode: "frame",
+      streamViewMode: "by_stage",
     }),
 }));
