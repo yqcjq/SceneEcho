@@ -114,7 +114,7 @@ SceneEcho/
 │  │  │  ├─ masks.py                        # 1A-V7 几何蒙版（CV HoughCircles/Canny/HoughLines 三帧多数决主路径 + VLM 兜底），写 Phase1AReport.masks
 │  │  │  ├─ color.py                        # 1A-V8 调色语义（VLM 标签 + OpenCV HSV 直方图微调），写 Phase1AReport.color
 │  │  │  ├─ audio.py                        # 1A-A1 BGM（Demucs htdemucs 分离 + librosa BPM/能量/情绪），写 Phase1AReport.audio.{has_bgm,bpm,mood_tag}
-│  │  │  ├─ skeleton.py                     # 1B 骨架推断（位置阈值发现 + StyleRule 聚合），读 Phase1AReport 写 TemplateIR.skeleton
+│  │  │  ├─ skeleton.py                     # 1B 骨架推断（位置阈值发现 + StyleRule 聚合 + sticker 时间转 slot-local [0,1] · D32），读 Phase1AReport 写 TemplateIR.skeleton
 │  │  │  └─ pipeline.py                     # 1B extract DAG 编排（asyncio.gather + _safe 降级 + SUBCAP_TO_IR_PATH 翻译 + KB save）
 │  │  ├─ kb/                                # 1B 知识库
 │  │  │  ├─ __init__.py
@@ -125,11 +125,11 @@ SceneEcho/
 │  │  │  └─ select.py                       # Phase 1B 占位：标签精确匹配；Phase 3 接 LLM rerank
 │  │  ├─ apply/                             # Phase 2 应用层（user material + template → ProjectIR）
 │  │  │  ├─ __init__.py
-│  │  │  ├─ mapping.py                      # 2.map — Unit → voice slot 时间顺序绑定 + ±20% speed 钳制
+│  │  │  ├─ mapping.py                      # 2.map — Unit → voice slot 时间顺序绑定 + ±20% speed 钳制 + 超 max 截短 src_timerange（D31）
 │  │  │  ├─ gaps.py                         # 2.gaps — slot 未覆盖检测，按 material_req 分类 fill_strategy
-│  │  │  ├─ fill.py                         # 2.fill — text_fill (LLM) / wrap_fill / reuse 三策略；output_span = slot.nominal
-│  │  │  ├─ style.py                        # 2.style — 套 StyleRule 到 PlacedSegment + LLM 选 emphasis_words + BGM 选曲
-│  │  │  └─ pipeline.py                     # 2.pipeline — apply_short DAG 编排（_safe 降级 + STAGE_TO_IR_PATH 翻译 + project.json 落盘）
+│  │  │  ├─ fill.py                         # 2.fill — text_fill (LLM) / wrap_fill / reuse 三策略；output_span = slot.nominal；通过 outcomes 返回 fill 结果（不 mutate 原 gaps）
+│  │  │  ├─ style.py                        # 2.style — 套 StyleRule 到 PlacedSegment + LLM 选 emphasis_words + BGM 选曲；导出 `_segment_output_span` / `style_for_segment`（D31/D32 单一真理源）
+│  │  │  └─ pipeline.py                     # 2.pipeline — apply_short DAG 编排（_safe 降级 + STAGE_TO_IR_PATH 翻译 + bgm_mix 自动 ducking · D33 + project.json 落盘）
 │  │  ├─ agent/                             # Phase 5 占位（aigc / nl_edit / sfx_preset 等）
 │  │  │  ├─ __init__.py
 │  │  │  └─ aigc.py                         # 贴纸生图 / B-roll 占位（Phase 5 填）
@@ -140,7 +140,7 @@ SceneEcho/
 │  │  └─ render/
 │  │     ├─ __init__.py
 │  │     ├─ client.py                       # httpx 调 renderer /render；renderer_health 探活
-│  │     └─ ffmpeg.py                       # ffmpeg/ffprobe wrapper：normalize / thumbnail / probe
+│  │     └─ ffmpeg.py                       # ffmpeg/ffprobe wrapper：normalize（pad_mode=black|blur · D34）/ thumbnail / probe / extract_audio / mix_bgm（sidechaincompress）/ compose_segments
 │  └─ tests/
 │     ├─ __init__.py
 │     ├─ conftest.py                        # temp DATA_ROOT + fresh_event_bus + task_with_events fixtures

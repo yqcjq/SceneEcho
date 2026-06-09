@@ -6,7 +6,7 @@
   "scripts": {
     "gen:schema": "python scripts/gen_schema.py",
     "gen:types": "pnpm run gen:schema && pnpm -r --parallel run gen:types",
-    "dev:backend": "cd backend && python -m uvicorn app.main:app --reload --port 18521",
+    "dev:backend": "cd backend && python -m uvicorn app.main:app --reload --reload-dir app --port 18521",
     "dev:renderer": "pnpm -F renderer dev",
     "dev:frontend": "pnpm -F frontend dev",
     "dev": "concurrently -n backend,renderer,frontend -c blue,magenta,green \"pnpm dev:backend\" \"pnpm dev:renderer\" \"pnpm dev:frontend\"",

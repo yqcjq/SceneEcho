@@ -23,9 +23,11 @@ keys in the ProjectIR dialect (mirror of TemplateIR's
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Awaitable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, TypeVar
 
 from app import tasks_store
@@ -61,6 +63,7 @@ STAGE_TO_IR_PATH: dict[str, str] = {
     "fill": "sections.0.gaps",
     "style": "captions",
     "bgm": "bgm_track",
+    "bgm_mix": "bgm_track",
     "save_project": "project_id",
 }
 
@@ -270,6 +273,10 @@ async def apply_short(
                     fill_segments.append(o.segment)
                 if o.caption is not None:
                     fill_captions.append(o.caption)
+                # Pipeline owns the Gap.fill_result write so fill.py stays
+                # input-immutable. Per outcome.gap_idx → original gap.
+                if 0 <= o.gap_idx < len(gaps):
+                    gaps[o.gap_idx].fill_result = o.text or o.reasoning
 
     # Merge real + fill segments and re-sort by timeline_start so style.py
     # / renderer see one monotonic sequence.
@@ -295,6 +302,28 @@ async def apply_short(
         # text_fill outcomes. Sort by start so renderer's Caption list is
         # in display order.
         captions = sorted([*real_captions, *fill_captions], key=lambda c: c.start)
+
+    # --------- Stage 6.5: BGM ducking mix ----------
+    # ffmpeg sidechaincompress against the extracted voice → bgm_ducked.aac.
+    # On failure the bgm_track stays as the raw selection (renderer plays
+    # un-ducked BGM) so the project is still renderable.
+    if bgm_track:
+        tasks_store.update_task(task_id, stage="2.bgm_mix", progress=0.85)
+        mix_res = await _safe(
+            "bgm_mix",
+            "bgm_mix",
+            _mix_bgm_for_project(
+                bgm_track,
+                normalized,
+                project_dir,
+                template=template,
+                task_id=task_id,
+            ),
+            task_id=task_id,
+            degraded=degraded,
+        )
+        if mix_res.ok and mix_res.value:
+            bgm_track = mix_res.value
 
     tasks_store.update_task(task_id, stage="2.save", progress=0.95)
 
@@ -360,6 +389,58 @@ async def apply_short(
         ),
     )
     return ir
+
+
+async def _mix_bgm_for_project(
+    bgm_track_rel: str,
+    normalized: Path,
+    project_dir: Path,
+    *,
+    template: TemplateIR,
+    task_id: str,
+) -> str:
+    """Extract the user-material voice and duck the chosen BGM against it.
+
+    Renders ``projects/{id}/bgm_ducked.aac`` (BGM-only, sidechain-ducked
+    by the voice). Returns the DATA_ROOT-relative POSIX path; the apply
+    pipeline writes that into ``ProjectIR.bgm_track`` so the renderer's
+    ``<Audio>`` track plays the ducked mix while the user material's own
+    audio (the voice) keeps playing on top — same as ARCHITECTURE 链路 F.
+    Raises on ffmpeg failure; the caller's _safe wraps and degrades.
+    """
+    settings = get_settings()
+    bgm_abs = settings.resolve(bgm_track_rel)
+    if not bgm_abs.exists():
+        raise FileNotFoundError(f"bgm_track {bgm_track_rel} not on disk")
+    voice_path = project_dir / "voice.wav"
+    output = project_dir / "bgm_ducked.aac"
+    is_instrumental = bool(template.audio.is_instrumental) if template.audio else True
+
+    def _do_mix() -> Path:
+        ffx.extract_audio(normalized, voice_path)
+        ffx.mix_bgm(voice_path, bgm_abs, output, is_instrumental=is_instrumental)
+        return output
+
+    out = await asyncio.to_thread(_do_mix)
+    rel = str(out.relative_to(settings.data_root)).replace("\\", "/")
+    bus = get_event_bus()
+    await bus.publish(
+        task_id,
+        VisionEvent(
+            task_id=task_id,
+            source="system",
+            stage=f"{STAGE}.bgm_mix",
+            semantic_label=f"BGM ducking 完成 · {Path(rel).name}",
+            reasoning=(
+                f"voice 提取自 {normalized.name}；BGM={bgm_track_rel}；"
+                f"is_instrumental={is_instrumental}；输出 {rel}。"
+            ),
+            confidence=1.0,
+            ir_target=IRTarget(ir_type="ProjectIR", path="bgm_track"),
+            ir_value=rel,
+        ),
+    )
+    return rel
 
 
 __all__ = ["STAGE", "apply_short"]

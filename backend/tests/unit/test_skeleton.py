@@ -115,6 +115,40 @@ async def test_build_skeleton_empty_report(task_with_events):
 
 
 @pytest.mark.asyncio
+async def test_build_skeleton_normalizes_sticker_times_to_slot_local(
+    task_with_events,
+):
+    """ISS-013 P1.B: skeleton must rewrite sticker.start/end from
+    sample-clock seconds to slot-local fractional [0,1] so the template
+    is independent of the original sample's timing."""
+    task_id, _ = task_with_events
+    # One slot spanning 4..6s; sticker visible 5..6s of the sample.
+    report = Phase1AReport(
+        scenes=[Phase1AScene(idx=0, start_sec=4.0, end_sec=6.0)],
+        stickers=[
+            Phase1AStickerDetection(
+                sticker=StickerEvent(
+                    description="dot",
+                    position=(0.5, 0.5),
+                    size=(0.1, 0.1),
+                    start=5.0,  # sample-clock seconds
+                    end=6.0,
+                ),
+                bbox_norm_0_999=(500, 500, 100, 100),
+            )
+        ],
+    )
+    slots, _ = await build_skeleton(report, 10.0, task_id=task_id)
+    assert len(slots) == 1
+    s = slots[0]
+    assert len(s.style.stickers) == 1
+    stk = s.style.stickers[0]
+    # slot spans 4..6 (2s); sticker 5..6 → relative [0.5, 1.0]
+    assert stk.start == pytest.approx(0.5, abs=0.01)
+    assert stk.end == pytest.approx(1.0, abs=0.01)
+
+
+@pytest.mark.asyncio
 async def test_build_skeleton_consecutive_same_role_merges(task_with_events):
     """Two consecutive scenes that both land in 主体 collapse into one slot."""
     task_id, _ = task_with_events

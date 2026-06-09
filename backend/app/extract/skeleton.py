@@ -104,12 +104,38 @@ def _captions_in(seg: _Segment, report: Phase1AReport) -> list:
 
 
 def _stickers_in(seg: _Segment, report: Phase1AReport) -> list[StickerEvent]:
-    """Sticker events overlapping the segment's time range."""
+    """Sticker events overlapping the segment, with timing **renormalized to
+    slot-local [0,1]**.
+
+    Phase 1A's ``Phase1AStickerDetection.sticker.start/end`` are sample-clock
+    seconds (where the sticker appeared in the original sample video). At the
+    template (TemplateIR) layer we want a coordinate system that survives
+    being applied to *any* user material — slot-local fractional time does
+    that. Phase 2's ``apply/style.py`` converts [0,1] → segment-local seconds
+    so the renderer never sees fractions.
+
+    PLAN 2 verification 7: stickers must appear at the modelled timestamps
+    when applied; before this remap, the absolute sample-clock time was
+    being subtracted from the ProjectIR timeline (different coordinate
+    systems), and stickers showed up at the wrong moments.
+    """
     out: list[StickerEvent] = []
+    slot_span = max(0.04, seg.end - seg.start)
     for det in report.stickers:
         s = det.sticker
         if s.end > seg.start and s.start < seg.end:
-            out.append(s)
+            rel_start = max(0.0, (s.start - seg.start) / slot_span)
+            rel_end = min(1.0, (s.end - seg.start) / slot_span)
+            if rel_end <= rel_start:
+                rel_end = min(1.0, rel_start + 0.01)
+            out.append(
+                s.model_copy(
+                    update={
+                        "start": round(rel_start, 4),
+                        "end": round(rel_end, 4),
+                    }
+                )
+            )
     return out
 
 

@@ -54,6 +54,18 @@ def _is_in_venv(rel: str) -> bool:
     )
 
 
+def _is_exempt(rel: str) -> bool:
+    """A path is exempt if any EXEMPT segment appears anywhere in it.
+
+    Substring match (not prefix) so monorepo-shaped paths like
+    ``backend/tests/`` / ``renderer/scripts/`` are honoured the same as
+    a repo-root ``tests/`` / ``scripts/``. The intent of EXEMPT_FILES is
+    "the AI-client name guard does not apply to fixtures / dev tools /
+    static data", which is location-independent.
+    """
+    return any(seg in rel for seg in EXEMPT_FILES)
+
+
 def _walks_through_publish(node: ast.AST) -> bool:
     """Return True if the AST contains a call shaped like ``event_bus.publish(...)``.
 
@@ -96,7 +108,7 @@ def main() -> int:
     violations: list[tuple[Path, int, str]] = []
     for py in REPO_ROOT.rglob("*.py"):
         rel = py.relative_to(REPO_ROOT).as_posix()
-        if any(rel.startswith(d) for d in EXEMPT_FILES) or _is_in_venv(rel):
+        if _is_exempt(rel) or _is_in_venv(rel):
             continue
         try:
             tree = ast.parse(py.read_text(encoding="utf-8"))

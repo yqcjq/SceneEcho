@@ -1,3 +1,77 @@
+## [2026-06-09-7] feat(phase2): make ASR backend configurable + co-locate HF cache with DATA_ROOT [ISS-014]
+
+### 改动
+
+阶段 2 端到端验证阻塞的第一性原理修复：`Settings` 接管 ASR 模型选择 + HuggingFace 缓存路径，把项目「single source of truth」与「重资产入 DATA_ROOT」两条范式贯彻到底。`asr.py` 的字面量 `"large-v3"` 提到 `Settings.asr_model`（PLAN 1593 默认值不变，dev `.env.local` 覆盖为 `small` 即可绕开 3GB 下载）；`get_settings()` lru_cache 内 `_apply_hf_env` 把 `HF_HOME` / `HUGGINGFACE_HUB_CACHE` 默认指向 `DATA_ROOT/.cache/huggingface`（系统盘 C: 不再被吃）；操作员显式 export `HF_HOME` 时 `setdefault` 不覆盖，`hf_cache_dir=""` 整段 opt-out。顺手修了两处：CI 守卫 `check_event_emission.py` 的 EXEMPT 从前缀改子串匹配（monorepo 化后 `backend/tests/` 与 repo-root `tests/` 一视同仁），`test_apply_phase2.py` 补 `from pathlib import Path`（之前漏写被 `_safe` 静默吞成 stage_failed）。
+
+- backend/app/config.py: `Settings` 加 `asr_model` / `asr_device` / `asr_compute_type` / `hf_cache_dir` 四字段；新 helper `_apply_hf_env(settings)` 在 `get_settings()` 返回前注入 `HF_HOME` + `HUGGINGFACE_HUB_CACHE`；`os.environ.setdefault` 保留运维显式 export 的优先级；`hf_cache_dir=""` opt-out
+- backend/app/understand/asr.py: `_whisperx_run` 内 `from app.config import get_settings` lazy 读三字段传给 `whisperx.load_model`；fallback 事件 reasoning 写明当前 ASR_MODEL / ASR_DEVICE / ASR_COMPUTE_TYPE / HF_HOME 实际值，磁盘紧张时引导改 .env.local；新 helper `_hf_home_hint()` 从 env 读出 HF 实际落点
+- .env: 新增 `ASR_MODEL=large-v3` / `ASR_DEVICE=cpu` / `ASR_COMPUTE_TYPE=int8` / `HF_CACHE_DIR=.cache/huggingface` 四行模板，注释列出 tiny/base/small/medium/large-v3 各档磁盘占用
+- .env.local（新增）：dev override `ASR_MODEL=small`（gitignored 走 `*.env` 规则）；注释解释「磁盘紧张时改 tiny 也行」
+- scripts/check_event_emission.py: `EXEMPT_FILES` 从 `rel.startswith(d)` 改成 `d in rel` 子串匹配；新 helper `_is_exempt` 写明意图「AI-client 名字守卫不该套在 fixtures/dev tools/static data 上，与路径深度无关」
+- backend/tests/unit/test_config.py（新增）：6 项单测覆盖 Settings ASR 默认 / env 覆盖 / `_apply_hf_env` 注入 / 已存在 env 不覆盖 / 空串 opt-out / `get_settings()` 端到端 wiring
+- backend/tests/integration/test_apply_phase2.py: 顶部补 `from pathlib import Path`（`_fake_extract_audio` 之前 NameError 被 `_safe` 静默吞掉，伪装成 bgm_mix stage 失败）
+- scripts/build_bgm_index.py（新增）：扫 `data/system/bgm_pool/*.{mp3,wav,m4a,aac,flac,ogg}` → librosa 提 BPM + ffprobe header 读真实 duration → 写 `bgm_index.json`（`schema_version=1`，对齐 fonts_index.json 范式）；幂等，保留已有 `mood_tag`；首次落地 3 首（Take me hand / 懒鬼小何 / 蜜桃物语，125-136 BPM 区间），PLAN 1578 推荐 ≥ 5 的提示走 stderr 不阻塞
+- backend/data/system/bgm_pool/bgm_index.json（新增）：上述脚本产物，apply 的 `_bgm_features` nearest-neighbour 选择从此不再 fallback 为空
+- package.json: `dev:backend` 脚本加 `--reload-dir app`；uvicorn `--reload` 默认监听整个 cwd，HF 模型下载到 `data/.cache/huggingface/` 时频繁写入触发重启 → ASR 进程被反复打断永远跑不完。限定到 `backend/app/` 源码目录后，dev 代码热重载语义不变，运行时数据目录变化不再参与 reload 循环（第一性原理：`data/` 是运行时资产，本就不该耦合到「改源码→热重载」回路）
+
+### 涉及文件
+
+- backend/app/config.py：Settings 加 ASR 四字段 + HF env 注入
+- backend/app/understand/asr.py：去字面量 + fallback reasoning 写明运行时配置
+- .env / .env.local：模板 + dev override
+- scripts/check_event_emission.py：EXEMPT 改子串匹配
+- backend/tests/unit/test_config.py：6 项单测固化语义
+- backend/tests/integration/test_apply_phase2.py：补 Path import
+- scripts/build_bgm_index.py：BGM 索引生成脚本（librosa BPM + 真实 duration）
+- backend/data/system/bgm_pool/bgm_index.json：首次入库 3 首曲目索引
+
+### 关联
+
+-> ISS-014
+-> decisions/（无；本次修复只是把项目自己的 Settings + DATA_ROOT 范式贯彻到底，没有新方案分叉）
+
+---
+
+## [2026-06-09-6] refactor(phase2): unify output_span derivation, slot-local sticker time, auto BGM ducking [ISS-013]
+
+### 改动
+
+阶段 2 二核：三处第一性原理修复 + P2 冗余一次性清理。`PlacedSegment` 的 output_span 现在一处推算（`(src_end-src_start)/speed`）覆盖 mapping/fill/style/renderer 四个使用点，不再有 banding 漂移；模板 IR 的 sticker 时间彻底切换为 slot-local [0,1]，apply 阶段才映射成 segment-local 秒；apply 流水线新增 stage `bgm_mix`，自动跑 ffmpeg sidechain ducking 写出 `bgm_ducked.aac`；同时清掉 recommend 端点的 try/except 死代码、fill 死参、mapping 错位事件、normalize 单一 black-pad 模式四项 P2。
+
+- backend/app/apply/mapping.py: 取消 `output_span = max(slot.min, min(slot.max, ...))` banding；speed 钳到 1.2 后 output 仍超 slot.max 则截短 `src_end = src_start + slot.max × speed`；timeline_cursor 累积值与渲染端读到的 `(end-start)/speed` 严格一致；`_slot_min` 不再被引用顺手删掉；gap_candidate 事件 `ir_target.path` 从 `sections.0.gaps` 改为 `sections.0.segments`（与 fill 后落点一致）
+- backend/app/apply/style.py: 新增 `_segment_output_span(seg)` 与 `style_for_segment(slot, output_span)` 两个 helper，作为单一真理源给 mapping/fill/style/renderer 共用；segment-style copy 经过 helper 把 slot.style.stickers 的 [0,1] 映射成 segment-local 秒
+- backend/app/apply/fill.py: `_wrap_segment_for` / `_reuse_segment_for` 接入 `style_for_segment`；timeline_cursor 推算改用 `_segment_output_span`；`_pivot_unit_for` 删除未使用的 `gap_idx` 形参；删除 `cur_gap.fill_result = ...` 的 in-place mutation（改由 pipeline 用 `outcome.gap_idx` 显式写回）
+- backend/app/apply/pipeline.py: 在 style 后新增 stage `bgm_mix`，包在 `_safe` 中跑 `extract_audio + mix_bgm`，写出 `projects/{id}/bgm_ducked.aac` 并更新 `ProjectIR.bgm_track`；新增 `_mix_bgm_for_project` 异步包裹（asyncio.to_thread）；fill 阶段后用 `outcome.gap_idx → gaps[i].fill_result` 写回；`STAGE_TO_IR_PATH` 增 `bgm_mix` 键
+- backend/app/extract/skeleton.py: `_stickers_in` 把 sticker.start/end 从样例绝对秒转换为 slot-local 归一化 [0,1]；docstring 写明 Phase 2 apply 端再映射回 segment-local 秒
+- backend/app/render/ffmpeg.py: `normalize` 新增 `pad_mode: "black" | "blur"` 参数；blur 路径用 `split=2 + scale=increase + crop + boxblur=20 + scale=decrease + overlay`，PLAN 1657 的"模糊背景 letterbox"落地；black 路径保留原行为给 sample-extract 使用
+- backend/app/api/projects.py: `upload_project` 用 `pad_mode="blur"`；`recommend_templates_endpoint` 删除 `transcribe()` 外层冗余 try/except（`transcribe` 设计为永不抛）+ 绝对路径 fallback（违反 D2）
+- renderer/src/compositions/Project.tsx: sticker 直接用 segment-local 秒，删除 `stk.start - seg.timeline_start` 的坐标系混淆减法
+- frontend/src/components/RemotionPlayer.tsx: sticker 比较时把 segment-local 秒投影回 timeline-global 秒后再与 timelineSec 比较
+- backend/tests/integration/test_apply_phase2.py: 新增 5 项测试 — `test_canvas_mismatch_blur_pad_mode` / `test_mapping_timeline_is_contiguous_for_overlong_user` / `test_mapping_truncates_src_when_clamped_speed_overshoots_max` / `test_apply_style_remaps_stickers_to_segment_local_seconds` / `test_apply_pipeline_runs_bgm_mix_when_bgm_selected`
+- backend/tests/unit/test_skeleton.py: 新增 `test_build_skeleton_normalizes_sticker_times_to_slot_local`
+
+### 涉及文件
+
+- backend/app/apply/mapping.py：取消 banding + 截短 src 兜底超长 / 修正 gap_candidate ir_target
+- backend/app/apply/style.py：单一真理源 `_segment_output_span` + `style_for_segment` helper / sticker 段内重映射
+- backend/app/apply/fill.py：复用 helper / 删死参 / 移除 in-place mutation
+- backend/app/apply/pipeline.py：bgm_mix stage / outcomes → gaps 写回 / STAGE_TO_IR_PATH 扩展
+- backend/app/extract/skeleton.py：sticker 时间 [0,1] 归一化
+- backend/app/render/ffmpeg.py：normalize blur pad_mode
+- backend/app/api/projects.py：upload_project blur / recommend 死代码清理
+- renderer/src/compositions/Project.tsx：sticker 直接读 segment-local 秒
+- frontend/src/components/RemotionPlayer.tsx：sticker timeline 投影修正
+- backend/tests/integration/test_apply_phase2.py：5 项新测试
+- backend/tests/unit/test_skeleton.py：sticker 归一化测试
+
+### 关联
+
+-> ISS-013
+-> decisions/（无，沿用 ISS-010 的"补丁 → 重构"二核范式，无新方案分叉）
+
+---
+
 ## [2026-06-09-5] feat(phase2): close MVP loop — ASR + recommend + apply + multi-segment render [ISS-012]
 
 ### 改动

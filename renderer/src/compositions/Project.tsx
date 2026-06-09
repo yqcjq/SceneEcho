@@ -116,14 +116,12 @@ export const Project: React.FC<ProjectIRProps> = ({
                     description={stk.description ?? ""}
                     position={stk.position ?? [0.5, 0.5]}
                     size={stk.size ?? [0.2, 0.1]}
-                    // Stickers in the template carry absolute (in-template)
-                    // timestamps; for Phase 2 we render them against the
-                    // segment-local clock, so clamp to [0, segment duration].
-                    startSec={Math.max(0, (stk.start ?? 0) - (seg.timeline_start ?? 0))}
-                    endSec={Math.max(
-                      0.04,
-                      (stk.end ?? outputSpan) - (seg.timeline_start ?? 0),
-                    )}
+                    // Phase 2 IR contract: applied_style.stickers[*].start/end
+                    // are segment-local seconds (apply/style.py mapped from
+                    // slot-local [0,1] using the segment's output_span).
+                    // Renderer reads them directly — no coordinate conversion.
+                    startSec={stk.start ?? 0}
+                    endSec={stk.end ?? outputSpan}
                     generatedImage={stk.generated_image ?? null}
                     semanticCategory={stk.semantic_category ?? null}
                   />

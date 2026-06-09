@@ -45,47 +45,99 @@ def normalize(
     width: int = 1080,
     height: int = 1920,
     fps: int = 30,
+    pad_mode: str = "black",
 ) -> dict:
     """Transcode to H.264 baseline + AAC + yuv420p + target canvas/fps.
 
-    Default 1080x1920 (9:16). Uses 'pad' to letterbox sources of other aspect ratios.
+    Default 1080x1920 (9:16). For aspect-ratio-mismatched sources two
+    letterbox modes are supported:
+
+    - ``pad_mode="black"`` (default, sample-extract path): fast pad with
+      solid black bars. Cheap, predictable, used by template extraction
+      where blurred backgrounds would corrupt the recognized stage.
+    - ``pad_mode="blur"`` (Phase 2 user uploads, PLAN 1657): blurred
+      copy of the source fills the bars; foreground stays centred.
+      Aesthetic match for ProjectIR rendering when the user uploads a
+      16:9 clip into a 9:16 canvas.
+
     Returns the resulting media info.
     """
     dst = Path(dst_path)
     dst.parent.mkdir(parents=True, exist_ok=True)
-    # Canonical FFmpeg idiom for "fit-and-letterbox to W x H":
-    #   1. scale preserves source aspect ratio (decrease = fit inside the box)
-    #   2. pad fills remaining area with black
-    #   3. fps locks frame rate
-    # Avoids expression strings with single-quote escaping that subprocess + Windows
-    # don't pass through cleanly.
-    vf = (
-        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
-        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
-        f"fps={fps}"
-    )
-    cmd = [
-        ffmpeg_bin(),
-        "-y",
-        "-i",
-        str(src_path),
-        "-vf",
-        vf,
-        "-c:v",
-        "libx264",
-        "-profile:v",
-        "baseline",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-ar",
-        "44100",
-        "-movflags",
-        "+faststart",
-        str(dst),
-    ]
-    log.info("ffmpeg_normalize", src=str(src_path), dst=str(dst))
+    if pad_mode == "blur":
+        # Background path: scale-cover the canvas (so the bars are filled
+        # by source pixels), then heavy boxblur to erase identifiable
+        # detail. Foreground path: scale-decrease to keep aspect, then
+        # overlay centred. setsar=1 smooths out non-square pixel sources
+        # before the overlay so Chromium / x264 don't complain about
+        # sar mismatch. The leading [0:v] tags the video stream
+        # explicitly so split has a defined source.
+        vf = (
+            f"[0:v]split=2[bg][fg];"
+            f"[bg]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},boxblur=20:1,setsar=1[bg2];"
+            f"[fg]scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"setsar=1[fg2];"
+            f"[bg2][fg2]overlay=(W-w)/2:(H-h)/2,fps={fps}"
+        )
+    else:
+        # Canonical FFmpeg idiom for "fit-and-letterbox to W x H":
+        #   1. scale preserves source aspect ratio (decrease = fit inside the box)
+        #   2. pad fills remaining area with black
+        #   3. fps locks frame rate
+        # Avoids expression strings with single-quote escaping that subprocess + Windows
+        # don't pass through cleanly.
+        vf = (
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"fps={fps}"
+        )
+    if pad_mode == "blur":
+        # filter_complex needs -filter_complex (not -vf) when using split.
+        cmd = [
+            ffmpeg_bin(),
+            "-y",
+            "-i",
+            str(src_path),
+            "-filter_complex",
+            vf,
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ar",
+            "44100",
+            "-movflags",
+            "+faststart",
+            str(dst),
+        ]
+    else:
+        cmd = [
+            ffmpeg_bin(),
+            "-y",
+            "-i",
+            str(src_path),
+            "-vf",
+            vf,
+            "-c:v",
+            "libx264",
+            "-profile:v",
+            "baseline",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ar",
+            "44100",
+            "-movflags",
+            "+faststart",
+            str(dst),
+        ]
+    log.info("ffmpeg_normalize", src=str(src_path), dst=str(dst), pad_mode=pad_mode)
     subprocess.run(cmd, capture_output=True, text=True, check=True)
     return get_media_info(dst)
 

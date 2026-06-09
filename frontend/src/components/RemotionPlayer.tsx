@@ -167,11 +167,16 @@ export const RemotionPlayer: React.FC<RemotionPlayerProps> = ({
   const seg = activeSegment(segments, timelineSec);
   const scale = seg ? activeZoomScale(seg, timelineSec) : 1;
   const activeCaptions = captions.filter((c) => timelineSec >= c.start && timelineSec <= c.end);
-  const activeStickers =
-    seg?.applied_style?.stickers?.filter((stk: any) => {
-      const segStart = seg.timeline_start;
-      return timelineSec >= (stk.start ?? segStart) && timelineSec <= (stk.end ?? segStart + 99);
-    }) ?? [];
+  // applied_style.stickers carry segment-local seconds (apply/style.py
+  // remapped from slot-local [0,1]). Lift them onto the global timeline
+  // before comparing with timelineSec.
+  const activeStickers = seg
+    ? (seg.applied_style?.stickers ?? []).filter((stk: any) => {
+        const start = seg.timeline_start + (stk.start ?? 0);
+        const end = seg.timeline_start + (stk.end ?? 99);
+        return timelineSec >= start && timelineSec <= end;
+      })
+    : [];
 
   return (
     <div className="flex flex-col gap-2">

@@ -13,16 +13,26 @@ Strategy for 10-20s 一镜到底 口播:
   - Trailing slots without any unit coverage are flagged as Gaps
     (gaps.py handles those).
 - If the user material is longer than the template skeleton:
-  - Trailing units are either dropped (when fully past the last slot) or
-    scaled down to ≥0.8× speed to fit. PLAN 1599: "时长超出时裁切尾部
-    或顺延到下一槽".
-  - A single warning event flags the user (no Gap because every slot
-    DID get user content, just maybe overflowing).
+  - speed clamps at 1.2×; if even at 1.2× the slot's bound src range
+    would render past ``slot.duration.max``, we **truncate** ``src_end``
+    so ``output_span = slot.max`` exactly (PLAN 1599: "裁切尾部").
+  - One warning event flags the user (no Gap; every slot still got
+    content, just possibly truncated).
 
 Material-req matching is loose for MVP: if a slot's material_req is
 "人物口播" we bind ASR units; otherwise (B-roll/包装) we leave it as a
 Gap so fill.py can decide. PLAN 1600: "MVP 通常 Gap 数 ≤ 1（用户口播
 覆盖人物口播槽，B-roll/包装槽可能 Gap）".
+
+Timeline contract (the load-bearing one):
+- A PlacedSegment's renderable output span is **derived** as
+  ``(src_end - src_start) / speed``. mapping advances ``timeline_cursor``
+  by that exact same expression — never a min/max banded value.
+  Renderers (``projectMeta.ts`` / ``Project.tsx`` / ``RemotionPlayer.tsx``)
+  read ``src_timerange`` + ``speed`` only; they do not have access to a
+  banded output span. Banding the cursor without storing it on the
+  segment used to leave gaps / overlaps between segments — the fix is
+  to make the cursor computation match what readers can see.
 """
 
 from __future__ import annotations
@@ -63,10 +73,6 @@ def _is_voice_slot(slot: Slot) -> bool:
 
 def _slot_nominal(slot: Slot) -> float:
     return float(slot.duration.get("nominal", 1.0))
-
-
-def _slot_min(slot: Slot) -> float:
-    return float(slot.duration.get("min", _slot_nominal(slot) * 0.7))
 
 
 def _slot_max(slot: Slot) -> float:
@@ -191,22 +197,31 @@ async def map_short_to_template(
     for binding in bindings:
         slot = binding.slot
         if binding.unit_ids and binding.src_start is not None and binding.src_end is not None:
-            src_range = (binding.src_start, binding.src_end)
-            src_span = max(0.04, binding.src_end - binding.src_start)
+            src_start = binding.src_start
+            src_end = binding.src_end
+            src_span = max(0.04, src_end - src_start)
             target_nominal = _slot_nominal(slot)
+            slot_max = _slot_max(slot)
             # speed = src duration / output duration; >1 = fast, <1 = slow
             raw_speed = src_span / max(0.04, target_nominal)
             speed = _clamp_speed(raw_speed)
-            # Output span after speed clamp; this is what actually lands on
-            # the timeline (may differ from slot.nominal if the raw speed
-            # was clipped).
+            # output_span is what lands on the timeline; renderers compute
+            # exactly this from src_timerange + speed, so we MUST advance
+            # the cursor by the same expression.
             output_span = src_span / speed
-            # Re-band to slot.min/max if the clamped output overshoots.
-            output_span = max(_slot_min(slot), min(_slot_max(slot), output_span))
+            truncated = False
+            if output_span > slot_max:
+                # PLAN 1599 "裁切尾部": speed clamped at +20%, but the bound
+                # range is still longer than slot.max. Truncate src_end so
+                # the output lands on slot.max exactly.
+                src_span = slot_max * speed
+                src_end = src_start + src_span
+                output_span = slot_max
+                truncated = True
             seg = PlacedSegment(
                 slot_role=slot.role,
                 source_unit_ids=binding.unit_ids,
-                src_timerange=(round(src_range[0], 3), round(src_range[1], 3)),
+                src_timerange=(round(src_start, 3), round(src_end, 3)),
                 timeline_start=round(timeline_cursor, 3),
                 speed=round(speed, 3),
                 applied_style=StyleRule(),  # style.py fills this
@@ -220,12 +235,18 @@ async def map_short_to_template(
                 semantic_label=(
                     f"映射 slot#{binding.slot_idx} · {slot.role} · "
                     f"{len(binding.unit_ids)} 个 Unit · speed {speed:.2f}×"
+                    + ("（src 截短）" if truncated else "")
                 ),
                 reasoning=(
                     f"绑定 Unit ids {binding.unit_ids}；"
-                    f"src {src_range[0]:.2f}-{src_range[1]:.2f}s ({src_span:.2f}s) → "
+                    f"src {src_start:.2f}-{src_end:.2f}s ({src_span:.2f}s) → "
                     f"timeline {timeline_cursor:.2f}-{timeline_cursor + output_span:.2f}s。"
                     f"raw_speed={raw_speed:.2f} 钳制到 ±20% 后={speed:.2f}。"
+                    + (
+                        f" 钳制后仍超 slot.max={slot_max:.2f}s，截短 src_end。"
+                        if truncated
+                        else ""
+                    )
                 ),
                 confidence=0.9,
                 ir_target=IRTarget(
@@ -252,10 +273,17 @@ async def map_short_to_template(
                     f"（material_req={slot.material_req}）"
                 ),
                 reasoning=(
-                    "用户素材已铺满或该槽位非 voice 类型；交由 gaps.py 处理。"
+                    "用户素材已铺满或该槽位非 voice 类型；交由 gaps.py / fill.py 处理。"
                 ),
                 confidence=0.3,
-                ir_target=IRTarget(ir_type="ProjectIR", path="sections.0.gaps", op="append"),
+                # gap_candidate is the inverse of a binding event — what
+                # *would* have been a segment isn't one. fill.py later
+                # synthesizes a styling-only segment for this slot, so the
+                # ir_target is segments (where the eventual fill seg lands),
+                # not gaps (which detect_gaps writes).
+                ir_target=IRTarget(
+                    ir_type="ProjectIR", path="sections.0.segments"
+                ),
                 parent_event_id=parent_event_id,
             )
             await bus.publish(task_id, ev)

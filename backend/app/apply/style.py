@@ -34,7 +34,7 @@ from app.config import get_settings
 from app.event_bus import get_event_bus
 from app.ir.ledger import TranscriptLedger, Unit
 from app.ir.project import Caption, PlacedSegment
-from app.ir.template import AudioStyle, CaptionStyle, StyleRule, TemplateIR
+from app.ir.template import AudioStyle, CaptionStyle, Slot, StyleRule, TemplateIR
 from app.ir.vision_event import IRTarget, VisionEvent
 from app.llm.client import get_llm_client
 from app.llm.prompts import load_prompt
@@ -47,6 +47,40 @@ log = get_logger(__name__)
 class _EmphasisResult(BaseModel):
     emphasis_words: list[str] = Field(default_factory=list)
     reasoning: str = ""
+
+
+def _segment_output_span(seg: PlacedSegment) -> float:
+    """Renderable output span: ``(src_end - src_start) / speed``.
+
+    Single source of truth used by mapping (timeline_cursor advance),
+    fill (cursor reconstruction), style (sticker remapping), and the
+    renderers (durationInFrames). The expression must stay identical
+    everywhere — diverging caused the Phase 2 timeline drift bug.
+    """
+    src_start, src_end = seg.src_timerange
+    return max(0.0, src_end - src_start) / max(0.04, seg.speed)
+
+
+def style_for_segment(slot: Slot, output_span: float) -> StyleRule:
+    """Deep-copy ``slot.style`` and remap stickers to segment-local seconds.
+
+    Slot stickers carry slot-local fractional timing in [0,1] (set by
+    ``extract/skeleton.py:_stickers_in``). Phase 2 segments have their
+    own ``output_span`` derived from src_timerange + speed; we project
+    [0,1] onto that span. Result: ``applied_style.stickers[*].start/end``
+    are plain segment-local seconds the renderer can consume.
+    """
+    rule = slot.style.model_copy(deep=True)
+    rule.stickers = [
+        s.model_copy(
+            update={
+                "start": round(max(0.0, min(1.0, s.start)) * output_span, 3),
+                "end": round(max(0.0, min(1.0, s.end)) * output_span, 3),
+            }
+        )
+        for s in rule.stickers
+    ]
+    return rule
 
 
 async def _emphasis_for_unit(
@@ -153,10 +187,13 @@ async def apply_style(
             seg_slot_idx.append(None)
             continue
         slot = template.skeleton[slot_idx]
-        # Skip overwriting if the segment is already an is_fill segment
-        # (fill.py already deep-copied the style onto it).
+        output_span = _segment_output_span(seg)
+        applied = style_for_segment(slot, output_span)
+        # Apply to mapped (non-fill) segments and to fill segments that
+        # somehow still carry default StyleRule (defensive — fill.py
+        # already copies via the same helper).
         if not seg.is_fill or seg.applied_style.model_dump() == StyleRule().model_dump():
-            seg = seg.model_copy(update={"applied_style": slot.style.model_copy(deep=True)})
+            seg = seg.model_copy(update={"applied_style": applied})
         styled.append(seg)
         seg_slot_idx.append(slot_idx)
         ev = VisionEvent(
@@ -168,7 +205,8 @@ async def apply_style(
                 f"slot#{slot_idx} 的 StyleRule (caption / zoom_keyframes "
                 f"{len(slot.style.visual.zoom_keyframes)} / stickers "
                 f"{len(slot.style.stickers)} / mask={slot.style.visual.mask}) "
-                "深拷贝到 PlacedSegment.applied_style。"
+                f"深拷贝到 PlacedSegment.applied_style；stickers 时间 "
+                f"[0,1] → 0–{output_span:.2f}s（segment-local）。"
             ),
             confidence=1.0,
             ir_target=IRTarget(
@@ -423,4 +461,4 @@ async def _bgm_features(
     return path
 
 
-__all__ = ["STAGE", "apply_style"]
+__all__ = ["STAGE", "apply_style", "style_for_segment"]

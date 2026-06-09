@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel
 
+from app.apply.style import _segment_output_span, style_for_segment
 from app.config import get_settings
 from app.event_bus import get_event_bus
 from app.ir.ledger import TranscriptLedger
@@ -79,9 +80,9 @@ def _ctx_units(
 
 
 def _pivot_unit_for(
-    gap_idx: int, segments: list[PlacedSegment], ledger: TranscriptLedger
+    segments: list[PlacedSegment], ledger: TranscriptLedger
 ) -> int | None:
-    """Pick a "pivot" Unit id approximating where the gap sits relative to ASR.
+    """Pick a "pivot" Unit id approximating where a trailing gap sits.
 
     Strategy: find the segment that immediately precedes the gap by
     timeline_start; use its last source_unit_id. None when no segments
@@ -90,7 +91,8 @@ def _pivot_unit_for(
     if not segments or not ledger.units:
         return None
     # Sort segments by timeline_start and take the last one with
-    # source_unit_ids before treating the gap as "trailing".
+    # source_unit_ids — for trailing gaps this is the closest preceding
+    # voice anchor for LLM context.
     sorted_segs = sorted(segments, key=lambda s: s.timeline_start)
     for seg in reversed(sorted_segs):
         if seg.source_unit_ids:
@@ -117,7 +119,7 @@ async def _fill_text(
     length_constraint = dict(cap_style.length_constraint) if cap_style else {}
     semantic_purpose = cap_style.semantic_purpose if cap_style else "regular"
 
-    pivot = _pivot_unit_for(0, segments, ledger)
+    pivot = _pivot_unit_for(segments, ledger)
     before_txt, after_txt = _ctx_units(ledger, pivot_unit_id=pivot)
 
     system = load_prompt("2_fill_gap")
@@ -178,6 +180,10 @@ def _wrap_segment_for(
     that by picking a source slice and computing the speed so that
     ``src_span / speed = nominal``. Fill segments don't need to obey the
     ±20% speech-speed clamp because no spoken voice plays in them.
+
+    ``applied_style`` is built via :func:`style_for_segment` so the slot's
+    [0,1]-keyed stickers get remapped to segment-local seconds (output_span
+    = nominal).
     """
     nominal = float(slot.duration.get("nominal", 1.5))
     if nearest_src_range is None:
@@ -201,7 +207,7 @@ def _wrap_segment_for(
         src_timerange=(round(src[0], 3), round(src[1], 3)),
         timeline_start=round(timeline_start, 3),
         speed=round(max(0.1, speed), 3),
-        applied_style=slot.style.model_copy(deep=True),
+        applied_style=style_for_segment(slot, nominal),
         is_fill=True,
     )
 
@@ -229,7 +235,7 @@ def _reuse_segment_for(
         src_timerange=(round(src[0], 3), round(src[1], 3)),
         timeline_start=round(timeline_start, 3),
         speed=round(max(0.1, speed), 3),
-        applied_style=slot.style.model_copy(deep=True),
+        applied_style=style_for_segment(slot, nominal),
         is_fill=True,
     )
 
@@ -283,12 +289,13 @@ async def fill_gaps(
         role_walk[slot.role] = pos + 1
         existing = seg_by_role_pos.get((slot.role, pos))
         if existing and not existing.is_fill:
-            # Real binding from mapping — advance the cursor and remember
-            # its src range as the "nearest" for reuse.
-            seg_span = (existing.src_timerange[1] - existing.src_timerange[0]) / max(
-                0.04, existing.speed
+            # Real binding from mapping — advance the cursor (using the
+            # *same* output_span expression as mapping / renderer) and
+            # remember its src range as the "nearest" for reuse.
+            timeline_cursor = max(
+                timeline_cursor,
+                existing.timeline_start + _segment_output_span(existing),
             )
-            timeline_cursor = max(timeline_cursor, existing.timeline_start + seg_span)
             last_real_src = existing.src_timerange
             continue
         if cur_gap is None:
@@ -347,15 +354,16 @@ async def fill_gaps(
             )
         outcomes.append(outcome)
 
-        # Persist the gap.fill_result for ProjectIR readers (the pipeline
-        # writes outcome.text / outcome.reasoning back onto Gap).
-        cur_gap.fill_result = outcome.text or outcome.reasoning
+        # Note: ``Gap.fill_result`` is written by the pipeline layer using
+        # ``outcome.text`` / ``outcome.reasoning``. Keeping fill.py
+        # side-effect-free on the gaps list makes it easier to test in
+        # isolation and matches the rest of apply/'s "return values, don't
+        # mutate inputs" discipline.
 
         # Advance timeline by the produced segment's *output* span.
         seg = outcome.segment
         if seg is not None:
-            output_span = (seg.src_timerange[1] - seg.src_timerange[0]) / max(0.04, seg.speed)
-            timeline_cursor += output_span
+            timeline_cursor += _segment_output_span(seg)
 
         ev = VisionEvent(
             task_id=task_id,

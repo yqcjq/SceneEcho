@@ -454,3 +454,90 @@ PLAN.md 1570-1666 行声明阶段 2 ★MVP 闭环：用户传 10–20s 一镜到
 **解决方案**：
 按 PLAN 完整落地阶段 2：新增 `apply/` 包 6 文件（mapping / gaps / fill / style / pipeline + __init__）；新增 `understand/asr.py`、`kb/recommend.py` 各 1 文件；扩 `render/ffmpeg.py`（mix_bgm + extract_audio + compose_segments 三函数）；扩 `api/projects.py` 五端点（recommend / apply / get / preview-props / render / mix-bgm）；renderer Project.tsx 重写为多 Sequence 多 ZoomLayer 多 Sticker per-segment；新增 ZoomLayer.tsx / Sticker.tsx / preflight.ts；renderer Caption.tsx 加 emphasis_words 子串高亮；新增 prompts 三份（2_recommend / 2_caption_emphasis / 2_fill_gap）；前端新增 `/editor` 页 + `RemotionPlayer` CSS-based 预览组件 + `/api` 客户端方法；ProjectIR 加 `degraded` 字段与 TemplateIR 对称；新增集成 + 单元测试覆盖 PLAN 验证 2 / 3 / 4 / 5 / 11。Caption.text === Unit.text 严守 D11；fill 段速度让 output_span = slot.nominal 保持 timeline 连续；ASR 缺包走 fallback 不阻塞 pipeline；BGM 走 BGM_STRATEGY 双策略；RemotionPlayer 选 CSS-based 而非打包 Remotion bundle 进 frontend——避免组件源双份维护（PLAN 1644-1649 设计意图同样可达）。
 
+---
+
+## [ISS-013] Phase 2 二核：timeline 漂移 / Sticker 坐标系混淆 / BGM ducking 未接入 + 多处冗余
+
+**状态**：[已解决]
+**优先级**：[P1 严重]
+**类型**：[功能异常]
+**发现日期**：2026-06-09
+**解决日期**：2026-06-09
+
+**现象**：
+对 ISS-012 落地的阶段 2 ★MVP 闭环做二核，发现三个第一性原理层面的不一致 + 一组 P2 冗余/打补丁：
+
+1. **Timeline 漂移**：`apply/mapping.py` 累积 `timeline_cursor` 时用了 `output_span = max(slot.min, min(slot.max, src_span/speed))` 的 banding 值；`PlacedSegment` 仅持久化 `src_timerange + speed`，渲染端 (`projectMeta.ts` / `Project.tsx` / `RemotionPlayer.tsx`) 一律用 `(end-start)/speed` 推算 output_span，**不感知 banding**。复现：用户素材 15s + 模板 voice nominal 10s（1.5×长）→ Slot 0 mapping cursor 前进 banded 3.0s 但渲染端实际播 5/1.2 ≈ 4.17s，第二段在 [3.0, 4.17] 与第一段重叠。
+2. **Sticker 坐标系混淆**：`extract/skeleton.py:_stickers_in` 把 `Phase1AStickerDetection.sticker.start/end`（**样例视频绝对秒**）原样拷贝到 `Slot.style.stickers`；renderer `Project.tsx:122` 写 `stk.start - seg.timeline_start`，前者是模板坐标系、后者是 ProjectIR 坐标系，两个坐标系直接相减结果无意义，贴纸在最终 MP4 上出现的时刻是错的。
+3. **BGM ducking 未接入主流程**：`render/ffmpeg.py:mix_bgm` 实现完整、`/projects/{id}/mix-bgm` 是 dev hook，但 `apply/pipeline.py` 选完 `bgm_track` 后**从不主动跑 mix_bgm**，renderer 端 `<Audio src={bgmUrl}/>` 直接播原始 BGM，违反 PLAN 1611 + ARCHITECTURE 链路 F「BGM 已在后端预混 ducking，直接播放」。
+4. **P2 冗余**：`api/projects.py:recommend_templates_endpoint` 把 `transcribe()` 包在 try/except 中（`transcribe` 设计为永不抛），fallback 还把 `media_path` 写绝对路径违反 D2；`fill.py:_pivot_unit_for(0, ...)` 第一参数 `gap_idx` 函数体内未使用；`fill.py` 通过修改原 gaps 列表的 `cur_gap.fill_result` 实现 side-effect 数据流；`mapping.py:gap_candidate` 事件 `ir_target.path="sections.0.gaps"` 但 mapping 不写 gaps（detect_gaps 才写）；`test_canvas_mismatch_produces_letterbox` 只测 vf 字符串、PLAN 1657 要求"模糊背景"未实现（当前只 black pad）。
+
+**后果**：
+不修 P1：渲染产物 MP4 段间黑屏 / 重叠、贴纸时机错位、BGM 盖过人声——三个加起来是「Phase 2 跑通了但产物不能用」。不修 P2：技术债累计、CI 假阳性、apply 流水线难重构。
+
+**初步判断**：
+已确认。Timeline 漂移用 fixture 数推过：用户 15s × 模板 voice 10s 的简单案例下渲染端必出黑屏/重叠。Sticker 坐标系问题用 grep 跨文件读出：skeleton.py 写绝对秒、renderer 减 ProjectIR 时间。BGM 缺失通过 grep `mix_bgm` 在仓库内只在 ffmpeg.py 定义 + lab dev 端点 + 0 处生产路径调用直接确认。
+
+**关联**：
+-> backend/app/apply/mapping.py（取消 banding；超 max 时截短 src_timerange）
+-> backend/app/apply/style.py（新增 `_segment_output_span` + `style_for_segment` helper）
+-> backend/app/apply/fill.py（接入同一 helper；删除死参；移除 in-place mutation）
+-> backend/app/apply/pipeline.py（新 stage `bgm_mix`；outcomes → gaps.fill_result 显式写回；STAGE_TO_IR_PATH 增 bgm_mix 键）
+-> backend/app/extract/skeleton.py（sticker 时间转 slot-local [0,1]）
+-> backend/app/render/ffmpeg.py（normalize 增 `pad_mode="blur"` 模糊背景路径）
+-> backend/app/api/projects.py（upload 用 blur；recommend 删死代码）
+-> renderer/src/compositions/Project.tsx（sticker 直接用 segment-local 秒）
+-> frontend/src/components/RemotionPlayer.tsx（sticker timeline 投影同步修正）
+-> backend/tests/integration/test_apply_phase2.py（新增 timeline 连续性 / 截短 src / sticker remap / BGM mix / blur 五项测试）
+-> backend/tests/unit/test_skeleton.py（新增 sticker [0,1] 归一化测试）
+-> 004CHANGELOG.md [2026-06-09-6]
+
+**解决方案**：
+- **Timeline**：`mapping.py` 的 `timeline_cursor += output_span` 表达式必须与渲染端推算口径一致；取消 `min/max banding`；speed 钳到 1.2 后若 output 仍 > slot.max，截短 `src_end = src_start + slot.max × speed` 让 output 严格落在 max。新建 `style._segment_output_span(seg)` 作为单一真理源，mapping / fill / style / 渲染端全部经它读 output_span。
+- **Sticker**：`extract/skeleton.py:_stickers_in` 把每枚 sticker 转换为 slot-local 归一化 `[0,1]` 时间；`apply/style.style_for_segment(slot, output_span)` 复制 StyleRule 时把 `[0,1]` 映射回 segment-local 秒；`fill.py` 的 `_wrap_segment_for` / `_reuse_segment_for` 同样走该 helper 而非裸 `slot.style.model_copy(deep=True)`。renderer `Project.tsx` 改为 `startSec={stk.start ?? 0}` 直接读，不再做坐标系减法；前端 `RemotionPlayer.tsx` 把 segment-local 秒投影回 timeline-global 秒后比较。
+- **BGM ducking**：`apply/pipeline.py` 在 style 之后新增 stage `bgm_mix`，包在 `_safe` 中：`extract_audio(normalized, voice.wav)` → `mix_bgm(voice.wav, bgm_abs, bgm_ducked.aac, is_instrumental=template.audio.is_instrumental)`，写入 `ProjectIR.bgm_track = projects/{id}/bgm_ducked.aac`；失败降级为保留原 bgm_track（renderer 仍能播 un-ducked BGM）+ warning 事件。
+- **P2 一并清理**：删 `api/projects.py:recommend_templates_endpoint` 内 `transcribe` 外层冗余 try/except + 绝对路径 fallback；`fill._pivot_unit_for` 删 `gap_idx` 死参；`fill_gaps` 不再 in-place mutate gaps（pipeline 用 `outcome.gap_idx → gaps[i].fill_result` 显式写回）；`mapping` 的 `gap_candidate` 事件 `ir_target.path` 改 `sections.0.segments`（与 fill 后落点一致）；`render/ffmpeg.normalize` 增 `pad_mode: "black" | "blur"` 二选一参数，`api/projects.py:upload_project` 走 `blur` 满足 PLAN 1657。
+- **测试**：5 项新集成测试覆盖 timeline 连续性 / 截短 src / sticker [0,1] → segment-local 秒 / BGM mix 自动调用 / blur 滤波图，1 项 skeleton 单测覆盖 sticker 归一化。
+
+
+---
+
+## [ISS-014] Phase 2 端到端验证阻塞 — ASR 模型大小硬编码 + HF 缓存违背存储分类
+
+**状态**：[已解决]
+**优先级**：[P1 严重]
+**类型**：[功能异常]
+**发现日期**：2026-06-09
+**解决日期**：2026-06-09
+
+**现象**：
+对 ISS-012 落地的阶段 2 ★MVP 闭环走端到端验证（PLAN 1652 验证 9/10）：上传 15s 口播 → 点「推荐模板」→ 浏览器请求挂死，不返回任何推荐。后端日志见 `huggingface_hub` UserWarning：`The expected file size is: 3087.28 MB. The target location only has 1885.71 MB free disk space`，但 HF 没有 raise，继续下载。`backend/app/understand/asr.py:160` 写死 `whisperx.load_model("large-v3", ...)`；HF 默认缓存路径 `C:\Users\19123\.cache\huggingface\` 落在 C: 盘（系统盘 8.37 GB 自由），而 `DATA_ROOT=backend/data` 在 D: 盘（89 GB 自由）。recommend 端点同步 `await transcribe(...)` 卡在模型下载上。
+
+**后果**：
+不修：低磁盘机器无法跑通端到端（PLAN 验证 7/9/10 全部阻塞），开发者首次 onboarding 直接撞墙；即使磁盘够，模型下载也吃 C: 盘——违反 `001ARCHITECTURE §4 状态持久化分类`「重资产入 DATA_ROOT」的约定。架构上更深的问题：`Settings` 已经是项目「single source of truth」（`model_vlm` / `model_text` / `bgm_strategy` 全在内），唯独 ASR 模型选择例外，是范式断裂；HF cache 完全脱离 DATA_ROOT，是存储分类断裂。
+
+**初步判断**：
+已确认。`whisperx.load_model` 字面量 `"large-v3"` 在 `understand/asr.py:160`；`huggingface_hub` 的 HF_HOME 环境变量未被项目代码设置（grep `HF_HOME|HUGGINGFACE_HUB_CACHE|TRANSFORMERS_CACHE` 整个 backend 0 命中）；recommend 端点 `projects.py:122` 同步 `await transcribe()` 在 VLM 调用之前——ASR 失败时 VLM prompt 拼成 "(无)" 已经优雅降级，但 endpoint 仍强制等 ASR 完成。
+
+**关联**：
+-> backend/app/config.py（Settings 加 `asr_model` / `asr_device` / `asr_compute_type` / `hf_cache_dir` 四字段；`_apply_hf_env` 在 `get_settings()` 内统一注入 `HF_HOME` / `HUGGINGFACE_HUB_CACHE`）
+-> backend/app/understand/asr.py（`_whisperx_run` 读 Settings 三字段而非字面量；fallback 事件 reasoning 写明当前 ASR_MODEL / HF_HOME 配置，运维不需读源码就能判断）
+-> .env（新增 `ASR_MODEL=large-v3` / `ASR_DEVICE=cpu` / `ASR_COMPUTE_TYPE=int8` / `HF_CACHE_DIR=.cache/huggingface` 四行模板 + 注释）
+-> .env.local（dev override `ASR_MODEL=small`，gitignored）
+-> scripts/check_event_emission.py（顺手修：`EXEMPT_FILES` 从前缀匹配改为子串匹配，monorepo 化的 `backend/tests/` 与 repo-root `tests/` 一视同仁）
+-> backend/tests/unit/test_config.py（新增 6 项单测：Settings ASR 默认 / env 覆盖 / `_apply_hf_env` 注入 / 已存在 env 不覆盖 / 空字符串 opt-out / `get_settings()` 端到端 wiring）
+-> backend/tests/integration/test_apply_phase2.py（顺手修：补 `from pathlib import Path` 让 `_fake_extract_audio` 不再 NameError）
+-> scripts/build_bgm_index.py（新增 BGM 索引生成脚本：librosa 提 BPM + ffprobe header 读 duration；幂等保留 mood_tag）
+-> backend/data/system/bgm_pool/bgm_index.json（首次入库 3 首曲目索引；PLAN 1578 推荐 ≥ 5 但 nearest-neighbour 在 1 首以上即可工作，作为最小可用形态）
+-> package.json（`dev:backend` 加 `--reload-dir app`：把 `--reload` 监听范围限制到源码目录，避免 HF 模型下载写入 `data/.cache/huggingface/` 时反复触发 uvicorn 重启 → ASR 永远跑不完）
+-> 004CHANGELOG.md [2026-06-09-7]
+
+**解决方案**：
+- **Settings 加四字段**：`asr_model` 默认 `"large-v3"`（PLAN 1593 生产承诺不变），`asr_device` `"cpu"`，`asr_compute_type` `"int8"`，`hf_cache_dir` `".cache/huggingface"`（DATA_ROOT-relative，与 `system/bgm_pool` / `system/models` 同级，符合 §4 存储分类）。dev 通过 `.env.local` 覆盖 `ASR_MODEL=small` 即可绕开 3GB 下载。
+- **HF env 注入点选 `get_settings()`**：项目所有路径都过 `get_settings()`（lru_cache 保证只执行一次），不引入新的初始化序点。`_apply_hf_env(settings)` 用 `os.environ.setdefault(...)` 写 `HF_HOME` + `HUGGINGFACE_HUB_CACHE`：保留运维显式 export 的优先级，`hf_cache_dir=""` 时整段跳过（HF 回到自己默认）。
+- **asr.py 去字面量**：`_whisperx_run` 内 `from app.config import get_settings` lazy 读，传给 `whisperx.load_model`；fallback 事件 reasoning 写明当前配置 + HF_HOME 实际值，磁盘紧张时引导操作员去 `.env.local` 改 `ASR_MODEL=small`。
+- **CI 守卫一并修**：`scripts/check_event_emission.py` 的 `EXEMPT_FILES` 模式从 `rel.startswith("tests/")` 改为 `"tests/" in rel`，monorepo 子目录下的 fixtures 现在能被正确豁免；同时 `test_apply_phase2.py` 补 `from pathlib import Path`（之前漏写，被 pipeline `_safe` 静默吞掉，伪装成 bgm_mix stage 失败）。
+- **测试**：6 项 `test_config.py` 单测固化 Settings + `_apply_hf_env` 的所有语义路径（默认 / env 覆盖 / 注入 / setdefault 不覆盖 / 空串 opt-out / `get_settings()` 端到端）；全套 102 测试绿。
+
+
+

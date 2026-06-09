@@ -86,6 +86,9 @@ async def transcribe(
     duration_ms = int((time.perf_counter() - started) * 1000)
 
     if degraded_reason:
+        from app.config import get_settings
+
+        s = get_settings()
         ev = VisionEvent(
             task_id=task_id,
             source="asr",
@@ -93,8 +96,10 @@ async def transcribe(
             semantic_label=f"[fallback] ASR 退化 · {len(units)} 个等距 Unit",
             reasoning=(
                 f"WhisperX 不可用或返回空，已 fallback 到等距 ~{_FALLBACK_CHUNK_SEC}s 分段。"
-                f"原因：{degraded_reason}。所有 Unit.text 为占位 '[语音 N]'，"
-                "字幕同步精度无法保证，建议安装 [extract] extras + 准备真实模型。"
+                f"原因：{degraded_reason}。当前配置：ASR_MODEL={s.asr_model}, "
+                f"ASR_DEVICE={s.asr_device}, ASR_COMPUTE_TYPE={s.asr_compute_type}, "
+                f"HF_HOME={_hf_home_hint()}。所有 Unit.text 为占位 '[语音 N]'，"
+                "字幕同步精度无法保证；磁盘空间紧张时改 .env.local ASR_MODEL=small。"
             ),
             confidence=0.0,
             severity="warning",
@@ -147,8 +152,20 @@ async def _whisperx_run(
     thread executor so the bus + SSE coroutine isn't blocked. Empty list
     return signals "WhisperX ran but found nothing" — caller treats it
     as a degraded shell.
+
+    Model / device / compute_type come from :class:`Settings` (PLAN 1593
+    defaults to large-v3 + cpu + int8; dev .env.local can override to
+    smaller variants like tiny / base / small / medium to keep the HF
+    cache footprint manageable on disk-constrained machines).
     """
     import asyncio
+
+    from app.config import get_settings
+
+    settings = get_settings()
+    asr_model = settings.asr_model
+    asr_device = settings.asr_device
+    asr_compute_type = settings.asr_compute_type
 
     def _do_sync() -> list[Unit]:
         # Lazy import lives inside the worker — if whisperx is absent the
@@ -156,17 +173,15 @@ async def _whisperx_run(
         # failure path (degrade + warning event).
         import whisperx  # type: ignore  # noqa: PLC0415
 
-        device = "cpu"
-        # WhisperX honours float16 on CUDA / float32 on CPU; let the lib
-        # auto-detect by leaving it default. compute_type="int8" is the
-        # CPU-friendly preset for large-v3.
-        model = whisperx.load_model("large-v3", device=device, compute_type="int8")
+        model = whisperx.load_model(
+            asr_model, device=asr_device, compute_type=asr_compute_type
+        )
         result = model.transcribe(str(normalized_path), language=language)
         align_model, metadata = whisperx.load_align_model(
-            language_code=language, device=device
+            language_code=language, device=asr_device
         )
         aligned = whisperx.align(
-            result["segments"], align_model, metadata, str(normalized_path), device
+            result["segments"], align_model, metadata, str(normalized_path), asr_device
         )
         return _segments_to_units(aligned.get("segments", []))
 
@@ -291,6 +306,18 @@ def _to_rel(path: Path) -> str:
         return str(path.relative_to(s.data_root)).replace("\\", "/")
     except ValueError:
         return str(path).replace("\\", "/")
+
+
+def _hf_home_hint() -> str:
+    """Short HF_HOME hint for the fallback event's reasoning text.
+
+    We resolve via env (not Settings) because by the time this runs the
+    HF env redirect has already been applied — env is the authoritative
+    runtime value (operator could have exported HF_HOME directly).
+    """
+    import os
+
+    return os.environ.get("HF_HOME") or "(default)"
 
 
 __all__ = ["STAGE", "transcribe"]

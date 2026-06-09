@@ -21,7 +21,6 @@ from pydantic import BaseModel
 from app import tasks_store
 from app.config import get_settings
 from app.event_bus import get_event_bus
-from app.ir.ledger import TranscriptLedger
 from app.ir.project import ProjectIR
 from app.logging import get_logger
 from app.render import ffmpeg as ffx
@@ -53,6 +52,17 @@ def _load_project(project_id: str) -> ProjectIR | None:
 
 @router.post("/projects")
 async def upload_project(file: UploadFile) -> dict:
+    """Upload + normalize a user material clip.
+
+    PLAN 1657: when the user uploads e.g. a 16:9 clip into a 9:16 template
+    canvas, the result must be 9:16 with the original centred and a
+    blurred background filling the bars (not solid black). We always pass
+    ``pad_mode="blur"`` here — for matching aspect ratios the blur is a
+    no-op anyway since ``force_original_aspect_ratio=decrease`` already
+    fits the canvas; the boxblur path just costs a few extra filter ops.
+    Sample uploads keep ``pad_mode="black"`` so the recognized stage
+    isn't corrupted by a synthetic background.
+    """
     settings = get_settings()
     project_id = _new_project_id()
     base = settings.data_root / "projects" / project_id
@@ -63,7 +73,7 @@ async def upload_project(file: UploadFile) -> dict:
 
     norm_path = base / "normalized.mp4"
     try:
-        info = ffx.normalize(src_path, norm_path)
+        info = ffx.normalize(src_path, norm_path, pad_mode="blur")
     except Exception as e:  # noqa: BLE001
         log.error("project_normalize_failed", project_id=project_id, error=str(e))
         raise HTTPException(500, f"normalize failed: {e}") from e
@@ -129,11 +139,10 @@ async def recommend_templates_endpoint(
     tasks_store.update_task(task_id, status="running", stage="2.recommend", progress=0.1)
 
     # ASR is the input; the events also surface in the workbench.
-    try:
-        ledger, _ = await transcribe(normalized, task_id=task_id)
-    except Exception as e:  # noqa: BLE001
-        log.error("recommend.asr_failed", project_id=project_id, error=str(e))
-        ledger = TranscriptLedger(units=[], language="zh", media_path=str(normalized))
+    # ``transcribe`` is contractually non-raising — its WhisperX path is
+    # try/except'd internally and degrades to a uniform-chunk fallback +
+    # warning event. So no outer try/except here.
+    ledger, _ = await transcribe(normalized, task_id=task_id)
 
     # Sample a few frames for the VLM — re-use the extract pipeline's
     # frame sampler so we get first / mid / last.
