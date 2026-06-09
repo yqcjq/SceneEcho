@@ -16,10 +16,12 @@ Design (PLAN 1510):
     visual.zoom_keyframes: stitched zoom_curves of scenes in the slot
     visual.mask: first mask kind detected inside the slot
     visual.color_lut: dominant_lut_id from Phase1AReport.color (global)
-    audio: Phase1AReport.audio applied globally (口播 mood usually one BGM)
     stickers: every detection whose time range overlaps the slot
     transition_in / out: classify_transitions assigned to the slot's
         entering / leaving boundary
+- Audio is **template-global**, not per-slot — Phase1AReport.audio is a
+  single AudioStyle object and skeleton.py does not copy it onto every
+  slot. The pipeline writes it to ``TemplateIR.audio`` directly.
 - material_req inference (PLAN 1510):
     has caption                  → 人物口播
     no caption, has zoom/sticker/mask → B-roll/包装
@@ -36,7 +38,6 @@ from dataclasses import dataclass
 from app.event_bus import get_event_bus
 from app.ir.phase1a_report import Phase1AReport
 from app.ir.template import (
-    AudioStyle,
     CaptionStyle,
     Slot,
     StickerEvent,
@@ -61,7 +62,7 @@ class _Segment:
     end: float
 
 
-def _classify_role(start_ratio: float) -> str:
+def _role_for_position(start_ratio: float) -> str:
     """Map a scene's start position (0..1) to one of the three basic roles."""
     if start_ratio < 0.30:
         return "开头"
@@ -81,7 +82,7 @@ def _group_scenes(report: Phase1AReport, total_duration: float) -> list[_Segment
     segs: list[_Segment] = []
     for sc in report.scenes:
         ratio = sc.start_sec / total_duration
-        role = _classify_role(ratio)
+        role = _role_for_position(ratio)
         if segs and segs[-1].role == role:
             segs[-1].scene_indices.append(sc.idx)
             segs[-1].end = sc.end_sec
@@ -222,7 +223,6 @@ def _build_slot(
             mask_params=mask_params,
             color_lut=report.color.dominant_lut_id if report.color else None,
         ),
-        audio=report.audio or AudioStyle(),
         stickers=stickers,
         transition_in=_transition_for_boundary(prev_seg_last_scene, report),
         transition_out=_transition_for_boundary(seg.scene_indices[-1], report)

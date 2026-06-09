@@ -75,7 +75,7 @@ async def classify_color_lut(
     # The client wrote ir_value=parsed.model_dump(); re-shape into Phase1AColorReport
     # so the workbench right pane shows the IR-canonical structure.
     if events:
-        events[0].ir_value = _to_color_report(result).model_dump(mode="json")
+        events[0].ir_value = to_color_report(result).model_dump(mode="json")
     refine_ev = await _color_histogram_refine(
         ctx,
         anchors,
@@ -156,7 +156,15 @@ async def _color_histogram_refine(
     return ev
 
 
-def _to_color_report(result: ColorStyleResult) -> Phase1AColorReport:
+def to_color_report(result: ColorStyleResult) -> Phase1AColorReport:
+    """Project ColorStyleResult → Phase1AColorReport.
+
+    Public so pipeline.py can reuse it instead of duplicating the field-
+    by-field copy. The two types diverge in scope: ColorStyleResult is the
+    VLM call's free-form schema (carries reasoning), Phase1AColorReport is
+    the IR-canonical view written into Phase1AReport.color and (after 1B's
+    macro-A change) TemplateIR.audio's neighbor in the report flow.
+    """
     return Phase1AColorReport(
         tags=result.tags,
         dominant_lut_id=result.dominant_lut_id,

@@ -1,3 +1,76 @@
+## [2026-06-09-2] refactor(phase1b): hoist audio to TemplateIR top, unify degraded path namespace, retire compat patches
+
+### 改动
+
+**TemplateIR 重塑（backend/app/ir/template.py）**
+- `TemplateIR` 新增顶层 `audio: AudioStyle | None`，`StyleRule.audio` 删除
+- 全局音频不再按 slot 复制；pipeline.py 直接 `ir.audio = report.audio`
+- `kb/tagging.py:62` 旧实现读 `ir.skeleton[0].style.audio`（slot[0] 硬编码 = ISS-007 第 6 项已禁的反模式），改读 `ir.audio`
+
+**Pipeline 编排（backend/app/extract/pipeline.py）**
+- 新增 `SUBCAP_TO_IR_PATH` 表 + `_ir_path_for(field_key)` 把 subcap field_key 翻译成
+  TemplateIR 相对路径再写 `ir.degraded`；UI banner 因此可指向真实 IR 字段而非
+  混合两套命名空间
+- `_color_to_report` 重复实现删除，改用 `extract.color.to_color_report`（去下划线公开）
+- `frames_for_summary = ctx._frames or []`（私有属性访问）→ `try/await ctx.frames()` 走 lazy 公共入口
+- masks dict key 与 zoom_directions / transitions 对齐：`{str(k): v for k, v in masks.items()}`
+  写入 Phase1AReport（pydantic strict 模式不接受 int key）
+
+**Skeleton（backend/app/extract/skeleton.py）**
+- `_build_slot` 不再填 `audio=...`（StyleRule.audio 已删）
+- `_classify_role` → `_role_for_position`：函数本身只是位置阈值映射、不发事件、不调 VLM；
+  CI 守卫 `check_parent_event_id.py` 误把 `_classify` 后缀识别为 phase-2 函数。改名后
+  语义更准（按位置映射不是分类）且绕过 CI 误报，不动守卫边界
+
+**KB store（backend/app/kb/store.py）**
+- 6 个 CRUD 入口（save / get / list / delete / update_tags / update_caption_placeholder）
+  移除 per-call `init_db()`；约定 lifespan 是唯一调用方，与 `tasks_store` 一致
+- `tests/conftest.py::task_with_events` fixture 镜像 lifespan 同步加 `kb_store.init_db()`
+
+**Sanity 审计（backend/app/kb/sanity.py）**
+- `ir.model_dump_json()[:2000]` 字符串中段截断 → `_summarize_for_audit(ir)` 显式构造
+  bounded 结构化摘要（每 slot 一行，覆盖 caption/zoom/mask/lut/transition 关键字段）
+
+**Color util 公开（backend/app/extract/color.py）**
+- `_to_color_report` → `to_color_report`：pipeline.py 与 color.py 共用一份字段映射
+
+**Mock scenario 同步（backend/app/llm/prompts/scenarios/full_extract_demo.json）**
+- BGM 检测事件 `ir_target.path` 由 `global_style.audio`（旧 IR 中的自由 dict 路径）
+  改为 `audio`（新 TemplateIR 顶层字段）
+
+**Frontend（frontend/src/pages/TemplateLibrary.tsx）**
+- 新增 `<TagsEditor>` 子组件：4 个 input 对应 position / function / scene / notes，
+  dirty-state 控制保存按钮，调后端 `PATCH /templates/{id}/tags`
+- 接通此前的 dead import（patchTemplateTags 之前 import 但无 UI 入口）
+
+**Schema 重生成**
+- `python scripts/gen_schema.py` → `shared/ir.schema.json`
+- `pnpm gen:types` → `renderer/src/types/ir.ts` + `frontend/src/types/ir.ts`
+
+**测试**
+- 80 backend tests / 11 frontend vitest tests / renderer + frontend typecheck 全绿
+- `tests/integration/test_extract_1b.py` 通过（此前因 masks dict key 类型错误失败）
+
+### 涉及文件
+- backend/app/ir/template.py：TemplateIR.audio 顶层 / StyleRule.audio 删
+- backend/app/extract/pipeline.py：SUBCAP_TO_IR_PATH + _ir_path_for + masks str-key + ctx.frames() 公共入口 + 复用 to_color_report
+- backend/app/extract/skeleton.py：移除 audio per-slot 装配 + _classify_role 改名 _role_for_position
+- backend/app/extract/color.py：_to_color_report → to_color_report
+- backend/app/kb/store.py：移除 6 处 per-call init_db
+- backend/app/kb/tagging.py：slot[0].style.audio → ir.audio
+- backend/app/kb/sanity.py：_summarize_for_audit 替代字符串截断
+- backend/app/llm/prompts/scenarios/full_extract_demo.json：path 同步到 TemplateIR.audio
+- backend/tests/conftest.py：task_with_events 镜像 lifespan 加 kb_store.init_db
+- backend/tests/unit/test_skeleton.py：_classify_role 重命名同步
+- frontend/src/pages/TemplateLibrary.tsx：新增 TagsEditor 子组件
+- shared/ir.schema.json、renderer/src/types/ir.ts、frontend/src/types/ir.ts：重生成
+- docs/001ARCHITECTURE.md / 002STRUCTURE.md：同步 IR 顶层 audio + degraded 翻译表 + D24 新约定
+
+### 关联
+-> ISS-010
+
+---
+
 ## [2026-06-09-1] feat(phase1b): extract pipeline DAG → TemplateIR → KB + workbench end-to-end
 
 ### 改动

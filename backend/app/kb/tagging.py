@@ -59,9 +59,8 @@ def _summarize_ir(ir: TemplateIR) -> str:
             f"zoom 关键帧 {zoom_n} · 贴纸 {stickers_n}"
         )
     audio_brief = "无 BGM"
-    if ir.skeleton and ir.skeleton[0].style.audio.has_bgm:
-        a = ir.skeleton[0].style.audio
-        audio_brief = f"BGM {a.mood_tag or '?'} · BPM {a.bpm or 0:.0f}"
+    if ir.audio and ir.audio.has_bgm:
+        audio_brief = f"BGM {ir.audio.mood_tag or '?'} · BPM {ir.audio.bpm or 0:.0f}"
     return (
         f"模板「{ir.name}」骨架：{len(ir.skeleton)} 段\n"
         + "\n".join(slots_brief)

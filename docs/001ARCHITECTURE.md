@@ -194,7 +194,7 @@ python -m app.cli ingest-sample /local/path.mp4
         → ffprobe duration → 发 1B.pipeline start event
         → _run_phase1a (asyncio.gather 七路并发):
              captions / stickers / zoom_direction / transitions / masks / color_lut / audio
-             每个子能力包在 _safe(label, field_key, coro): 抛异常→ degraded[field_key]=str(e)
+             每个子能力包在 _safe(label, field_key, coro): 抛异常→ degraded[_ir_path_for(field_key)]=str(e)
              + 发 severity=warning 事件 + 不阻塞其他 branch（D21）
           ↓
         → 依赖层串行 fan-out:
@@ -240,6 +240,9 @@ python -m app.cli ingest-sample /local/path.mp4
 - **D18 Phase 1A 共享上下文**：`backend/app/extract/context.py` 暴露 `Phase1AContext(sample_id, normalized_path, task_id)`，`await ctx.scenes()` / `await ctx.frames()` / `ctx.client(stage)` 三个 lazy 入口在首次调用时计算并缓存。lab runner、1B pipeline、集成测试都以 `ctx` 为入参；多子能力同 fixture 时 `detect_scenes` / `sample_frames` 只执行一次。
 - **D19 Phase 1A 实体事件可视化字段**：每个子能力的实体级 VisionEvent（每条字幕、每枚贴纸、每个 mask 检出）必须填 `frame_url`（指向 entity 首次出现的采样帧 `/data/<rel>`）+ `bbox_norm`（0-999 → 0-1 归一化），工作台左栏 `WorkbenchVisionPane` + `BboxOverlay` 在两个字段同时存在时才渲染帧底图 + 框。`Phase1ACaptionEvent` / `Phase1AStickerDetection` 同时携带 `reasoning` 与 raw VLM 字段（color_hex_raw / anim_in_type_raw / layout_raw 等），右栏 IR 展开可见 VLM 中文解释 + 原始判定。
 - **D20 几何 mask CV 主路径**：`extract/masks.py::detect_masks` 在每个 scene 首/中/末三帧分别跑 `HoughCircles` / Canny 矩形 / `HoughLinesP` 三类几何检测器，多数决（同 kind 至少 ceil(n_frames/2) 票）确认 `has_mask`；CV 全 false 时调一次 VLM 看三帧网格兜底。CV 候选与最终判定事件都带 frame_url + bbox。
-- **D21 1B pipeline 单点降级**：`extract/pipeline.py::_safe(label, field_key, coro)` 包裹每个子能力调用；任一抛异常 → `TemplateIR.degraded[field_key] = str(e)` + 发 `severity="warning"` 事件 + 不阻塞下游。pipeline 自身永不 raise（顶层 `try/except` 仅防御非 `_safe` 路径的 programmer error）；最坏情况是一个 degraded 字段全标的 TemplateIR 仍可入 KB。
+- **D21 1B pipeline 单点降级**：`extract/pipeline.py::_safe(label, field_key, coro)` 包裹每个子能力调用；任一抛异常 → `TemplateIR.degraded[_ir_path_for(field_key)] = str(e)` + 发 `severity="warning"` 事件 + 不阻塞下游。pipeline 自身永不 raise（顶层 `try/except` 仅防御非 `_safe` 路径的 programmer error）；最坏情况是一个 degraded 字段全标的 TemplateIR 仍可入 KB。`_ir_path_for` 翻译规则见 D25。
 - **D22 模板 = KB 主键 + events 路径回链**：`kb.sqlite` 的 `templates` 表只存 `ir_json + tags + thumbnail + last_extract_task_id`，**绝不复制 events.jsonl**。事件流通过 `tasks.events_jsonl_path`（按 `last_extract_task_id` 反查）就地读取，工作台「回放」一键打开 `/workbench/{last_extract_task_id}`。
 - **D23 Renderer Caption 双模式**：`compositions/Caption.tsx` 由调用方传 `renderMode: "template_preview" | "project_output"` props 区分；前者渲染 `placeholder_text[0]` 作为示例字幕（TemplateLibrary 详情 / 0.5 dev_workbench 预览），后者渲染 ProjectIR 的 `Caption.text`（Phase 2+ 用户素材产物）。组件内**绝不**根据 `text` 是否为空自动切换模式——隐式 fallback 在用户合法传空字符串时会无声跑错。
+- **D24 全局信号挂 TemplateIR 顶层，per-slot 信号挂 StyleRule**：`audio` / `tags` / `sanity_check` / `degraded` 这类整模板共享的字段直接挂在 TemplateIR；`StyleRule` 只放真正按 slot 变化的事物（caption / visual.zoom_keyframes / mask / color_lut / stickers / transition_in/out）。由此 1A 的 `extract_bgm` 单全局 `AudioStyle` 直接装配到 `TemplateIR.audio`，不再被 skeleton.py 复制到每个 slot。Phase 2+ 若出现 per-slot BGM 切换需求，再单独引入 `StyleRule.audio_override: AudioStyle | None`，不复用此前的 per-slot 默认字段。
+- **D25 degraded 路径统一翻译**：`TemplateIR.degraded` 的键一律是 TemplateIR 相对路径。`pipeline.py` 顶部的 `SUBCAP_TO_IR_PATH` 表是单一真理源——subcap 自带的 field_key（含 Phase1AReport 路径，如 `zoom_curves.3` / `captions.5.verified_anim_in`）在写入 `ir.degraded` 前由 `_ir_path_for(field_key)` 翻译为 TemplateIR 路径（如 `skeleton.*.style.visual.zoom_keyframes` / `skeleton.*.style.caption`）。`*` 是 slot glob，UI banner 据此展示 + 跳转，不需要再认识 Phase1AReport 字段名。
+- **D26 SQLite 表初始化只在 lifespan**：`tasks_store.init_db` / `kb_store.init_db` 只由 `main.py` 的 lifespan 调用一次，CRUD 入口绝不 per-call init；测试用 `tests/conftest.py::task_with_events` fixture 镜像 lifespan，把两个 init 都跑一遍。两个 store 共用 `data/kb.sqlite` 的 WAL 连接，schema 全 `CREATE IF NOT EXISTS` 幂等，重复 init 不报错也不损失数据但会让单元 CRUD 跑出无谓的 DDL。

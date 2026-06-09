@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.extract.skeleton import _classify_role, build_skeleton
+from app.extract.skeleton import _role_for_position, build_skeleton
 from app.ir.phase1a_report import (
     Phase1ACaptionEvent,
     Phase1AColorReport,
@@ -20,14 +20,14 @@ from app.ir.phase1a_report import (
 from app.ir.template import AudioStyle, CaptionStyle, StickerEvent, ZoomKeyframe
 
 
-def test_classify_role_threshold_boundaries():
+def test_role_for_position_threshold_boundaries():
     # PLAN 1510: start<0.30 → 开头, start>0.70 → 结尾, else 主体.
-    assert _classify_role(0.0) == "开头"
-    assert _classify_role(0.29) == "开头"
-    assert _classify_role(0.30) == "主体"  # boundary inclusive in "else"
-    assert _classify_role(0.50) == "主体"
-    assert _classify_role(0.70) == "主体"
-    assert _classify_role(0.71) == "结尾"
+    assert _role_for_position(0.0) == "开头"
+    assert _role_for_position(0.29) == "开头"
+    assert _role_for_position(0.30) == "主体"  # boundary inclusive in "else"
+    assert _role_for_position(0.50) == "主体"
+    assert _role_for_position(0.70) == "主体"
+    assert _role_for_position(0.71) == "结尾"
 
 
 @pytest.mark.asyncio

@@ -72,7 +72,6 @@ class StickerEvent(BaseModel):
 class StyleRule(BaseModel):
     caption: CaptionStyle | None = None
     visual: VisualStyle = Field(default_factory=VisualStyle)
-    audio: AudioStyle = Field(default_factory=AudioStyle)
     stickers: list[StickerEvent] = Field(default_factory=list)
     rhythm: dict = Field(default_factory=dict)
     transition_in: str | None = None
@@ -99,6 +98,7 @@ class TemplateIR(BaseModel):
     name: str
     source_sample: str
     skeleton: list[Slot] = Field(default_factory=list)
+    audio: AudioStyle | None = None
     global_style: dict = Field(
         default_factory=lambda: {"canvas": {"width": 1080, "height": 1920, "fps": 30}}
     )
@@ -107,6 +107,9 @@ class TemplateIR(BaseModel):
     created_at: str = ""
     # Phase 1B: per-field degradation flags so the UI can flag partial
     # results without losing the rest of the template. Keys are dotted
-    # field names (e.g. "skeleton.0.style.caption" / "tags" / "audio").
-    # Set by ``pipeline.extract_template`` when a subcap raises.
+    # TemplateIR paths (e.g. "skeleton.*.style.caption" / "tags" / "audio").
+    # Set by ``pipeline.extract_template`` when a subcap raises; the
+    # ``SUBCAP_TO_IR_PATH`` table in pipeline.py is the single source of
+    # truth for the mapping from subcap label → TemplateIR path so the UI
+    # banner can navigate to the affected field.
     degraded: dict[str, str] = Field(default_factory=dict)

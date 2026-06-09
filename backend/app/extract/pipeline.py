@@ -63,6 +63,62 @@ log = get_logger(__name__)
 T = TypeVar("T")
 
 
+# Mapping from subcap label → TemplateIR-relative dotted path. The single
+# source of truth for ``TemplateIR.degraded`` keys: ``_safe`` translates
+# every ``field_key`` through this table before writing to ``ir.degraded``,
+# so the UI banner can navigate from a degraded entry to the affected IR
+# field with a single lodash get/set. ``*`` is a glob over slots — the
+# field applies to every Slot in skeleton, not a specific one. Phase 1A
+# field_keys (e.g. ``zoom_curves.0`` / ``captions.3.verified_anim_in``)
+# strip their per-index suffix and resolve to the same skeleton path
+# because the UI cares which IR field is partial, not which scene index.
+SUBCAP_TO_IR_PATH: dict[str, str] = {
+    "scenes": "skeleton",
+    "frames": "skeleton",
+    "captions": "skeleton.*.style.caption",
+    "stickers": "skeleton.*.style.stickers",
+    "zoom_directions": "skeleton.*.style.visual.zoom_keyframes",
+    "zoom_curves": "skeleton.*.style.visual.zoom_keyframes",
+    "transitions": "skeleton.*.style.transition_in",
+    "masks": "skeleton.*.style.visual.mask",
+    "color": "skeleton.*.style.visual.color_lut",
+    "audio": "audio",
+    "skeleton": "skeleton",
+    "tags": "tags",
+    "sanity_check": "sanity_check",
+    "duration": "global_style.duration_sec",
+    # Per-caption sub-fields fold under the same path.
+    "captions.verified_anim_in": "skeleton.*.style.caption",
+    "captions.function": "skeleton.*.style.caption",
+}
+
+
+def _ir_path_for(field_key: str) -> str:
+    """Translate ``_safe``'s field_key to a TemplateIR-relative path.
+
+    Phase 1A subcap keys are typed against Phase1AReport (e.g. ``captions``,
+    ``zoom_curves.3``); we project them through ``SUBCAP_TO_IR_PATH`` so
+    every entry in ``TemplateIR.degraded`` speaks the same dialect. Unknown
+    keys pass through unchanged — better to surface a literal label than
+    swallow it silently.
+    """
+    if field_key in SUBCAP_TO_IR_PATH:
+        return SUBCAP_TO_IR_PATH[field_key]
+    # Strip trailing ``.<index>`` (zoom_curves.0) or ``.<idx>.<sub>``
+    # (captions.3.verified_anim_in) and look up the prefix family.
+    head = field_key.split(".", 1)[0]
+    if head in SUBCAP_TO_IR_PATH:
+        return SUBCAP_TO_IR_PATH[head]
+    if "." in field_key:
+        # captions.3.verified_anim_in → captions.verified_anim_in
+        parts = field_key.split(".")
+        if len(parts) >= 3:
+            collapsed = f"{parts[0]}.{parts[-1]}"
+            if collapsed in SUBCAP_TO_IR_PATH:
+                return SUBCAP_TO_IR_PATH[collapsed]
+    return field_key
+
+
 # ---------------------------------------------------------------------------
 # Degradation wrapper
 # ---------------------------------------------------------------------------
@@ -98,7 +154,10 @@ async def _safe(
         return _SubcapResult(value=value, ok=True)
     except Exception as e:  # noqa: BLE001
         log.warning("1b.subcap_failed", subcap=label, error=str(e))
-        degraded[field_key] = f"{type(e).__name__}: {e}"
+        # Translate the subcap-level field_key to a TemplateIR-relative
+        # path so every entry in ir.degraded speaks one dialect and the
+        # UI banner can navigate to the affected field.
+        degraded[_ir_path_for(field_key)] = f"{type(e).__name__}: {e}"
         await get_event_bus().publish(
             task_id,
             VisionEvent(
@@ -301,6 +360,11 @@ async def _run_phase1a(
                 fn_result, _ = res.value
                 captions[idx].function = fn_result.function
 
+    from app.extract.color import to_color_report
+
+    # Phase1AReport stores all per-scene maps with string keys (JSON-friendly,
+    # matches the lodash path "zoom_curves.0" the workbench uses). Subcaps
+    # produce dict[int, ...] so we coerce here at the seam.
     return Phase1AReport(
         scenes=[s.to_report_entry() for s in scenes],
         captions=captions,
@@ -308,23 +372,9 @@ async def _run_phase1a(
         zoom_directions={str(k): v.direction for k, v in zoom_dirs.items()},
         zoom_curves=zoom_curves,
         transitions={str(k): v.transition for k, v in transitions.items()},
-        masks=masks,
-        color=_color_to_report(color),
+        masks={str(k): v for k, v in masks.items()},
+        color=to_color_report(color) if color is not None else None,
         audio=audio,
-    )
-
-
-def _color_to_report(color_obj: Any) -> Any:
-    """Map color_lut's free-form ColorStyleResult into Phase1AColorReport."""
-    if color_obj is None:
-        return None
-    from app.ir.phase1a_report import Phase1AColorReport
-
-    return Phase1AColorReport(
-        tags=getattr(color_obj, "tags", []),
-        dominant_lut_id=getattr(color_obj, "dominant_lut_id", None),
-        confidence=getattr(color_obj, "confidence", 0.0),
-        histogram=getattr(color_obj, "histogram", None),
     )
 
 
@@ -421,6 +471,7 @@ async def extract_template(
         name=name or f"模板·{sample_id}",
         source_sample=sample_id,
         skeleton=slots,
+        audio=report.audio,
         global_style={
             "canvas": {"width": 1080, "height": 1920, "fps": 30},
             "duration_sec": round(duration, 3),
@@ -432,10 +483,13 @@ async def extract_template(
     tasks_store.update_task(task_id, stage="1B.tagging", progress=0.7)
     from app.kb.tagging import suggest_tags
 
-    # frames may have failed earlier — fall back to [] which suggest_tags
-    # handles gracefully (skips image attachments, still gets a Tags reply
-    # from the text-only path).
-    frames_for_summary = ctx._frames or []
+    # frames may have failed earlier — _safe in _run_phase1a logged the
+    # warning + cached []. Re-await ctx.frames() (cache-hit, no work)
+    # rather than reaching into the private _frames attribute.
+    try:
+        frames_for_summary = await ctx.frames()
+    except Exception:  # noqa: BLE001
+        frames_for_summary = []
     tag_res = await _safe(
         "tagging",
         "tags",

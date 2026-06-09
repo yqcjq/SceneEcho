@@ -293,3 +293,80 @@ ISS-008 修复后实体事件已带 frame_url 与 bbox，但首次进入 `/workb
 - store `appendEvent` 时即调 `new Image(); img.decoding="async"; img.src = event.frame_url`，每条事件一进 store 就在后台拉图入浏览器 HTTP cache；后续 `<img>` 元素的 src 任意切换都从 cache 即时出，不再受 SSE 涌入抖动影响。
 - `<img>` 加 `decoding="async"` + `loading="eager"`，解码不阻塞主线程。
 - `WorkbenchVisionPane` 在 `hasFrame && !frameSize && !frameError` 时显示 "loading frame…" 脉冲占位（事件 frame_ts 同显），加载失败时显示明确错误 + url 便于排查。
+
+---
+
+## [ISS-010] Phase 1B 二核：StyleRule.audio 虚位 + degraded 路径混命名空间 + 多处冗余/打补丁
+
+**状态**：[已解决]
+**优先级**：[P1 严重]
+**类型**：[技术债]
+**发现日期**：2026-06-09
+**解决日期**：2026-06-09
+
+**现象**：
+Phase 1B 第一版交付（[2026-06-09-1]）二次核查发现以下问题，按 IR 设计 / pipeline 编排 / 数据库初始化 / UI 完整性四类聚合：
+
+1. **`StyleRule.audio` 是没有真消费者的 per-slot 虚位**：1A `extract_bgm` 只产出一个全局 `AudioStyle`（口播视频通常一首 BGM），`extract/skeleton.py:225` 把同一对象 `audio=report.audio or AudioStyle()` 复制到每个 slot 的 `StyleRule.audio`，下游 `kb/tagging.py:62` 又只读 `slot[0].style.audio`——per-slot 字段是个没有真消费者的占位，并且 slot[0] 硬编码恰是 [ISS-007] 第 6 项已声明禁止的反模式。
+
+2. **`TemplateIR.degraded` 的键混了两套命名空间**：`extract/pipeline.py::_safe(label, field_key, ...)` 直接把 `field_key` 写入 `ir.degraded`，但调用点喂的 field_key 一半是 TemplateIR 路径（`skeleton` / `tags` / `sanity_check` / `duration`），一半是 Phase1AReport 路径（`captions` / `zoom_curves.0` / `captions.3.verified_anim_in` / `transitions` / `masks`）。`TemplateIR.degraded` 字段挂在 TemplateIR 上，但其内容里有 Phase1AReport 命名的键——UI banner 没法据此跳转到真实 IR 字段。
+
+3. **`pipeline.py` 通过 `ctx._frames` 私有属性回收帧**：`extract_template` stage 3 处 `frames_for_summary = ctx._frames or []` 绕过 `Phase1AContext.frames()` 公共 lazy 入口。私有属性被外部依赖会让未来 ctx 改 cache 实现时静默挂掉。
+
+4. **`pipeline.py::_color_to_report` 与 `extract/color.py::_to_color_report` 完全重复**：两份 8 行代码做完全相同的字段映射（`ColorStyleResult` → `Phase1AColorReport`），违反复用原则。
+
+5. **`kb/store.py` 每个 CRUD 入口都调 `init_db()`**：6 个 CRUD 函数（save/get/list/delete/update_tags/update_caption_placeholder）每次入口都跑 DDL；`main.py` 的 lifespan 已经调过一次，per-call 调用是冗余且与 `tasks_store` 约定不一致。
+
+6. **`kb/sanity.py:66` 的 `ir.model_dump_json()[:2000]` 中段截断**：长模板（多 slot + 多字幕）在 2000 字符处被切断，VLM 收到的是半 JSON 半乱码——审计员把不完整的模板当作完整模板审计。
+
+7. **`extract/pipeline.py` 中 `masks=masks` 直接用 `dict[int, ...]` 写入 `Phase1AReport.masks: dict[str, ...]`**：pydantic strict 模式下报 `Input should be a valid string`；同期 zoom_directions / transitions 都已用 `{str(k): v for k, v in ...}` 显式转 key，masks 漏了。集成测试一跑即崩。
+
+8. **TemplateLibrary.tsx 的 `patchTemplateTags` import 是死引用**：UI 里没有 tags 编辑入口，但后端 `PATCH /templates/{id}/tags` 端点已实现且 PLAN 1538 隐含"模板可手工改 tags"。
+
+9. **`scripts/check_parent_event_id.py` 误判 `_classify_role`**：skeleton.py 里的纯阈值映射函数（`start_ratio` → `开头 / 主体 / 结尾`）名字以 `_classify` 结尾被 CI 守卫识别为"phase-2 VLM 调用"，要求传 `parent_event_id=`——但它根本不发事件。守卫的语义边界是"AI 调用链的子步骤"，不是"任何叫 classify 的函数"。
+
+**后果**：
+- 1 + 2 让 1B 的 IR 设计在第一版就含两处「假约束」：per-slot audio 字段误导未来 Phase 2 的 apply 层（让人以为可以 per-slot 改 BGM），degraded 命名空间混乱让"模板有 N 项 degraded"这个 UI 提示无法引导用户去看具体字段。
+- 3 是一颗定时炸弹：未来 Phase1AContext 改 lazy cache 实现（比如改成 `cached_property` 或 LRU dict）时，pipeline.py 的私有访问静默挂掉。
+- 4 + 5 + 6 + 7 是经典"在原有逻辑上打补丁"的现场——color 转换两份、init_db 散在每个 CRUD、sanity 用字符串切片当结构降维、dict key 类型在三处的 str(k) 转换中漏一处。
+- 7 单点让 1B 集成测试当前直接失败（未跑 `pytest tests/integration/test_extract_1b.py`，已在 二核 中复现）。
+- 8 + 9 是 UI / CI 完整性问题：tags 编辑器没接入、CI 守卫边界过宽。
+
+**初步判断**：
+已确认。第一性原理：
+- 全局信号（音频 / 调色）应该挂在 IR 顶层，而不是被复制到每个 slot；StyleRule 的语义是"这一段 slot 的剪辑配方"，全局事物不属于这里。
+- `degraded` 字段属于 TemplateIR，键的命名空间也应该是 TemplateIR——pipeline 层是 1A 的消费者，理应在那里完成 1A 路径 → TemplateIR 路径的翻译。
+- 公共 lazy 接口存在的意义就是给跨模块访问用，私有属性应当被守住。
+- 重复代码、散落的 init_db、字符串截断、漏掉的 str(k)——都是同一类"在第一版里偷懒"的产物，二核就是用来偿还这笔债的。
+
+**方案讨论**（已确认）：
+- IR 改造：`TemplateIR` 新增顶层 `audio: AudioStyle | None`；`StyleRule.audio` 删除。skeleton.py 不再 per-slot 填 audio，pipeline.py 用 `ir.audio = report.audio` 直接装配。tagging.py 从 `ir.audio` 读取。
+- degraded 命名空间统一：pipeline.py 顶部加 `SUBCAP_TO_IR_PATH` 表（subcap label → TemplateIR 路径）+ `_ir_path_for(field_key)` 翻译函数；`_safe` 在写入 `ir.degraded` 前一律走翻译。Phase1AReport 路径（如 `zoom_curves.3` / `captions.5.verified_anim_in`）按"剥后缀 → 折叠"两步规则映射到 `skeleton.*.style.visual.zoom_keyframes` / `skeleton.*.style.caption`。
+- 工具函数复用：`extract/color.py::_to_color_report` 改名 `to_color_report`（去下划线公开），pipeline.py 直接 import 使用，删除重复定义。
+- 数据库初始化：`kb/store.py` 所有 CRUD 移除 per-call `init_db()`；约定 lifespan 是唯一调用方；`tests/conftest.py::task_with_events` fixture 同步加 `kb_store.init_db()` 镜像 lifespan。
+- sanity 审计 prompt：新增 `_summarize_for_audit(ir)` 显式构造 bounded 摘要（每 slot 一行，关键字段全留），替代 `model_dump_json()[:2000]`。
+- masks dict key：`pipeline.py` 收口处加 `{str(k): v for k, v in masks.items()}` 与 zoom_directions / transitions 对齐。
+- pipeline 私有访问：`frames_for_summary = ctx._frames or []` 改为 `try/except await ctx.frames()` 走公共入口。
+- TemplateLibrary tags 编辑器：在详情页 `<TagsEditor>` 子组件，4 个 input 对应 position / function / scene / notes，dirty-state 控制保存按钮禁用，调 `patchTemplateTags`。
+- CI 守卫：`_classify_role` 改名 `_role_for_position`——名字本身就更准（按位置阈值映射，不是语义分类），同时绕过 CI 误判，不动 CI 守卫边界。
+
+**关联**：
+-> backend/app/ir/template.py（TemplateIR.audio 顶层 / StyleRule.audio 删）
+-> backend/app/extract/pipeline.py（SUBCAP_TO_IR_PATH 表 + _ir_path_for + masks str-key + ctx.frames() 公共入口 + 复用 to_color_report）
+-> backend/app/extract/skeleton.py（移除 audio per-slot 装配 + _classify_role → _role_for_position）
+-> backend/app/extract/color.py（_to_color_report → to_color_report 公开）
+-> backend/app/kb/store.py（移除 6 处 per-call init_db）
+-> backend/app/kb/tagging.py（slot[0].style.audio → ir.audio）
+-> backend/app/kb/sanity.py（_summarize_for_audit 替代字符串截断）
+-> backend/app/llm/prompts/scenarios/full_extract_demo.json（global_style.audio → audio 路径同步）
+-> backend/tests/conftest.py（task_with_events fixture 镜像 lifespan 调 kb_store.init_db）
+-> backend/tests/unit/test_skeleton.py（_classify_role 重命名同步）
+-> frontend/src/pages/TemplateLibrary.tsx（新增 TagsEditor 子组件）
+-> shared/ir.schema.json（gen_schema 重生成）
+-> renderer/src/types/ir.ts、frontend/src/types/ir.ts（pnpm gen:types 重生成）
+-> docs/001ARCHITECTURE.md（D24 新增 + D17 微调）
+-> docs/002STRUCTURE.md（无新增文件，annotation 微调）
+-> 004CHANGELOG.md [2026-06-09-2]
+
+**解决方案**：
+将全局音频升到 `TemplateIR.audio`，删除 `StyleRule.audio`；引入 `SUBCAP_TO_IR_PATH` 把 1A subcap field_key 翻译为 TemplateIR 路径后再写 `ir.degraded`；`extract/color.py::to_color_report` 公开复用、`pipeline.py` 删除重复定义；`kb/store.py` 移除 per-call `init_db()`、`conftest.py` 镜像 lifespan 补 fixture；`kb/sanity.py` 用结构化 `_summarize_for_audit` 替代字符串截断；pipeline.py masks 也走 `{str(k): v}`；私有 `ctx._frames` 改公共 `await ctx.frames()`；TemplateLibrary 详情页加 `<TagsEditor>` 接通后端 PATCH /tags；`_classify_role` 改名 `_role_for_position` 绕过 CI 守卫误判。`pnpm gen:types` 同步两端 zod；80/80 backend 测试 + 11/11 frontend 测试 + renderer/frontend typecheck 全绿。

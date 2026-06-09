@@ -205,6 +205,8 @@ const TemplateDetailView: React.FC<{ id: string }> = ({ id }) => {
         </div>
       )}
 
+      <TagsEditor templateId={id} initialTags={t.tags} onSaved={refresh} />
+
       <h2 className="mt-8 font-serif text-xl">骨架</h2>
       <div className="mt-3 grid grid-cols-1 gap-3">
         {skeleton.map((slot: any, i: number) => (
@@ -216,6 +218,79 @@ const TemplateDetailView: React.FC<{ id: string }> = ({ id }) => {
       <pre className="mt-3 max-h-[480px] overflow-auto border border-border bg-subtle p-3 text-xs font-mono">
         {JSON.stringify(ir, null, 2)}
       </pre>
+    </div>
+  );
+};
+
+const TAG_FIELDS: ReadonlyArray<{
+  key: "position" | "function" | "scene" | "notes";
+  label: string;
+  placeholder: string;
+}> = [
+  { key: "position", label: "位置", placeholder: "中间 / 顶部 / 底部 / 多区域" },
+  { key: "function", label: "功能", placeholder: "逻辑讲述 / 强调推销 / 教学讲解 / 情绪表达" },
+  { key: "scene", label: "场景", placeholder: "纯口播 / 口播+B-roll / 口播+图文" },
+  { key: "notes", label: "备注", placeholder: "30 字内剪辑特点" },
+];
+
+const TagsEditor: React.FC<{
+  templateId: string;
+  initialTags: TemplateSummary["tags"];
+  onSaved: () => void;
+}> = ({ templateId, initialTags, onSaved }) => {
+  // Local draft mirrors the four Tags fields. Saving sends the full set —
+  // the backend's PATCH route already supports partial merge but UX-wise
+  // the user expects a single "保存" to persist whatever they typed.
+  const [draft, setDraft] = React.useState<TemplateSummary["tags"]>(initialTags);
+  const [saving, setSaving] = React.useState(false);
+  const [err, setErr] = React.useState<string | null>(null);
+
+  React.useEffect(() => {
+    setDraft(initialTags);
+  }, [initialTags]);
+
+  const dirty = TAG_FIELDS.some((f) => draft[f.key] !== initialTags[f.key]);
+
+  const save = async () => {
+    setSaving(true);
+    setErr(null);
+    try {
+      await patchTemplateTags(templateId, draft);
+      onSaved();
+    } catch (e: any) {
+      setErr(String(e?.response?.data?.detail ?? e?.message ?? e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="mt-4 border border-border bg-surface p-4 text-sm">
+      <div className="flex items-baseline justify-between">
+        <div className="font-serif text-base">标签</div>
+        <button
+          type="button"
+          onClick={save}
+          disabled={!dirty || saving}
+          className="se-btn-ghost text-xs"
+        >
+          {saving ? "保存中…" : "保存"}
+        </button>
+      </div>
+      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2">
+        {TAG_FIELDS.map((f) => (
+          <label key={f.key} className="block text-xs">
+            <span className="font-mono text-tertiary">{f.label}</span>
+            <input
+              value={draft[f.key]}
+              onChange={(e) => setDraft({ ...draft, [f.key]: e.target.value })}
+              placeholder={f.placeholder}
+              className="mt-1 w-full border border-border bg-canvas px-2 py-1 font-mono"
+            />
+          </label>
+        ))}
+      </div>
+      {err && <div className="mt-2 text-error text-xs">保存失败：{err}</div>}
     </div>
   );
 };

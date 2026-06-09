@@ -45,10 +45,19 @@ def fresh_event_bus(temp_data_root, monkeypatch):
 
 @pytest.fixture
 def task_with_events(temp_data_root, fresh_event_bus):
-    """Create a sample-resource task with an events_jsonl_path wired up."""
+    """Create a sample-resource task with an events_jsonl_path wired up.
+
+    Mirrors ``main.py``'s lifespan: both ``tasks_store`` and ``kb_store``
+    schemas are bootstrapped here, so the kb / templates table exists for
+    integration tests that exercise ``save_template``. Without this the
+    1B pipeline test would hit ``no such table: templates`` since 1B's
+    pure-CRUD ``kb.store`` helpers no longer self-init per call.
+    """
     from app import tasks_store
+    from app.kb import store as kb_store
 
     tasks_store.init_db()
+    kb_store.init_db()
     sample_id = "evt_test_sample"
     (temp_data_root / "samples" / sample_id / "extracted").mkdir(parents=True, exist_ok=True)
     task_id = tasks_store.create_task("test", resource_kind="sample", resource_id=sample_id)

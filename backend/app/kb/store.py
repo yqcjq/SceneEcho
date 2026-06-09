@@ -80,8 +80,11 @@ def save_template(
     Replace-on-conflict is correct here: re-running extract on the same
     sample with the same target id should overwrite, not duplicate. The
     Phase 1A events JSONL is not touched — only the IR snapshot.
+
+    ``init_db`` is **not** called here: ``main.py``'s lifespan owns the
+    schema bootstrap (see ARCHITECTURE D24). Callers in tests must use
+    a temp DATA_ROOT + ``init_db()`` explicitly via the conftest fixture.
     """
-    init_db()
     payload = (
         ir.id,
         ir.name,

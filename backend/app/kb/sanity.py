@@ -50,6 +50,46 @@ _SYSTEM_PROMPT = """你是视频剪辑模板的质量审计员。给你一个模
 """
 
 
+def _summarize_for_audit(ir: TemplateIR) -> str:
+    """Compact, structurally-faithful template summary for the audit prompt.
+
+    The earlier implementation fed ``ir.model_dump_json()[:2000]`` which
+    truncates mid-string and silently drops trailing slots; the auditor
+    then judged a partial template as if it were the whole. This builds a
+    bounded summary that covers every slot at a fixed line budget — long
+    templates lose nothing structurally, only formatting verbosity.
+    """
+    audio_brief = "无 BGM"
+    if ir.audio and ir.audio.has_bgm:
+        audio_brief = (
+            f"BGM mood={ir.audio.mood_tag or '?'} BPM={ir.audio.bpm or 0:.0f}"
+        )
+    slot_lines: list[str] = []
+    for i, slot in enumerate(ir.skeleton):
+        cap = slot.style.caption
+        cap_brief = "—"
+        if cap is not None:
+            ph = (cap.placeholder_text or [""])[0][:40]
+            cap_brief = (
+                f"{cap.font_family} {cap.size}px color={cap.color} "
+                f"anim_in={cap.anim_in} purpose={cap.semantic_purpose} "
+                f"placeholder='{ph}'"
+            )
+        zoom_n = len(slot.style.visual.zoom_keyframes)
+        slot_lines.append(
+            f"  slot {i} role={slot.role} req={slot.material_req} "
+            f"dur={slot.duration.get('nominal', 0):.1f}s caption[{cap_brief}] "
+            f"zoom_kfs={zoom_n} mask={slot.style.visual.mask or '—'} "
+            f"lut={slot.style.visual.color_lut or '—'} "
+            f"trans_in={slot.style.transition_in or '—'}"
+        )
+    return (
+        f"模板「{ir.name}」 id={ir.id} slots={len(ir.skeleton)}\n"
+        f"全局音频：{audio_brief}\n"
+        + "\n".join(slot_lines)
+    )
+
+
 async def sanity_check(
     ir: TemplateIR,
     sample_frames: list[FrameSample],
@@ -63,10 +103,8 @@ async def sanity_check(
     anchors = _pick_three(sample_frames)
     frame_refs = [FrameRef(ts=f.ts, url=f.rel_path, scene_idx=f.scene_idx) for f in anchors]
 
-    summary = ir.model_dump_json(indent=None)[:2000]
-    user_prompt = (
-        "请审计以下模板（截断到 2000 字符）：\n" + summary + "\n\n按 schema 输出 JSON。"
-    )
+    summary = _summarize_for_audit(ir)
+    user_prompt = "请审计以下模板：\n" + summary + "\n\n按 schema 输出 JSON。"
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
         {"role": "user", "content": user_prompt},

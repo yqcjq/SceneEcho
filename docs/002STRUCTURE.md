@@ -75,7 +75,7 @@ SceneEcho/
 │  │  ├─ ir/
 │  │  │  ├─ __init__.py                     # 顶层 IR 类型聚合 export
 │  │  │  ├─ ledger.py                       # TranscriptLedger / Unit
-│  │  │  ├─ template.py                     # TemplateIR + Slot/StyleRule/CaptionStyle/...
+│  │  │  ├─ template.py                     # TemplateIR（含顶层 audio · D24）+ Slot/StyleRule/CaptionStyle/...
 │  │  │  ├─ project.py                      # ProjectIR + Section/PlacedSegment/Caption/Gap
 │  │  │  ├─ phase1a_report.py               # Phase1AReport：1A 识别结果聚合 IR（D17，子能力 VisionEvent 写入这棵树）
 │  │  │  ├─ patch.py                        # NL/面板/审核统一编辑 op
@@ -112,10 +112,10 @@ SceneEcho/
 │  │  │  ├─ color.py                        # 1A-V8 调色语义（VLM 标签 + OpenCV HSV 直方图微调），写 Phase1AReport.color
 │  │  │  ├─ audio.py                        # 1A-A1 BGM（Demucs htdemucs 分离 + librosa BPM/能量/情绪），写 Phase1AReport.audio.{has_bgm,bpm,mood_tag}
 │  │  │  ├─ skeleton.py                     # 1B 骨架推断（位置阈值发现 + StyleRule 聚合），读 Phase1AReport 写 TemplateIR.skeleton
-│  │  │  └─ pipeline.py                     # 1B extract DAG 编排（asyncio.gather + _safe 降级 + KB save）
+│  │  │  └─ pipeline.py                     # 1B extract DAG 编排（asyncio.gather + _safe 降级 + SUBCAP_TO_IR_PATH 翻译 + KB save）
 │  │  ├─ kb/                                # 1B 知识库
 │  │  │  ├─ __init__.py
-│  │  │  ├─ store.py                        # SQLite templates 表 CRUD（与 tasks 表共用 kb.sqlite WAL）
+│  │  │  ├─ store.py                        # SQLite templates 表 CRUD（与 tasks 表共用 kb.sqlite WAL；init_db 只在 lifespan 调用 D26）
 │  │  │  ├─ tagging.py                      # 1B Tags 推断（VLM 综合骨架摘要 + 3 帧）
 │  │  │  ├─ sanity.py                       # 1B 整体复查（VLM 验骨架/material_req/placeholder/zoom）
 │  │  │  └─ select.py                       # Phase 1B 占位：标签精确匹配；Phase 3 接 LLM rerank
