@@ -128,6 +128,7 @@ async def detect_stickers(
             frame_ts=anchor.ts,
             frame_url=f"/data/{anchor.rel_path.lstrip('/')}",
             bbox_norm=tuple(float(v) for v in bbox),
+            media_ts=float(anchor.ts),
             semantic_label=f"贴纸：{raw.semantic_category} · {raw.description[:20]}",
             reasoning=raw.reasoning[:200],
             confidence=raw.confidence,
@@ -243,6 +244,7 @@ async def refine_sticker_bbox(
         frame_ts=anchor_ts,
         frame_url=frame_url,
         bbox_norm=tuple(float(v) for v in new_bbox),
+        media_ts=float(anchor_ts),
         semantic_label="CV 精化贴纸 bbox 至最大连通轮廓",
         reasoning=(
             "Canny 边缘 → findContours(RETR_EXTERNAL) → "

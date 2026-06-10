@@ -42,6 +42,10 @@ export interface VisionEvent {
   frame_ts: number | null;
   frame_url: string | null;
   bbox_norm: [number, number, number, number] | null;
+  /** Single video moment this event speaks about (Phase 2.6 dual-axis). */
+  media_ts: number | null;
+  /** Span (start_sec, end_sec) for events covering a video range. */
+  media_ts_range: [number, number] | null;
   semantic_label: string;
   reasoning: string;
   confidence: number;

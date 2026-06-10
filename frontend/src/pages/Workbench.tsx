@@ -1,12 +1,14 @@
 import React from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import { fetchEventHistory, subscribeEvents } from "../api/events.js";
 import { pollTask, type TaskStatus } from "../api/index.js";
 import { WorkbenchBreadcrumb } from "../components/workbench/WorkbenchBreadcrumb.js";
 import { WorkbenchEventStream } from "../components/workbench/WorkbenchEventStream.js";
 import { WorkbenchIRPane } from "../components/workbench/WorkbenchIRPane.js";
 import { WorkbenchVisionPane } from "../components/workbench/WorkbenchVisionPane.js";
-import { useWorkbenchStore } from "../state/workbench.js";
+import { useWorkbenchStore, type WorkbenchView } from "../state/workbench.js";
+import { WorkbenchGantt } from "./WorkbenchGantt.js";
+import { WorkbenchMediaTimeline } from "./WorkbenchMediaTimeline.js";
 
 /**
  * Poll /api/tasks/{taskId} every 1.5s for status/stage/progress. Stops on
@@ -38,6 +40,77 @@ function useTaskStatus(taskId: string | null): TaskStatus | null {
   return task;
 }
 
+/**
+ * Two-way binding between ``?view=`` query param and the store's
+ * ``view`` field. URL is the source of truth on first load (so a shared
+ * link respects ?view=gantt); subsequent ``setView`` calls update the URL
+ * to keep the address bar in sync. Browser back/forward also flips the
+ * view because the param change is a real navigation.
+ */
+function useViewParam(): WorkbenchView {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const view = useWorkbenchStore((s) => s.view);
+  const setView = useWorkbenchStore((s) => s.setView);
+
+  // URL → store on first load and on browser navigation.
+  React.useEffect(() => {
+    const raw = searchParams.get("view");
+    const parsed: WorkbenchView =
+      raw === "gantt" || raw === "media_timeline" ? raw : "list";
+    if (parsed !== view) setView(parsed);
+    // Intentionally only depend on the URL — store changes are pushed
+    // back to the URL by the second effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  // Store → URL when the user clicks a view tab.
+  React.useEffect(() => {
+    const current = searchParams.get("view");
+    const desired = view === "list" ? null : view;
+    if (current === desired) return;
+    const next = new URLSearchParams(searchParams);
+    if (desired) next.set("view", desired);
+    else next.delete("view");
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view]);
+
+  return view;
+}
+
+const VIEW_OPTIONS: { value: WorkbenchView; label: string }[] = [
+  { value: "list", label: "三栏列表" },
+  { value: "gantt", label: "壁钟甘特图" },
+  { value: "media_timeline", label: "媒体时间线" },
+];
+
+const ViewSwitcher: React.FC<{ view: WorkbenchView }> = ({ view }) => {
+  const setView = useWorkbenchStore((s) => s.setView);
+  return (
+    <div
+      role="tablist"
+      aria-label="workbench view"
+      className="inline-flex rounded-sm border border-border bg-subtle p-0.5 font-mono text-[11px]"
+    >
+      {VIEW_OPTIONS.map((opt) => (
+        <button
+          key={opt.value}
+          type="button"
+          role="tab"
+          aria-selected={view === opt.value}
+          data-testid={`view-tab-${opt.value}`}
+          onClick={() => setView(opt.value)}
+          className={`rounded-[2px] px-2 py-0.5 ${
+            view === opt.value ? "bg-accent text-text-inverted" : "text-secondary"
+          }`}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  );
+};
+
 export const Workbench: React.FC = () => {
   const params = useParams<{ taskId: string }>();
   const taskId = params.taskId ?? null;
@@ -46,6 +119,7 @@ export const Workbench: React.FC = () => {
   const events = useWorkbenchStore((s) => s.events);
   const paused = useWorkbenchStore((s) => s.paused);
   const togglePause = useWorkbenchStore((s) => s.togglePause);
+  const view = useViewParam();
   const task = useTaskStatus(taskId);
 
   /**
@@ -133,6 +207,7 @@ export const Workbench: React.FC = () => {
           <p className="text-tertiary text-xs font-mono">{taskId}</p>
         </div>
         <div className="flex items-center gap-4 text-xs text-secondary">
+          <ViewSwitcher view={view} />
           {task ? (
             <span className={`font-mono ${statusColor}`}>
               {status ?? "?"}
@@ -152,26 +227,39 @@ export const Workbench: React.FC = () => {
           </button>
         </div>
       </div>
-      {/*
-        md:grid-rows-1 → grid-template-rows: repeat(1, minmax(0, 1fr)). Without
-        an explicit row template the row defaults to `auto` and grows to its
-        tallest cell's content; that broke each pane's internal scroll because
-        h-full resolved to the content-driven row height instead of the
-        viewport-bounded grid height. The minmax(0, 1fr) lets the row track
-        shrink below content size so flex-1 + overflow-y-auto inside each pane
-        actually engage.
-      */}
-      <div className="grid flex-1 overflow-hidden border-t border-border md:grid-cols-3 md:grid-rows-1">
-        <div className="border-r border-border">
-          <WorkbenchVisionPane videoUrl={task?.normalized_media_url ?? null} />
+      {view === "gantt" ? (
+        <div className="min-h-0 flex-1 border-t border-border">
+          <WorkbenchGantt taskId={taskId} />
         </div>
-        <div className="border-r border-border">
-          <WorkbenchEventStream />
+      ) : view === "media_timeline" ? (
+        <div className="min-h-0 flex-1 border-t border-border">
+          <WorkbenchMediaTimeline
+            taskId={taskId}
+            videoUrl={task?.normalized_media_url ?? null}
+          />
         </div>
-        <div>
-          <WorkbenchIRPane />
+      ) : (
+        <div className="grid flex-1 overflow-hidden border-t border-border md:grid-cols-3 md:grid-rows-1">
+          {/*
+            md:grid-rows-1 → grid-template-rows: repeat(1, minmax(0, 1fr)). Without
+            an explicit row template the row defaults to ``auto`` and grows to its
+            tallest cell's content; that broke each pane's internal scroll because
+            h-full resolved to the content-driven row height instead of the
+            viewport-bounded grid height. The minmax(0, 1fr) lets the row track
+            shrink below content size so flex-1 + overflow-y-auto inside each pane
+            actually engage.
+          */}
+          <div className="border-r border-border">
+            <WorkbenchVisionPane videoUrl={task?.normalized_media_url ?? null} />
+          </div>
+          <div className="border-r border-border">
+            <WorkbenchEventStream />
+          </div>
+          <div>
+            <WorkbenchIRPane />
+          </div>
         </div>
-      </div>
+      )}
     </div>
   );
 };

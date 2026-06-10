@@ -50,6 +50,8 @@ const sampleEvent: VisionEvent = {
   frame_ts: null,
   frame_url: null,
   bbox_norm: null,
+  media_ts: null,
+  media_ts_range: null,
   semantic_label: "test",
   reasoning: "",
   confidence: 1,

@@ -54,9 +54,9 @@ SceneEcho 解决一个真实痛点：**一镜到底口播视频枯燥，需要�
 | 阶段 | 名称 | 状态 | 一句话说明 |
 |------|------|------|-----------|
 | 阶段 0 | 地基与渲染骨架 | ✅ 已完成 | 三服务脚手架 + IR codegen + CI；mp4 → Remotion+FFmpeg → 叠字幕的 mp4 跑通 |
-| **阶段 0.5** | **AI 透明工作台骨架** | 📋 待开始 | **SSE 事件总线 + VisionEvent IR + 前端 `/workbench` 三栏页面骨架，用 mock 事件验证渲染** |
-| 阶段 1A | 视觉理解能力单点验证 | 📋 待开始 | 字幕样式/贴纸/缩放方向/转场/调色/蒙版/动画细节，每个独立 fixture + 指标基线，VLM 调用同步发射 VisionEvent |
-| 阶段 1B | 模板提取集成 | 📋 待开始 | 串联 1A 各能力 → 完整 TemplateIR（含 D2 + Tier B 部分项）→ KB，工作台展示全链路 |
+| **阶段 0.5** | **AI 透明工作台骨架** | ✅ 已完成 | **SSE 事件总线 + VisionEvent IR + 前端 `/workbench` 三栏页面骨架，用 mock 事件验证渲染** |
+| 阶段 1A | 视觉理解能力单点验证 | ✅ 已完成 | 字幕样式/贴纸/缩放方向/转场/调色/蒙版/动画细节，每个独立 fixture + 指标基线，VLM 调用同步发射 VisionEvent |
+| 阶段 1B | 模板提取集成 | ✅ 已完成 | 串联 1A 各能力 → 完整 TemplateIR（含 D2 + Tier B 部分项）→ KB，工作台展示全链路 |
 | **阶段 2** | **★MVP 应用闭环（短素材+指定模板）** | 📋 待开始 | **10–20s 口播 + 选模板 → ASR + 套风格 → MP4；模板推荐与套风格全程在工作台可见** |
 | 阶段 2.5 | NL 编辑 + 参数面板 + 工作台事件回放 + 提取历史入口 | 📋 待开始 | 一句话改 IR 重渲染；Visualize 页改为对历史 VisionEvent 的可回放回顾；样例/项目详情页补"提取历史"区块与工作台面包屑 |
 | **阶段 2.6** | **AI 决策工作台 v4 升级（甘特图 + 媒体时间线 + 因果链 + 回归基础设施）** | 📋 待开始 | **events 流的四种新用法：visx 壁钟甘特图 / 媒体时间线（视频时间轴 + 事件 marker + 播放头联动）/ parent_event_id 因果链可视化 / events.jsonl 反向作 ReplayClient 回归测试** |
@@ -1520,7 +1520,7 @@ class Patch(BaseModel):
                          │                    ├──▶ masks
                          │                    └──▶ color_lut
                          └──▶ (audio 与上方独立) ──▶ extract_bgm
-
+  
   上述全部完成后：
   ──▶ skeleton (用 scenes + captions + stickers + masks + duration)
   ──▶ caption_function (按 captions 调 VLM 综合判)
@@ -2187,14 +2187,14 @@ category 取值：`whoosh | ding | pop | typing | swoosh | impact | bell | trans
       transition_score: int    # 0-5  过渡价值
       energy: float            # 0-1  叙述能量
       reasoning: str           # LLM 解释（中文）
-
+  
   class Dependency(BaseModel):
       source_section: str      # 含"刚刚说的"的 section
       target_section: str      # 被指代的 section
       kind: str                # 代词|话题|时间引用
       surface: str             # 触发词（"刚刚"、"上面提到"…）
       can_break: bool          # 重排后是否能容忍打破
-
+  
   class ReorderPlan(BaseModel):
       version_id: str          # baseline | hook_first | cta_first | high_pace | custom
       label: str               # 显示名（"保序" / "Hook 优先" / "CTA 优先"…）

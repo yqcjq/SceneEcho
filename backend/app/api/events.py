@@ -6,6 +6,16 @@ events with sequence > snapshot will arrive on the live queue. The two sets
 do not overlap, so no client-side dedup is required — the previous
 sequence-based filter has been removed along with the race condition that
 forced it to exist.
+
+This module is intentionally narrow: the gantt + media-timeline aggregations
+that Phase 2.6 needs are derived **client-side** from the same event stream
+that the SSE endpoint already pushes. Aggregating server-side would have
+duplicated work the client already did (the workbench store accumulates
+every event for the IR snapshot), and would have forced the gantt page to
+re-fetch on every SSE arrival to stay live. The single source of truth is
+the event JSONL itself, exposed once via SSE and once via the history
+endpoint; views derive shape from those events without a parallel HTTP
+projection.
 """
 
 from __future__ import annotations
@@ -108,9 +118,10 @@ async def stream_events(
 def history(task_id: str) -> JSONResponse:
     """One-shot replay of every persisted event for a task (no live stream).
 
-    Intended for the Phase 2.5 replay page; the live SSE endpoint already
-    replays history on connect, so the workbench page should NOT call this
-    in addition.
+    The Visualize replay page consumes this; the live SSE endpoint already
+    replays history on connect. Phase 2.6 gantt + media-timeline views also
+    consume the same events through the workbench store (which is
+    populated by SSE), so they don't need a separate aggregate endpoint.
     """
     bus = get_event_bus()
     events = bus.replay(task_id)

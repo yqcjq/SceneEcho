@@ -187,6 +187,7 @@ async def estimate_zoom_curve(
         task_id=ctx.task_id,
         source="cv",
         stage=STAGE_CURVE,
+        media_ts_range=(float(scene.start_sec), float(scene.end_sec)),
         semantic_label=f"缩放曲线 · scene {scene.idx} · {len(keyframes)} 关键帧",
         reasoning="goodFeaturesToTrack + Lucas-Kanade 光流估算 scale 比率。",
         confidence=0.85,

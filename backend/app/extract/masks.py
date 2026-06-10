@@ -156,6 +156,7 @@ async def _cv_vote(
                 frame_ts=c.frame.ts,
                 frame_url=f"/data/{c.frame.rel_path.lstrip('/')}",
                 bbox_norm=tuple(float(v) for v in c.bbox_norm) if c.bbox_norm else None,
+                media_ts=float(c.frame.ts),
                 semantic_label=f"CV 候选：{c.kind} · confidence {c.confidence:.2f}",
                 reasoning=(
                     f"scene {scene.idx} 第 {anchors.index(c.frame)} 帧 OpenCV "
@@ -407,6 +408,7 @@ def _make_ir_event(
         frame_ts=anchor.ts,
         frame_url=f"/data/{anchor.rel_path.lstrip('/')}",
         bbox_norm=bbox,
+        media_ts=float(anchor.ts),
         semantic_label=f"几何蒙版：{result.kind} (scene {scene_idx})",
         reasoning=reasoning,
         confidence=result.confidence,

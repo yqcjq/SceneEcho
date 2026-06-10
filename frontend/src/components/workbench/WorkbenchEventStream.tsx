@@ -2,26 +2,38 @@ import React from "react";
 import { useSearchParams } from "react-router-dom";
 import { useWorkbenchStore } from "../../state/workbench.js";
 import type { VisionEvent } from "../../types/workbench.js";
+import {
+  ChainAnchorPill,
+  useChainHighlight,
+  useChainResolver,
+  type ChainAnchorInfo,
+} from "./CausalChainOverlay.js";
 import { EventBadge } from "./EventBadge.js";
 
 interface RowProps {
   event: VisionEvent;
-  parentLabel: string | null;
+  chain: ChainAnchorInfo;
   selected: boolean;
+  inChainHighlight: boolean;
   vetoed: boolean;
   onSelect: () => void;
-  rowRef?: (el: HTMLButtonElement | null) => void;
+  rowRef?: (el: HTMLDivElement | null) => void;
 }
 
 const EventRow: React.FC<RowProps> = ({
   event,
-  parentLabel,
+  chain,
   selected,
+  inChainHighlight,
   vetoed,
   onSelect,
   rowRef,
 }) => {
-  const baseBg = selected ? "bg-accent-subtle" : "bg-surface";
+  const baseBg = selected
+    ? "bg-accent-subtle"
+    : inChainHighlight
+    ? "bg-accent-subtle/40"
+    : "bg-surface";
   const severityBorder =
     event.severity === "warning" || event.confidence_warning
       ? "border-l-warning"
@@ -29,16 +41,35 @@ const EventRow: React.FC<RowProps> = ({
       ? "border-l-error"
       : "border-l-transparent";
   const dimmed = vetoed ? "opacity-50" : "";
+  // When the user hovers a chain anchor in another row, this row's
+  // border lights up if it's an ancestor or descendant of the hovered
+  // event. Doesn't change the row's own click target / focus state.
+  const chainOutline = inChainHighlight
+    ? "ring-1 ring-accent ring-inset"
+    : "";
 
   return (
-    <button
+    // ``<div role="button">`` rather than a real ``<button>`` so the row
+    // can host nested buttons (the chain anchor pills). Native
+    // button-in-button is invalid HTML and React 18 logs a warning.
+    // Keyboard accessibility is preserved: the surrounding pane already
+    // handles ↑ / ↓ / Enter for navigation against ``selectedEventId``.
+    <div
       ref={rowRef}
-      type="button"
+      role="button"
+      tabIndex={0}
       data-testid="event-row"
       data-event-id={event.event_id}
       data-vetoed={vetoed ? "true" : "false"}
+      data-in-chain={inChainHighlight ? "true" : "false"}
       onClick={onSelect}
-      className={`se-event-in ${baseBg} ${severityBorder} ${dimmed} mb-2 w-full rounded-md border border-border px-3 py-2 text-left transition-colors hover:border-strong`}
+      onKeyDown={(e) => {
+        if (e.key === " " || e.key === "Enter") {
+          e.preventDefault();
+          onSelect();
+        }
+      }}
+      className={`se-event-in ${baseBg} ${severityBorder} ${dimmed} ${chainOutline} mb-2 w-full cursor-pointer rounded-md border border-border px-3 py-2 text-left transition-colors hover:border-strong`}
       style={{ borderLeftWidth: "4px" }}
     >
       <div className="flex items-center gap-2">
@@ -84,12 +115,31 @@ const EventRow: React.FC<RowProps> = ({
           {event.cost_tokens ? ` · ${event.cost_tokens}t` : ""}
         </span>
       </div>
-      {parentLabel ? (
-        <div className="mt-2 border-l-2 border-accent-subtle pl-2 text-xs text-tertiary">
-          ← 因 {parentLabel}
+      {chain.parent || chain.children.length > 0 ? (
+        <div className="mt-2 flex flex-wrap items-center gap-1 border-t border-border/40 pt-2">
+          {chain.parent ? (
+            <ChainAnchorPill
+              direction="parent"
+              targetId={chain.parent.id}
+              label={chain.parent.label}
+            />
+          ) : null}
+          {chain.children.length > 0 ? (
+            <span className="font-mono text-[10px] text-tertiary">
+              {chain.children.length} 子事件:
+            </span>
+          ) : null}
+          {chain.children.map((c) => (
+            <ChainAnchorPill
+              key={c.id}
+              direction="child"
+              targetId={c.id}
+              label={c.label}
+            />
+          ))}
         </div>
       ) : null}
-    </button>
+    </div>
   );
 };
 
@@ -194,7 +244,7 @@ export const WorkbenchEventStream: React.FC = () => {
   // Refs hold the latest values so the keyboard listener installs once.
   const orderedRef = React.useRef<VisionEvent[]>(ordered);
   const selectedIdRef = React.useRef(selectedId);
-  const rowRefs = React.useRef<Map<string, HTMLButtonElement>>(new Map());
+  const rowRefs = React.useRef<Map<string, HTMLDivElement>>(new Map());
   React.useEffect(() => {
     orderedRef.current = ordered;
   }, [ordered]);
@@ -243,21 +293,16 @@ export const WorkbenchEventStream: React.FC = () => {
     return () => window.removeEventListener("keydown", onKey);
   }, [setSelected, toggleVetoed]);
 
-  const lookupParent = React.useCallback(
-    (id: string | null) => {
-      if (!id) return null;
-      const parent = allEvents.find((e) => e.event_id === id);
-      return parent ? `${parent.stage} · ${parent.semantic_label}` : null;
-    },
-    [allEvents],
-  );
+  const resolveChain = useChainResolver();
+  const { highlightSet } = useChainHighlight();
 
   const renderRow = (event: VisionEvent) => (
     <EventRow
       key={event.event_id}
       event={event}
-      parentLabel={lookupParent(event.parent_event_id)}
+      chain={resolveChain(event)}
       selected={event.event_id === selectedId}
+      inChainHighlight={highlightSet.has(event.event_id)}
       vetoed={vetoedIds.has(event.event_id)}
       onSelect={() => setSelected(event.event_id)}
       rowRef={(el) => {

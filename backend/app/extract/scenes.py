@@ -124,6 +124,9 @@ async def detect_scenes(
             stage=STAGE,
             frame_ts=anchor_ts,
             frame_url=frame_url,
+            media_ts_range=(float(s.start_sec), float(s.end_sec))
+            if s.end_sec - s.start_sec > 0
+            else None,
             semantic_label=f"切点 #{s.idx} @{s.start_sec:.2f}s",
             reasoning=(
                 f"PySceneDetect ContentDetector(threshold={threshold}) 在 "

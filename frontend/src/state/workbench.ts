@@ -23,6 +23,15 @@ import type { VisionEvent } from "../types/workbench.js";
  * than hunting the SSE race window, make the final state converge
  * regardless of delivery path.
  */
+/**
+ * Workbench top-level layout — three full-page modes share the same event
+ * data. ``list`` is the existing 3-pane (frame | events | IR tree); ``gantt``
+ * replaces it with a wall-clock visx gantt; ``media_timeline`` replaces it
+ * with a video-anchored marker timeline. URL ?view= keeps the choice
+ * shareable.
+ */
+export type WorkbenchView = "list" | "gantt" | "media_timeline";
+
 interface WorkbenchState {
   taskId: string | null;
   events: VisionEvent[];
@@ -41,6 +50,23 @@ interface WorkbenchState {
   visionPaneMode: "frame" | "video";
   /** Middle-pane layout: stage-grouped (default) vs flat arrival-order list. */
   streamViewMode: "by_stage" | "by_arrival";
+  /** Top-level layout — Phase 2.6 adds gantt + media_timeline alongside list. */
+  view: WorkbenchView;
+  /**
+   * Current media-timeline playhead (seconds into the source video). Pushed
+   * by the <video> element's onTimeUpdate; read by markers to highlight a
+   * ±0.5s neighbourhood. ``null`` until the user opens the media-timeline
+   * view at least once.
+   */
+  currentMediaTs: number | null;
+  /**
+   * Event id whose causal chain (ancestors + descendants) should be
+   * highlighted across all workbench views. Set by hovering a parent/child
+   * anchor in the middle pane; consumed by gantt + media-timeline + IR
+   * pane to draw the same dashed chain emphasis. ``null`` clears the
+   * highlight everywhere.
+   */
+  hoveredChainRoot: string | null;
 
   appendEvent: (event: VisionEvent) => void;
   setSelected: (id: string | null) => void;
@@ -49,6 +75,9 @@ interface WorkbenchState {
   togglePause: () => void;
   setVisionPaneMode: (mode: "frame" | "video") => void;
   setStreamViewMode: (mode: "by_stage" | "by_arrival") => void;
+  setView: (view: WorkbenchView) => void;
+  setCurrentMediaTs: (ts: number | null) => void;
+  setHoveredChainRoot: (id: string | null) => void;
   reset: (taskId: string | null) => void;
 }
 
@@ -134,6 +163,9 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   autoFollow: true,
   visionPaneMode: "frame",
   streamViewMode: "by_stage",
+  view: "list",
+  currentMediaTs: null,
+  hoveredChainRoot: null,
 
   appendEvent: (event) => {
     const state = get();
@@ -170,6 +202,9 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   togglePause: () => set({ paused: !get().paused }),
   setVisionPaneMode: (mode) => set({ visionPaneMode: mode }),
   setStreamViewMode: (mode) => set({ streamViewMode: mode }),
+  setView: (view) => set({ view }),
+  setCurrentMediaTs: (ts) => set({ currentMediaTs: ts }),
+  setHoveredChainRoot: (id) => set({ hoveredChainRoot: id }),
   reset: (taskId) =>
     set({
       taskId,
@@ -185,5 +220,10 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       autoFollow: true,
       visionPaneMode: "frame",
       streamViewMode: "by_stage",
+      // ``view`` is intentionally NOT reset — the URL ?view= drives it,
+      // and resetting on every taskId change would fight the query param
+      // on navigation. Leave the user's current layout choice intact.
+      currentMediaTs: null,
+      hoveredChainRoot: null,
     }),
 }));

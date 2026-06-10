@@ -157,6 +157,11 @@ async def detect_captions(
             frame_ts=draft.anchor.ts,
             frame_url=f"/data/{draft.anchor.rel_path.lstrip('/')}",
             bbox_norm=tuple(float(v) for v in draft.bbox),
+            # Entity event anchored to the caption's first observed frame.
+            # Use that as media_ts; ts_appeared min/max could form a span,
+            # but the entity card best plays back from where the caption
+            # first appears (matches the bbox / frame_url anchoring).
+            media_ts=float(draft.anchor.ts),
             semantic_label=f"画面字幕：{draft.raw.semantic_purpose} · {entry.style.layout}",
             reasoning=draft.raw.reasoning[:200],
             confidence=draft.raw.confidence,

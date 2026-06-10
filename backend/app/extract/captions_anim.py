@@ -79,6 +79,7 @@ async def verify_caption_anim(
         frame_ts=caption.start,
         frame_url=anchor_frame_url,
         bbox_norm=tuple(float(v) for v in caption.bbox_norm_0_999),
+        media_ts_range=(float(caption.start), float(caption.end)),
         semantic_label=f"动画细节：{result.verified_anim_in} · stagger {result.stagger_ms}ms",
         reasoning=(
             f"OpenCV 帧差 + 光流采样 {sample_fps}fps，"
@@ -196,6 +197,7 @@ async def _fallback(
         frame_ts=caption.start,
         frame_url=anchor_frame_url,
         bbox_norm=tuple(float(v) for v in caption.bbox_norm_0_999),
+        media_ts_range=(float(caption.start), float(caption.end)),
         semantic_label=f"[fallback] 沿用 VLM 判定 {caption.style.anim_in}",
         reasoning=f"OpenCV 不可用 / 处理失败：{reason}。沿用 VLM 给的 anim_in。",
         confidence=0.3,

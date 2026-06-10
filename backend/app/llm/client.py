@@ -302,6 +302,32 @@ def _attach_frames_anthropic(
     return out
 
 
+def _media_ts_from_frames(
+    frames: Sequence[FrameRef] | None,
+) -> tuple[float | None, tuple[float, float] | None]:
+    """Derive (media_ts, media_ts_range) from the frames a chat_vision call saw.
+
+    Phase 2.6 dual-axis: events get tagged with the *video moment* they
+    speak about. The natural source is the frames the AI was shown:
+
+    - Zero frames → both null (text-only LLM call).
+    - One frame → ``media_ts`` = that frame's timestamp.
+    - Multiple frames → ``media_ts_range`` = (min, max) so the media-timeline
+      view can render a span (e.g. tagging looking at first/middle/last frames).
+
+    Subcaps that need to override (e.g. an entity event anchored to one
+    specific frame even though the AI saw a window) construct their own
+    VisionEvent and set the field explicitly — this helper only fills the
+    chat_vision call-level event automatically.
+    """
+    if not frames:
+        return None, None
+    if len(frames) == 1:
+        return float(frames[0].ts), None
+    timestamps = [float(f.ts) for f in frames]
+    return None, (min(timestamps), max(timestamps))
+
+
 def _summarise_for_label(parsed: BaseModel | None, fallback: str) -> str:
     """Pick a short human label for the call-level VisionEvent.
 
@@ -529,12 +555,17 @@ class _RealClientBase(LLMClient):
         severity: Literal["info", "warning", "error"],
     ) -> VisionEvent:
         frame = frames[0] if frames else None
-        # ir_value: if the call has an ir_target, we set the parsed result so
-        # the workbench's right pane fills the targeted field. Subcaps that
-        # want per-entity events emit them via the event bus directly.
+        # Phase 2.6: always populate ir_value with the structured output so
+        # ReplayClient can reconstruct results from any chat_vision event
+        # (regardless of whether an ir_target was set). Without this,
+        # captions/stickers call-level events (ir_target=None) would carry
+        # no payload to reconstruct from during replay.
         ir_value: Any = None
-        if ir_target is not None:
-            ir_value = parsed.model_dump(mode="json") if parsed is not None else payload
+        if parsed is not None:
+            ir_value = parsed.model_dump(mode="json")
+        elif ir_target is not None:
+            ir_value = payload
+        media_ts, media_ts_range = _media_ts_from_frames(frames)
         return VisionEvent(
             task_id=task_id,
             source=source,  # type: ignore[arg-type]
@@ -543,6 +574,8 @@ class _RealClientBase(LLMClient):
             frame_ts=frame.ts if frame else None,
             frame_url=f"/data/{frame.url.lstrip('/')}" if frame else None,
             bbox_norm=None,
+            media_ts=media_ts,
+            media_ts_range=media_ts_range,
             semantic_label=_summarise_for_label(parsed, stage),
             reasoning="",
             confidence=1.0,
@@ -573,6 +606,7 @@ class _RealClientBase(LLMClient):
         duration_ms = int((time.perf_counter() - started_at) * 1000)
         parsed = _construct_default(schema)
         frame = frames[0] if frames else None
+        media_ts, media_ts_range = _media_ts_from_frames(frames)
         event = VisionEvent(
             task_id=task_id,
             source=source,  # type: ignore[arg-type]
@@ -581,10 +615,15 @@ class _RealClientBase(LLMClient):
             frame_ts=frame.ts if frame else None,
             frame_url=f"/data/{frame.url.lstrip('/')}" if frame else None,
             bbox_norm=None,
+            media_ts=media_ts,
+            media_ts_range=media_ts_range,
             semantic_label=f"[fallback] {stage}",
             reasoning=f"未能调用真实模型，回退至 deterministic stub。原因：{reason}",
             confidence=0.0,
             ir_target=ir_target,
+            # Fallback events have ir_value=None — ReplayClient detects this
+            # and returns a default-constructed schema (matching what the
+            # real fallback path produces) rather than trying to validate.
             ir_value=None,
             parent_event_id=parent_event_id,
             duration_ms=duration_ms,

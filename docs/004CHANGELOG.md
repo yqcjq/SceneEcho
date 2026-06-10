@@ -1,3 +1,67 @@
+## [2026-06-10-2] feat(phase2-6): wire wall-clock gantt + media-timeline + causal chain + ReplayClient regression [ISS-017]
+
+### 改动
+
+Phase 2.6 完整落地：工作台升级为「事件流 + 壁钟甘特图 + 媒体时间线」三视图共享 `selectedEventId` / `hoveredChainRoot` / events 数据；新增 ReplayClient 把历史 events.jsonl 反向当 IR 形状回归 fixture。四个第一性原理决策（详见 `decisions/009-phase2-6-replay-and-dual-axis.md`）替代 PLAN 原方案：
+
+1. ReplayClient 用 schema 验证过滤队列代替新增 `emitter` 字段（避免 schema 迁移 + 实体事件全量改造）；
+2. `_build_event` 始终落地 `ir_value`（让 ReplayClient 不依赖 ir_target 就能复原结构化输出）；
+3. 中栏因果链走 inline `ChainAnchorPill` + 跨视图 hover sync 而非 SVG `<path>` overlay（垂直滚动列表上跨卡片虚线视觉噪音 > 信号）；
+4. 甘特图 + 媒体时间线的聚合落客户端（`frontend/src/lib/aggregateEvents.ts`），不引入 backend `/gantt` + `/media-timeline` 端点——同一 SSE 流既给 store 写 IR 快照也给视图算聚合，单一真理源；同日二次核查时识别出原"backend 聚合 + live fetch"方案违反 D1 + 触发 N×N 重复请求，切回客户端 useMemo 增量计算。
+
+二次核查（同日）顺手修了原方案里的几处 P0 / P1：(a) 甘特图横条本来按 `start = event.timestamp` 渲染，但 `event.timestamp` 是 chat_vision 调用结束时间——客户端口径改为 `start_ms = (timestamp_epoch - duration_ms) - origin` / `origin = min(timestamp - duration_ms)`，与 perf_counter 计时口径一致；(b) 媒体时间线的 `<rect>` scrub overlay 原放在 SVG 末尾（z-order 最上），把所有 marker 的 onClick 都吃掉了——改放第一位（z-order 最下），markers 在上拦截各自点击，空白处 fall-through 到 scrub；(c) 甘特图原 `yScale.range = [0, max(innerH, lanes×LH)]` 让超量 lane 渲染到 SVG 视口外但 SVG 不滚动 → 改 SVG height = totalSvgHeight、外层 `overflow-y-auto`；(d) `record_golden.py` 用 `template["ir_json"]` 但 `kb_store.get_template` 返回的字段名是 `ir`（pydantic 已经 round-trip 过）——KeyError 早晚会犯，按 KB 实际形状改 `template["ir"]`。
+
+- backend/app/ir/vision_event.py: VisionEvent 增 `media_ts: float | None` 与 `media_ts_range: tuple[float, float] | None` 双时间轴字段；docstring 写明 frame_ts/wall-clock vs media_ts/视频媒体时间的语义边界
+- backend/app/llm/client.py: 新增 `_media_ts_from_frames(frames)` helper（0 frames → 双 None；1 frame → media_ts；>1 frames → media_ts_range = (min, max)）；`_build_event` 与 `_fallback` 调用 helper 自动填两字段；`_build_event` 即使 `ir_target=None` 也写 `ir_value = parsed.model_dump(mode="json")`
+- backend/app/llm/replay_client.py（新增）：`ReplayClient(LLMClient)` 用 `dict[stage, deque[VisionEvent]]` 索引；`chat_vision/chat_text` 走统一 `_serve()`：popleft 队首，schema 验证失败的事件直接丢弃（同 stage 但不同 schema 的实体事件），验证成功的事件作为返回；`ir_value=None + severity="warning"` 特殊处理为 `_construct_default(schema)`；`_republish` 用当前 task_id 把事件转发到活跃 bus；`ReplayExhaustedError` 携带 stage + 剩余队列长度
+- backend/app/api/events.py: 经二次核查精简——保留原有 SSE 推送和历史回放端点，不新增聚合端点；删除原方案里的 `_RESOURCE_DIRS` / `_resolve_normalized_url` / `_video_duration_seconds` / `_short_event_payload` / `_STAGE_COLOR_TOKENS` / `_stage_color` 等聚合辅助（约 150 行），把工作台聚合让给前端（见 frontend/src/lib/aggregateEvents.ts）。模块 docstring 写明"events.py 仅做 SSE + history endpoint，聚合视图由前端从同一份事件流投影"
+- backend/app/extract/{captions,stickers,masks,scenes,captions_anim,motion}.py: 实体级 / 跨段级事件构造时显式填 `media_ts`（单帧锚点）或 `media_ts_range`（如 caption 起止 / scene 起止 / zoom 曲线覆盖的 scene 区间）；CV 主路径 / VLM 兜底分支均同步
+- scripts/record_golden.py（新增）：typer CLI `record_golden --sample SID`——用真实 LLM client 跑 `extract_template(SID)`，完成后把 events.jsonl + KB ir_json 写入 `tests/fixtures/golden_runs/{SID}/{events.jsonl, template.json}`；不自动 git add（强制人工 review，PLAN 1786）
+- scripts/check_media_ts.py（新增）：CI 守卫——AST 扫描所有 `VisionEvent(...)` 构造调用，凡传 `frame_url=` 的必须同时传 `media_ts=` 或 `media_ts_range=`
+- backend/tests/integration/test_golden_runs.py（新增）：parametrize over `tests/fixtures/golden_runs/{sid}/`；构造 `ReplayClient(events.jsonl)` → monkey-patch `app.llm.client.get_llm_client` → 跑 `extract_template(sid)` → 与 `template.json` 做深度 diff（jsonpatch 风格的字段路径 diff）；目录空时 parametrize 空集自然为 no-op
+- backend/tests/unit/test_phase2_6.py（新增）：7 项单测覆盖 `_media_ts_from_frames`（0/1/many frames）/ VisionEvent 默认值 / ReplayClient（成功复原 / 跳过实体事件 → 队列耗尽 / fallback 事件返回默认 schema）；二次核查后聚合相关测试迁到前端 `aggregateEvents.test.ts`（聚合落客户端，单测随之迁移）
+- tests/fixtures/golden_runs/README.md（新增）：录制 / review / commit 流程说明 + 何时需要重录（IR 字段语义变更 / prompt 改变结构化输出 / 新模型上线）+ CI 集成说明
+- .github/workflows/ci.yml: python job 加 `media_ts guard`（Phase 2.6 dual-axis）+ `Golden-runs regression`（CPU-only pytest，0 API key 依赖）
+- frontend/package.json: 加 `@visx/{group,responsive,scale,text,zoom}@^3.12.0`（visx 模块化按需引入）
+- frontend/src/state/workbench.ts: 新增 `WorkbenchView = "list" | "gantt" | "media_timeline"`；store 增 `view`（默认 list）/ `currentMediaTs`（媒体时间线播放头）/ `hoveredChainRoot`（跨视图因果链高亮根）三态 + 对应 setter；`reset(taskId)` 不重置 `view`（URL 是真理源）
+- frontend/src/lib/aggregateEvents.ts（新增）：`buildGantt(events)` + `buildMediaTimeline(events)` 两个纯函数 + `GanttEvent` / `GanttLane` / `GanttPayload` / `MediaTimelineMarker` / `MediaTimelinePayload` 类型；甘特图 bar 时间口径硬约束 `start = (timestamp_epoch - duration_ms) - origin` / `end = timestamp_epoch - origin`；stage 颜色复用 `EventBadge.badgeColor` phase-prefix 映射
+- frontend/src/lib/aggregateEvents.test.ts（新增）：vitest 覆盖 buildGantt 时间口径正确（call END 不是 START）+ origin 对齐 + 0-duration tick + lane 排序 + 空输入；buildMediaTimeline 过滤无 media_ts* 事件 + 升序排序 + 颜色 token 注入
+- frontend/src/types/workbench.ts: VisionEvent 镜像增 `media_ts: number | null` + `media_ts_range: [number, number] | null`
+- frontend/src/pages/WorkbenchGantt.tsx（新增）：visx `ParentSize` + `scaleLinear`（X 轴 ms）+ `scaleBand`（Y 轴 stage lane）；`Zoom` 处理 X 轴滚轮缩放 / 拖拽平移 / Shift+滚轮横向滚动 / 模态键无修饰滚轮 fall-through 给外层 wrapper 做纵向滚动；事件读 `useWorkbenchStore.events` + `useMemo(buildGantt, ...)` 派生，不发 HTTP；duration_ms > 0 渲染为 `<rect>`，== 0 渲染为 `<line>`；父子事件用 quadratic Bezier `<path>` dashed 连接；选中 / 因果链 hover 时 stroke 切 accent；外层 wrapper `overflow-y-auto`，SVG height = lanes × LANE_HEIGHT，超长内容时纵向滚动看后续 lane（甘特图 bar 时间口径见 D40）
+- frontend/src/pages/WorkbenchMediaTimeline.tsx（新增）：顶部嵌入 `<video src={videoUrl} controls>`（videoUrl 由 Workbench.tsx 从 `task.normalized_media_url` 透传，不另外 fetch），`onLoadedMetadata` 读视频时长，`onTimeUpdate` 推 `currentMediaTs`；按 stage 分 lane；`media_ts` marker 渲染为三角形 polygon，`media_ts_range` 渲染为半透明 rect；事件读 `useWorkbenchStore.events` + `useMemo(buildMediaTimeline, ...)` 派生；`currentMediaTs` 处画 accent 竖线（pointer-events:none 不挡 marker 点击），±0.5s 邻域内 marker 加 accent 描边；scrub 透明 `<rect>` 放 SVG 子节点首位（z-order 最下），markers 在它上面，markers 自身的 onClick 不被 scrub 拦截
+- frontend/src/components/workbench/CausalChainOverlay.tsx（新增）：3 个公开导出——`useChainResolver()` 解析事件的 immediate parent + 子事件（最多 5 条 short label）；`useChainHighlight()` 计算 hoveredChainRoot 的祖先 + 后代闭包 set；`ChainAnchorPill` 渲染单个 inline anchor（hover 写 hoveredChainRoot，点击调 setSelected 跳转）；docstring 详细说明为什么不画 SVG overlay（决策详见 009 文档）
+- frontend/src/components/workbench/WorkbenchEventStream.tsx: EventRow 从 `<button>` 改为 `<div role="button">`（避免嵌套 button HTML 警告，keyboard accessibility 由外层 ↑↓ 监听承担）；旧 `parentLabel` prop 替换为 `chain: ChainAnchorInfo` + `inChainHighlight: boolean`；卡片底部用 `ChainAnchorPill` 渲染 parent / children 锚点；`inChainHighlight` 时加 ring 高亮；rowRefs 类型从 HTMLButtonElement 改为 HTMLDivElement
+- frontend/src/pages/{WorkbenchGantt,WorkbenchMediaTimeline}.tsx: 接入 `useChainHighlight()`；`onMouseEnter/Leave` 设置 hoveredChainRoot；inChain 时 stroke 切 accent，让中栏 hover 一条 anchor → 甘特图 / 媒体时间线对应横条 / marker 同步亮起
+- frontend/src/pages/Workbench.tsx: 顶栏新增 3 选 1 segmented control（三栏列表 / 壁钟甘特图 / 媒体时间线）；新增 `useViewParam` hook 实现 URL `?view=` ↔ store.view 双向同步（URL 是真理源）；list 模式渲染原 3 栏布局，gantt / media_timeline 模式渲染对应全宽 page 组件；切换不重 fetch（events 数据走同一 store）；`videoUrl={task?.normalized_media_url}` 透传给媒体时间线复用同一份 task status
+
+### 涉及文件
+
+- backend/app/ir/vision_event.py：VisionEvent 双时间轴字段
+- backend/app/llm/client.py：media_ts 自动填充 + ir_value 始终落地
+- backend/app/llm/replay_client.py：ReplayClient + 验证型 FIFO 过滤
+- backend/app/api/events.py：聚合端点删除 — 二次核查后只保留 SSE + history（聚合落前端）
+- backend/app/extract/{captions,stickers,masks,scenes,captions_anim,motion}.py：实体事件 media_ts / media_ts_range
+- scripts/record_golden.py：golden_runs 录制 CLI
+- scripts/check_media_ts.py：媒体时间线字段守卫
+- backend/tests/{integration/test_golden_runs,unit/test_phase2_6}.py：回归 + 单测
+- tests/fixtures/golden_runs/README.md：种子文件规范
+- .github/workflows/ci.yml：media_ts 守卫 + golden-runs job
+- frontend/package.json：visx 5 个 sub-package
+- frontend/src/state/workbench.ts：view / currentMediaTs / hoveredChainRoot
+- frontend/src/lib/aggregateEvents.ts + .test.ts：客户端聚合纯函数 + vitest
+- frontend/src/types/workbench.ts：双时间轴字段镜像
+- frontend/src/pages/{WorkbenchGantt,WorkbenchMediaTimeline}.tsx：两个新视图页
+- frontend/src/components/workbench/CausalChainOverlay.tsx：useChainResolver / useChainHighlight / ChainAnchorPill 三件套
+- frontend/src/components/workbench/WorkbenchEventStream.tsx：div role=button + ChainAnchorPill 接入
+- frontend/src/pages/Workbench.tsx：view 切换 + URL 双向同步
+
+### 关联
+
+-> ISS-017
+-> decisions/009-phase2-6-replay-and-dual-axis.md
+
+---
+
 ## [2026-06-10-1] docs: rewrite 002STRUCTURE.md for external readers + add 006API.md placeholder [ISS-016]
 
 ### 改动

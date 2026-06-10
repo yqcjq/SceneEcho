@@ -643,3 +643,63 @@ PLAN.md 1666-1759 声明阶段 2.5：用户用自然语言或参数面板改 Pro
 
 **解决方案**：
 按外部读者视角重写 `002STRUCTURE.md`，结构由扁平树改为按主目录分组（每段先平白导语再列文件），全面剔除 Phase / D / ISS 等内部进度标签与函数级细节，对内部 IR / 事件类型在首次出现处给出平白解释。新增 `006API.md` 占位文档作为接口侧的"带场景导览"，留出待补充清单（请求示例、错误码、鉴权说明）由后续 issue 渐进填充。
+
+
+---
+
+## [ISS-017] Phase 2.6 — 工作台双时间轴 + 因果链 + ReplayClient 回归基础设施
+
+**状态**：[已解决]
+**优先级**：[P1 严重]
+**类型**：[功能异常]
+**发现日期**：2026-06-10
+**解决日期**：2026-06-10
+
+**现象**：
+PLAN.md 1759-1870 声明阶段 2.6：把工作台从「事件列表 + 回放器」升级为四件事——壁钟甘特图视图（visx）、媒体时间线视图（视频时间轴 + 事件 marker + 播放头联动）、父子事件因果链可视化、events.jsonl 反向作 ReplayClient 回归测试基础设施。
+
+落地前 backend 没有 `/api/tasks/{tid}/gantt` 与 `/media-timeline` 聚合端点、没有 `app/llm/replay_client.py`、没有 `scripts/record_golden.py` / `scripts/check_media_ts.py` / `tests/integration/test_golden_runs.py`、`VisionEvent` IR 没有 `media_ts` / `media_ts_range` 字段；前端没有 `WorkbenchGantt.tsx` / `WorkbenchMediaTimeline.tsx` / `CausalChainOverlay.tsx`，`Workbench.tsx` 没有 view 切换 + URL `?view=` 同步，`workbench.ts` store 没有 `view` / `currentMediaTs` / `hoveredChainRoot` 三个新态。
+
+**后果**：
+不开 Phase 2.6 工作台只能"按到达顺序看一长串卡片"，无法回答"AI 30 秒里到底干了什么"（甘特图）/ "视频第 N 秒 AI 做了什么决策"（媒体时间线）/ "AI 为什么这么决定，前置推理是什么"（因果链）。同时 events.jsonl 这份生产物缺乏机器可验证的回归测试——子能力代码 / IR 字段语义改动后只能靠肉眼 review 工作台，回归发现成本极高。
+
+**初步判断**：
+已确认。Phase 2.6 是项目可解释性的工程化收口阶段，PLAN 1771 表述为「方法论：工作台从'被动观测'升级为'AI 治理基础设施'」。设计沿用 1A / 1B / 2 / 2.5 已有抽象（事件总线 / `_safe` 降级 / events.jsonl 真理源），不引入新的状态层。
+
+**方案讨论**（已确认，详见 `decisions/009-phase2-6-replay-and-dual-axis.md`）：
+- ReplayClient 用 schema 验证过滤 FIFO 队列，不引入 `emitter` 字段（避免 schema 迁移 + 全部 entity event 发射点改造）。
+- `_build_event` 始终写 `ir_value`（即使 ir_target=None），让 ReplayClient 不依赖额外字段就能复原 chat_vision 输出。
+- 中栏因果链走 inline `ChainAnchorPill`（"↳ parent" / "↱ children"）+ `hoveredChainRoot` 跨视图 hover 同步，不在中栏画 SVG `<path>`（卡片纵向滚动列表里跨卡片虚线视觉噪音 > 信号）。SVG dashed 路径只在坐标映射型视图（甘特图 + 媒体时间线）画。
+- 视图模式 3 选 1（list / gantt / media_timeline）而非 PLAN 文字提到的 5 选 1——`?view=ir` / `?view=frame` 在 list 模式下已经由现成 3 栏 UI 承载，独立 view 路径多余。
+- 聚合落客户端（同日二次核查修订 PLAN 1790-1791）：甘特图 + 媒体时间线在 `frontend/src/lib/aggregateEvents.ts` 用纯函数 + `useMemo` 增量计算，不引入 `/api/tasks/{tid}/gantt` 与 `/media-timeline` 后端端点。SSE → store 已经是数据汇聚处，后端再投影一次会让 live 期间每条事件触发一次 fetch（长视频 500 事件即 500 次 HTTP），且 `_RESOURCE_DIRS` 与 `tasks.py` 重复违反 D1。
+
+**关联**：
+-> backend/app/ir/vision_event.py（VisionEvent 增 media_ts / media_ts_range；ir_value 语义放宽）
+-> backend/app/llm/client.py（_media_ts_from_frames helper；_build_event 自动填 media_ts；fallback 路径填 media_ts；ir_value 始终落地）
+-> backend/app/llm/replay_client.py（新增 — ReplayClient + ReplayExhaustedError）
+-> backend/app/api/events.py（二次核查后聚合端点删除 — 仅保留 SSE + history endpoint）
+-> backend/app/extract/{captions,stickers,masks,scenes,captions_anim,motion}.py（实体事件填 media_ts / 跨段事件填 media_ts_range）
+-> scripts/record_golden.py（新增 — typer CLI 录制 golden_runs/{sid}/{events.jsonl, template.json}）
+-> scripts/check_media_ts.py（新增 — CI 守卫：VisionEvent(frame_url=...) 必带 media_ts*）
+-> backend/tests/integration/test_golden_runs.py（新增 — parametrize over golden_runs/ 子目录的 round-trip 回归）
+-> backend/tests/unit/test_phase2_6.py（新增 — _media_ts_from_frames + ReplayClient 单测）
+-> tests/fixtures/golden_runs/README.md（新增 — 录制 / review / commit / 何时重录的规范）
+-> .github/workflows/ci.yml（新增 media_ts 守卫 + golden-runs job）
+-> frontend/package.json（新增 @visx/{group,responsive,scale,text,zoom}）
+-> frontend/src/state/workbench.ts（新增 view / currentMediaTs / hoveredChainRoot 三态 + setter；reset 不重置 view）
+-> frontend/src/lib/aggregateEvents.ts（新增 — 客户端 buildGantt + buildMediaTimeline 纯函数；甘特图时间口径 start = (timestamp - duration) - origin）
+-> frontend/src/lib/aggregateEvents.test.ts（新增 — vitest 覆盖时间口径 + 排序 + 颜色注入）
+-> frontend/src/types/workbench.ts（VisionEvent 镜像增 media_ts / media_ts_range）
+-> frontend/src/pages/WorkbenchGantt.tsx（新增 — visx wall-clock 甘特图 + 因果链 dashed path + zoom/pan + 外层 overflow-y-auto 纵向滚动）
+-> frontend/src/pages/WorkbenchMediaTimeline.tsx（新增 — video-anchored marker timeline + 播放头联动 + scrub + scrub rect 放 SVG 子节点首位避免吞 marker click）
+-> frontend/src/components/workbench/CausalChainOverlay.tsx（新增 — useChainResolver / useChainHighlight / ChainAnchorPill 三件套）
+-> frontend/src/components/workbench/WorkbenchEventStream.tsx（事件卡片用 ChainAnchorPill 替代旧 parentLabel；改为 div role=button 以避免嵌套 button 警告；inChainHighlight 状态接入跨视图 hover sync）
+-> frontend/src/pages/Workbench.tsx（顶栏 view 切换 segmented control；URL `?view=` 双向同步；list / gantt / media_timeline 三种全宽布局；videoUrl 透传给媒体时间线）
+-> docs/future-plans/002-replay-old-recordings.md（新增 — Phase 2.6 之前 jsonl 的迁移占位）
+-> docs/future-plans/003-gantt-virtualization.md（新增 — 甘特图大数据虚拟化占位）
+-> docs/decisions/009-phase2-6-replay-and-dual-axis.md（新增 — 含同日二次核查后追加的决策 4：聚合落客户端）
+-> 004CHANGELOG.md [2026-06-10-2]
+
+**解决方案**：
+按 PLAN 完整落地阶段 2.6：`VisionEvent` 加 `media_ts` / `media_ts_range` 双时间轴字段，`_build_event` 在调用客户端层按 frames 数自动填（1 frame → media_ts，>1 frames → range），实体事件 / 跨段事件由发射方显式填值；`_build_event` 顺手把 ir_value 始终写入解决 ReplayClient 复原难题。新增 `replay_client.py` 用 schema 验证从 events.jsonl 还原 chat_vision 调用（FIFO popleft + ValidationError → skip 实体事件 + ir_value=None+warning → 走 fallback 路径），完全不调网络。新增 `record_golden.py` typer CLI + `tests/integration/test_golden_runs.py` parametrize round-trip + `tests/fixtures/golden_runs/README.md`（录制 / 人工 review / 何时重录规范）；CI 加 `golden-runs` 与 `media_ts` 两步守卫。前端加 visx 五个模块化包；新增 `lib/aggregateEvents.ts` 提供 `buildGantt` / `buildMediaTimeline` 纯函数，配 `useMemo` 增量计算（同日二次核查后从 PLAN 提议的 backend 端点切回客户端聚合，避免 live 期间 N 次重复请求 + `_RESOURCE_DIRS` 跨 router 重复）；新增 `WorkbenchGantt.tsx`（visx ResponsiveContainer + scaleLinear / scaleBand + zoom + 因果链贝塞尔 dashed path + 外层 overflow-y-auto 纵向滚动；bar 时间口径 `start = (timestamp - duration_ms) - origin`、与 perf_counter 一致）/ `WorkbenchMediaTimeline.tsx`（顶部 `<video>` + 双向 sync 播放头 + ±0.5s 邻域高亮 + scrub rect 放 SVG 子节点首位避免吞 marker click + 因果链 dashed path）；`CausalChainOverlay.tsx` 用 `useChainResolver` / `useChainHighlight` / `ChainAnchorPill` 三件套实现"中栏 inline anchor + 跨视图 hover sync"——这是相对 PLAN SVG overlay 方案的第一性原理替代（决策详见 009 文档）；`Workbench.tsx` 顶栏加 3 选 1 segmented control + URL `?view=` 双向同步 + 切换不重 fetch + videoUrl 透传给媒体时间线。决策 / 已知代价 / Followup 详见 `decisions/009-phase2-6-replay-and-dual-axis.md`。
+
