@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { dataUrl, renderDemo, triggerExtract, uploadSample } from "../api/index.js";
 import { ExtractHistoryList } from "../components/ExtractHistoryList.js";
+import { StepCard } from "../components/editor/StepCard.js";
 import { TaskProgress } from "../components/TaskProgress.js";
 
 /**
@@ -10,9 +11,12 @@ import { TaskProgress } from "../components/TaskProgress.js";
  * Add an "提取模板" button → calls POST /samples/{id}/extract → navigates
  * the user to the workbench so they can watch the DAG run end-to-end.
  *
- * Phase 2.5: also accepts ``?sample_id=`` so the workbench breadcrumb's
- * "样例" link can deep-link back into a specific sample's extract
- * history without forcing the user to re-upload (PLAN 1736).
+ * Phase 2.5 二核: pages use ``StepCard`` for visual parity with Editor —
+ * upload / extract / history all three sections become numbered cards
+ * so the user sees the flow as a guided document, not naked text.
+ * Also accepts ``?sample_id=`` so the workbench breadcrumb's "样例" link
+ * can deep-link back into a specific sample's extract history without
+ * forcing the user to re-upload (PLAN 1736).
  */
 export const SampleExtract: React.FC = () => {
   const [search] = useSearchParams();
@@ -69,113 +73,147 @@ export const SampleExtract: React.FC = () => {
   const videoStream = sampleInfo?.streams?.find((s: any) => s.codec_type === "video");
   const durationSec = parseFloat(sampleInfo?.format?.duration ?? "0");
 
+  const step1Status = sampleId ? "done" : "active";
+  const step2Status = !sampleId ? "pending" : extractTaskId ? "done" : "active";
+
   return (
-    <div style={{ maxWidth: 720, margin: "40px auto", fontFamily: "system-ui, sans-serif" }}>
-      <h1>SceneEcho · 阶段 1B 模板提取</h1>
-      <p style={{ color: "#666" }}>
-        上传一段 5–20s 样例 → 「提取模板」启动 Phase 1B pipeline → 工作台实时观察全链路 AI 决策 → 完成后入 KB。
-      </p>
+    <div className="mx-auto max-w-[1180px] px-6 py-12">
+      <header className="mb-8">
+        <h1 className="font-serif text-2xl">SceneEcho · 阶段 1B 模板提取</h1>
+        <p className="text-secondary text-sm mt-1">
+          上传 5–20s 样例 → 「提取模板」启动 Phase 1B pipeline → 工作台实时观察全链路 AI 决策 → 完成后入 KB。
+        </p>
+      </header>
 
-      <div style={{ marginTop: 16 }}>
-        <input type="file" accept="video/mp4,video/quicktime,video/webm" onChange={onUpload} disabled={busy} />
-        {busy && <span style={{ marginLeft: 12 }}>上传中…</span>}
-      </div>
-
-      {sampleId && (
-        <div style={{ marginTop: 16 }}>
-          <div>样例 ID：<code>{sampleId}</code></div>
+      <div className="space-y-6">
+        <StepCard
+          step={1}
+          title="上传样例"
+          status={step1Status}
+          meta={sampleId ? <code className="font-mono">{sampleId}</code> : null}
+        >
+          <input
+            type="file"
+            accept="video/mp4,video/quicktime,video/webm"
+            onChange={onUpload}
+            disabled={busy}
+          />
+          {busy && <span className="ml-3 text-secondary text-sm">上传中…</span>}
           {sampleInfo && (
-            <div style={{ marginTop: 8, fontSize: 13, color: "#555" }}>
+            <div className="mt-3 text-sm text-secondary">
               时长 {durationSec.toFixed(1)}s
               {videoStream
                 ? ` · ${videoStream.width}×${videoStream.height}@${videoStream.r_frame_rate}`
                 : ""}
             </div>
           )}
-          <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={onExtract} disabled={!!extractTaskId}>
-              提取模板（Phase 1B）
-            </button>
-            <button onClick={onRender} disabled={!!renderTaskId && !outputPath}>
-              渲染 demo
-            </button>
-            {extractTaskId && (
-              <Link
-                to={`/workbench/${extractTaskId}`}
-                style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: 4 }}
+        </StepCard>
+
+        {sampleId && (
+          <StepCard
+            step={2}
+            title="提取模板"
+            status={step2Status}
+            meta={
+              extractTaskId ? (
+                <Link
+                  to={`/workbench/${extractTaskId}`}
+                  className="text-accent-primary hover:underline"
+                >
+                  AI 工作台 #{extractTaskId.slice(0, 8)} →
+                </Link>
+              ) : null
+            }
+          >
+            <p className="text-secondary text-sm mb-3">
+              Phase 1B pipeline 跑 7+ 个视觉子能力 → 抽取骨架与样式 → 入模板库。
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={onExtract}
+                disabled={!!extractTaskId}
+                className="rounded-md bg-accent-primary px-3 py-1.5 text-sm text-inverted hover:bg-accent-hover disabled:opacity-50"
               >
-                打开 AI 工作台（提取进行中…）
-              </Link>
-            )}
-            <Link
-              to="/templates"
-              style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: 4 }}
-            >
-              模板库
-            </Link>
-            {import.meta.env.DEV && (
-              <Link
-                to="/lab"
-                style={{ padding: "4px 12px", border: "1px solid #ccc", borderRadius: 4 }}
+                提取模板（Phase 1B）
+              </button>
+              <button
+                type="button"
+                onClick={onRender}
+                disabled={!!renderTaskId && !outputPath}
+                className="rounded-md border border-border px-3 py-1.5 text-sm hover:border-accent-primary"
               >
-                打开 SubcapabilityLab
+                渲染 demo
+              </button>
+              <Link
+                to="/templates"
+                className="rounded-md border border-border px-3 py-1.5 text-sm hover:border-accent-primary"
+              >
+                模板库
               </Link>
-            )}
-          </div>
-          {extractTaskId && (
-            <div
-              style={{
-                marginTop: 12,
-                padding: 12,
-                background: "#fff7e8",
-                border: "1px solid #f1cf85",
-                borderRadius: 4,
-                fontSize: 13,
-              }}
-            >
-              正在提取模板，<Link to={`/workbench/${extractTaskId}`}>打开 AI 工作台</Link>{" "}
-              看 VLM/CV 全链路。完成后会进入模板库。
+              {import.meta.env.DEV && (
+                <Link
+                  to="/lab"
+                  className="rounded-md border border-border px-3 py-1.5 text-sm hover:border-accent-primary"
+                >
+                  SubcapabilityLab
+                </Link>
+              )}
             </div>
-          )}
-        </div>
-      )}
+            {extractTaskId && (
+              <div className="mt-4 rounded-md border border-warning bg-subtle px-3 py-2 text-sm text-primary">
+                正在提取模板，<Link to={`/workbench/${extractTaskId}`} className="text-accent-primary hover:underline">打开 AI 工作台</Link>{" "}
+                看 VLM/CV 全链路。完成后会进入模板库。
+              </div>
+            )}
+            {renderTaskId && (
+              <div className="mt-4">
+                <TaskProgress
+                  taskId={renderTaskId}
+                  onComplete={(t) => {
+                    if (t.status === "completed" && t.result?.output_path) {
+                      setOutputPath(t.result.output_path);
+                    } else if (t.status === "failed") {
+                      setError(t.error ?? "render failed");
+                    }
+                  }}
+                />
+              </div>
+            )}
+            {outputPath && (
+              <div className="mt-4">
+                <div className="text-sm">输出：<code className="text-secondary">{outputPath}</code></div>
+                <video src={dataUrl(outputPath)} controls style={{ width: "100%", maxWidth: 480, marginTop: 8, borderRadius: 4 }} />
+              </div>
+            )}
+          </StepCard>
+        )}
 
-      {renderTaskId && (
-        <TaskProgress
-          taskId={renderTaskId}
-          onComplete={(t) => {
-            if (t.status === "completed" && t.result?.output_path) {
-              setOutputPath(t.result.output_path);
-            } else if (t.status === "failed") {
-              setError(t.error ?? "render failed");
-            }
-          }}
-        />
-      )}
+        {sampleId && (
+          <StepCard
+            step={3}
+            title="提取历史"
+            status="pending"
+            meta={<span className="text-tertiary">点击行可重开工作台</span>}
+          >
+            <ExtractHistoryList
+              resourceKind="sample"
+              resourceId={sampleId}
+              emptyHint={
+                <span className="text-tertiary text-sm">
+                  尚无提取任务。点击「提取模板」开始。
+                </span>
+              }
+            />
+          </StepCard>
+        )}
 
-      {outputPath && (
-        <div style={{ marginTop: 24 }}>
-          <div>输出：<code>{outputPath}</code></div>
-          <video src={dataUrl(outputPath)} controls style={{ width: "100%", marginTop: 8 }} />
-        </div>
-      )}
-
-      {sampleId && (
-        <section style={{ marginTop: 24 }}>
-          <h3 style={{ fontSize: 14, marginBottom: 8 }}>本样例提取历史</h3>
-          <ExtractHistoryList
-            resourceKind="sample"
-            resourceId={sampleId}
-            emptyHint={
-              <span style={{ color: "#999", fontSize: 13 }}>
-                尚无提取任务。点击「提取模板」开始。
-              </span>
-            }
-          />
-        </section>
-      )}
-
-      {error && <div style={{ color: "#c33", marginTop: 16 }}>错误：{error}</div>}
+        {error && (
+          <div className="rounded-md border border-error bg-surface px-4 py-3 text-sm text-error">
+            错误：{error}
+          </div>
+        )}
+      </div>
     </div>
   );
 };

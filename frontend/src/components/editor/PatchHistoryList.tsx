@@ -80,7 +80,7 @@ export const PatchHistoryList: React.FC<Props> = ({
   const reversed = [...items].reverse();
 
   return (
-    <aside className="w-80 shrink-0 border-l border-border bg-surface px-4 py-4 overflow-y-auto">
+    <aside className="h-full overflow-y-auto border-l border-border bg-surface px-4 py-4">
       <div className="flex items-center justify-between">
         <h3 className="font-serif text-base text-primary">编辑历史</h3>
         <button

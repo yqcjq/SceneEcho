@@ -70,7 +70,7 @@ export const ParamPanel: React.FC<Props> = ({ projectId, ir, onApplied }) => {
   );
 
   return (
-    <aside className="w-72 shrink-0 border-r border-border bg-surface px-4 py-4 overflow-y-auto">
+    <aside className="border-r border-border bg-surface px-4 py-4">
       <h3 className="font-serif text-base text-primary">参数面板</h3>
       <p className="mt-1 text-tertiary text-xs">
         每次改动都通过同一条 Patch 路径写入 ProjectIR；与 NL 编辑等价（D11）。

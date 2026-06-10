@@ -50,6 +50,67 @@ def _load_project(project_id: str) -> ProjectIR | None:
 # ---------------------------------------------------------------------------
 
 
+@router.get("/projects")
+def list_projects() -> dict:
+    """List every project on disk, newest first.
+
+    Powers the Editor's "历史项目" entry strip. The filesystem is already
+    the source of truth for project state (D2 — paths relative to
+    DATA_ROOT); we scan ``projects/`` rather than introduce a parallel
+    index table. Volumes are dozens of dirs at most — directory listing
+    is fast enough and never falls out of sync with reality.
+
+    Each row reports:
+    - ``project_id``    — directory name (``prj_*`` or ``demo_*``)
+    - ``has_ir``        — True iff ``project.json`` exists (= apply ran)
+    - ``template_id``   — first section's template_id if has_ir, else None
+    - ``updated_at``    — directory mtime (epoch seconds) for sort order
+
+    Rows are returned in descending ``updated_at`` order so the most
+    recently touched project shows up first in the strip.
+    """
+    settings = get_settings()
+    root = settings.data_root / "projects"
+    if not root.exists():
+        return {"projects": []}
+    out: list[dict] = []
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        project_id = entry.name
+        project_json = entry / "project.json"
+        has_ir = project_json.exists()
+        template_id: str | None = None
+        if has_ir:
+            # Read just enough to identify which template was applied.
+            # Full IR load happens lazily on /projects/{id}.
+            try:
+                import json as _json
+
+                with project_json.open("r", encoding="utf-8") as fh:
+                    raw = _json.load(fh)
+                sections = raw.get("sections") or []
+                if sections:
+                    template_id = sections[0].get("template_id") or None
+            except Exception:  # noqa: BLE001
+                # Corrupt project.json shouldn't break the listing.
+                pass
+        try:
+            mtime = entry.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        out.append(
+            {
+                "project_id": project_id,
+                "has_ir": has_ir,
+                "template_id": template_id,
+                "updated_at": mtime,
+            }
+        )
+    out.sort(key=lambda r: r["updated_at"], reverse=True)
+    return {"projects": out}
+
+
 @router.post("/projects")
 async def upload_project(file: UploadFile) -> dict:
     """Upload + normalize a user material clip.

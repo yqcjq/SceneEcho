@@ -160,6 +160,18 @@ export async function renderProject(
   return data;
 }
 
+export interface ProjectSummary {
+  project_id: string;
+  has_ir: boolean;
+  template_id: string | null;
+  updated_at: number;
+}
+
+export async function listProjects(): Promise<{ projects: ProjectSummary[] }> {
+  const { data } = await api.get<{ projects: ProjectSummary[] }>("/projects");
+  return data;
+}
+
 // ---------------------------------------------------------------------------
 // Phase 2.5 · NL / panel edits + history + replay
 // ---------------------------------------------------------------------------
