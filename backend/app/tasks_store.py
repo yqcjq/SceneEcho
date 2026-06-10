@@ -45,6 +45,17 @@ _PHASE_0_5_COLUMNS: tuple[tuple[str, str], ...] = (
     ("events_jsonl_path", "ALTER TABLE tasks ADD COLUMN events_jsonl_path TEXT"),
 )
 
+# Phase 2.5: composite index for `list_by_resource` — the "extract history"
+# / "edit history" lookups page resources by (kind, id) and want the rows
+# back ordered by created_at DESC. SQLite ignores ASC/DESC inside CREATE
+# INDEX for non-aggregate scans but the column list still speeds the
+# WHERE+ORDER BY combo. Idempotent (IF NOT EXISTS) so the lifespan call
+# at startup is safe even on an already-migrated DB.
+_PHASE_2_5_INDEXES: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_tasks_resource "
+    "ON tasks (resource_kind, resource_id, created_at DESC)",
+)
+
 
 def _db_path() -> Path:
     return get_settings().data_root / "kb.sqlite"
@@ -71,6 +82,8 @@ def init_db() -> None:
         for col, ddl in _PHASE_0_5_COLUMNS:
             if col not in existing:
                 con.execute(ddl)
+        for ddl in _PHASE_2_5_INDEXES:
+            con.execute(ddl)
 
 
 def create_task(
@@ -150,3 +163,29 @@ def get_task(task_id: str) -> dict | None:
             d.pop("result_json", None)
             d["result"] = None
         return d
+
+
+def list_by_resource(resource_kind: str, resource_id: str) -> list[dict]:
+    """Return all tasks attached to a given resource, newest first.
+
+    Powers the Phase 2.5 "提取历史" + "编辑历史" entries: sample / project
+    detail pages list their prior extract / edit tasks so the user can
+    revisit a workbench from days ago without having to remember the
+    task_id. ``result_json`` is intentionally NOT decoded here — the list
+    view only needs lightweight metadata (kind / status / stage /
+    timestamps). Callers wanting the full result should fetch the
+    specific task via ``get_task``.
+
+    The composite index ``idx_tasks_resource`` keeps this O(log n + k)
+    even when the tasks table grows large; without it a project with
+    hundreds of edits would do a full scan on every detail-page render.
+    """
+    with _conn() as con:
+        rows = con.execute(
+            "SELECT id, kind, status, progress, stage, resource_kind, resource_id, "
+            "events_jsonl_path, error, created_at, updated_at "
+            "FROM tasks WHERE resource_kind = ? AND resource_id = ? "
+            "ORDER BY created_at DESC",
+            (resource_kind, resource_id),
+        ).fetchall()
+        return [dict(r) for r in rows]

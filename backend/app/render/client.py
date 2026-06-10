@@ -22,6 +22,26 @@ async def render_project(ir: ProjectIR, task_id: str | None = None) -> dict:
         return resp.json()
 
 
+async def cancel_render(task_id: str) -> bool:
+    """Best-effort cancel via the renderer's DELETE /render/{id}.
+
+    Used by the Phase 2.5 render-throttle: when a project triggers a new
+    render while the previous one is still pending/in-flight, supersede
+    the old one. Returns True if the renderer acknowledged (200), False
+    otherwise — callers don't block on cancellation guarantees, just on
+    not piling up redundant queued jobs.
+    """
+    settings = get_settings()
+    url = f"{settings.renderer_url.rstrip('/')}/render/{task_id}"
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.delete(url)
+            return r.status_code == 200
+    except Exception as e:  # noqa: BLE001
+        log.warning("renderer_cancel_failed", task_id=task_id, error=str(e))
+        return False
+
+
 async def renderer_health() -> bool:
     settings = get_settings()
     try:

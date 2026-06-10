@@ -9,7 +9,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import tasks_store
-from app.api import dev_workbench, events, lab, projects, samples, tasks, templates
+from app.api import (
+    dev_workbench,
+    edit,
+    events,
+    lab,
+    projects,
+    replay,
+    samples,
+    tasks,
+    templates,
+)
 from app.config import get_settings
 from app.event_bus import get_event_bus
 from app.kb import store as kb_store
@@ -75,6 +85,8 @@ app.include_router(projects.router, prefix="/api", tags=["projects"])
 app.include_router(tasks.router, prefix="/api", tags=["tasks"])
 app.include_router(events.router, prefix="/api", tags=["events"])
 app.include_router(templates.router, prefix="/api", tags=["templates"])
+app.include_router(edit.router, prefix="/api", tags=["edit"])
+app.include_router(replay.router, prefix="/api", tags=["replay"])
 
 if settings.enable_dev_mock:
     app.include_router(dev_workbench.router, prefix="/api", tags=["dev"])

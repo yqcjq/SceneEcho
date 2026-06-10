@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   applyTemplate,
   dataUrl,
+  type EditResponse,
   getPreviewProps,
   getProject,
   PreviewProps,
@@ -12,6 +13,9 @@ import {
   renderProject,
   uploadProject,
 } from "../api/index.js";
+import { NLBar } from "../components/editor/NLBar.js";
+import { ParamPanel } from "../components/editor/ParamPanel.js";
+import { PatchHistoryList } from "../components/editor/PatchHistoryList.js";
 import { RemotionPlayer } from "../components/RemotionPlayer.js";
 import { TaskProgress } from "../components/TaskProgress.js";
 
@@ -43,6 +47,30 @@ export const Editor: React.FC = () => {
   const [preview, setPreview] = useState<PreviewProps | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Phase 2.5: tick whenever an edit / undo lands so the right pane reloads.
+  const [editTick, setEditTick] = useState(0);
+
+  const refreshPreview = React.useCallback(async (pid: string) => {
+    try {
+      const next = await getPreviewProps(pid);
+      setPreview(next);
+    } catch {
+      /* ignore — apply not run yet */
+    }
+  }, []);
+
+  const handleEditApplied = React.useCallback(
+    (r: EditResponse) => {
+      if (!projectId) return;
+      // Background render is already kicked off via render_task_id; the
+      // editor just needs the new preview-props so the player updates.
+      setRenderTaskId(r.render_task_id);
+      setRenderedPath(null);
+      setEditTick((n) => n + 1);
+      void refreshPreview(projectId);
+    },
+    [projectId, refreshPreview],
+  );
 
   useEffect(() => {
     if (!projectId) return;
@@ -235,7 +263,12 @@ export const Editor: React.FC = () => {
       )}
 
       {preview && (
-        <section className="mt-8 grid grid-cols-1 gap-6 md:grid-cols-[auto_1fr]">
+        <section className="mt-8 grid grid-cols-1 gap-4 md:grid-cols-[18rem_1fr_20rem]">
+          <ParamPanel
+            projectId={projectId!}
+            ir={project?.ir}
+            onApplied={handleEditApplied}
+          />
           <div>
             <label className="text-sm font-medium block mb-2">4. 实时预览</label>
             <RemotionPlayer
@@ -246,14 +279,14 @@ export const Editor: React.FC = () => {
               bgmUrl={preview.bgm_url}
               displayWidth={360}
             />
-          </div>
-          <div>
-            <label className="text-sm font-medium">ProjectIR 概览</label>
-            <ul className="mt-2 text-sm text-secondary space-y-1">
+            <ul className="mt-4 text-sm text-secondary space-y-1">
               <li>段数：{preview.sections[0]?.segments?.length ?? 0}</li>
               <li>字幕：{preview.captions?.length ?? 0} 条</li>
               <li>BGM：{preview.bgm_url ? "✅" : "—"}</li>
-              <li>canvas: {preview.canvas.width}×{preview.canvas.height}@{preview.canvas.fps}</li>
+              <li>
+                canvas: {preview.canvas.width}×{preview.canvas.height}@
+                {preview.canvas.fps}
+              </li>
             </ul>
             <div className="mt-4">
               <button
@@ -265,7 +298,20 @@ export const Editor: React.FC = () => {
                 {renderTaskId && !renderedPath ? "渲染中…" : "渲染出片"}
               </button>
             </div>
+            <div className="mt-4">
+              <NLBar
+                projectId={projectId!}
+                onSent={handleEditApplied}
+                disabled={!project?.ir}
+              />
+            </div>
           </div>
+          <PatchHistoryList
+            projectId={projectId!}
+            refreshKey={editTick}
+            onUndone={handleEditApplied}
+            applyTaskId={applyTaskId}
+          />
         </section>
       )}
 

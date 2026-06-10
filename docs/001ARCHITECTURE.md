@@ -77,6 +77,7 @@ IR（pydantic 模型）位于 `backend/app/ir/`，作为「人 / AI / 渲染器�
 - `extract/*` 子能力模块只 import `app/{ir,event_bus,llm,extract,logging,config,render}`；不反向依赖 `api/` 或 `understand/`，调度 / 编排在 `api/lab.py`（dev）以及 `extract/pipeline.py`（1B 完整 DAG）里。
 - `kb/*` 只 import `app/{ir,event_bus,llm,extract,frame_sampler,config,logging}`；`api/templates.py` 调 `kb.store`，`extract/pipeline.py` 调 `kb.store` 落库。`kb` 不反向依赖 `api/`。
 - `apply/*` 只 import `app/{ir,event_bus,llm,kb,understand,render,config,logging,tasks_store}`；不反向依赖 `api/` 或 `extract/`。编排在 `apply/pipeline.py`，HTTP 入口在 `api/projects.py`。Phase 2 ★MVP 闭环全部走这条链。
+- `agent/*` 只 import `app/{ir,event_bus,llm,tasks_store,config,logging,kb}`；不反向依赖 `api/` / `apply/` / `extract/`。`agent/nl_edit.py` 是 Phase 2.5 Patch 调度核心，被 `api/edit.py` 调用。`render/throttle.py` 由 `api/edit.py` 与 `api/projects.py` 直接 import 用于 BackgroundTask（不属于 agent/，因为渲染节流是 render 模块自身的能力扩展，不是 LLM 决策）。
 - `understand/vision.py` 是语义层，依赖 `extract/captions.py` 的 `CaptionEvent` dataclass + `llm/client.py` 的 `chat_vision`；caption_function 之类的"phase2 分类"由调用方在拿到 `extract` 输出后再调，并通过 `parent_event_id` 把事件挂到对应的 caption 实体事件下。
 - 重 ML 依赖（PySceneDetect / opencv-python-headless / librosa / Demucs / torch）放在 `pip install -e ".[extract]"` 可选 extras；每个 `extract/*` 模块在用前 `try: import ... except ImportError`，缺包时返回 fallback 形状 + 发 `severity="warning"` VisionEvent，不阻塞 pipeline。
 
@@ -277,6 +278,76 @@ python -m app.cli ingest-sample /local/path.mp4
 浏览器 TaskProgress 看到 completed → 渲染 mp4 下载链接
 ```
 
+**链路 G：Phase 2.5 NL 编辑 / 参数面板编辑 → ProjectIR Patch → 自动重渲染**
+```
+浏览器 /editor/{pid}
+  → 用户在右下 NLBar 输入 "字幕改黄色描边黑色" 回车
+  → POST /api/projects/{pid}/edit body={instruction}
+     → tasks_store.create_task("nl_edit", resource_kind="project", resource_id=pid)
+        路径方案 B → events_jsonl_path = projects/{pid}/pipeline/events_{task_id}.jsonl
+     → load project.json → ProjectIR
+     → 拉当前模板 + KB 目录 (kb.store.get_template + list_templates) 喂给 prompt
+     → agent.nl_edit.nl_edit(ir, instruction, task_id, current_template, catalog):
+        → llm.client.chat_text(2_5_nl_edit prompt + ProjectIR 摘要) → _NLEditResult{patches[], reasoning}
+        → 每条 patch 发一条 stage="2.5.nl_edit" VisionEvent (ir_value=patch.model_dump)
+        → 未知 op / 空 patches → 发 stage="2.5.nl_edit.unknown_op" 或 .no_patch warning 事件
+     → push_snapshot(pid, ir) 写 projects/{pid}/snapshots/v{ir.version}.json
+     → apply_patches(ir, patches) → pure-function 走 _OP_HANDLERS 调度 → ProjectIR (version+1)
+        PatchApplyError → HTTP 400 + task 标 failed
+     → write project.json
+     → 发 stage="2.5.nl_edit.apply_done" VisionEvent
+     → background_tasks.add_task(render.throttle.trigger_render_supersede, pid, render_task_id, ir):
+        → 锁 _locks[pid]
+           if _in_flight[pid] 已有 prior_task_id → POST renderer DELETE /render/{prior}
+                                                  → tasks_store.update_task(prior, status="superseded")
+           _in_flight[pid] = render_task_id
+        → 锁外 await render.client.render_project(ir, task_id=render_task_id):
+           renderer POST /render：
+             RenderState.cancelled? → pre-start skip + 进度报 "cancelled"
+             否则正常 render → 完成时 RenderState.cancelled? → 报 "cancelled" 否则 "completed"
+        → 锁内 _in_flight[pid] = None
+     → HTTP 200 返回 {task_id, patches_applied, ir, render_task_id, workbench_url}
+  ← Editor 收到 → 更新 preview-props + editTick++ 让 PatchHistoryList 重读
+浏览器 PatchHistoryList 调 GET /api/projects/{pid}/history:
+  → agent.nl_edit.list_patch_history(pid):
+     → tasks_store.list_by_resource("project", pid) WHERE kind IN nl_edit/panel_edit/undo
+     → 每 task event_bus.replay 过滤 stage="2.5.nl_edit" 抽 ir_value 即 Patch
+  ← Editor 用户点 "↺ 撤销 (N)"：
+  → POST /api/projects/{pid}/undo
+     → undo(pid) → 读 latest snapshots/v{N}.json 写回 project.json + 删快照
+     → 创建 kind="undo" task → 发 stage="2.5.nl_edit" 撤销事件
+     → trigger_render_supersede 与上面同路径触发重渲染
+```
+
+**链路 H：Phase 2.5 工作台事件回放器 → Visualize 页录屏导出**
+```
+浏览器 /projects/{pid}/replay 或 /samples/{sid}/replay
+  → GET /api/projects/{pid}/replay/events?task_id=<可选>
+     → _resolve_task("project", pid, task_id?) 默认取该资源最新 task
+     → event_bus.replay(target_task) 读 jsonl 全量事件
+  ← 返回 {task_id, task: {...}, events: [...]}
+  Visualize.useEffect → reset(task_id) → cursor=0
+浏览器点 "▶ 播放" → 每 ~600/speed ms 取 events[cursor]
+  → useWorkbenchStore.appendEvent → 与实时 Workbench 走完全相同的 IR 写入逻辑
+浏览器拖拽 timeline → scrubTo(newCursor):
+  → reset(task_id) + 重放 events[0..newCursor]
+浏览器点 "● 导出录屏":
+  → navigator.mediaDevices.getDisplayMedia 让用户选 tab
+  → MediaRecorder(stream, "video/webm;codecs=vp9").start
+  → 60s 后自动 stop → URL.createObjectURL(blob) + a.download="workbench_replay_{ts}.webm"
+  Safari 不支持 webm → 主动 alert 提示用户改用 Chrome/Edge/Firefox
+  → snapshot 预览：POST /api/projects/{pid}/replay/snapshot {task_id, sequence}
+     → _snapshot_payload 复用 _lodash_set 重放 events[0..sequence] 的 ir_target → 返回 snapshot dict
+浏览器 ExtractHistoryList / WorkbenchBreadcrumb 同源：
+  → GET /api/samples/{sid}/tasks 或 /api/projects/{pid}/tasks
+     → tasks_store.list_by_resource("sample"|"project", id)（按 idx_tasks_resource 索引 + created_at DESC）
+  ← 列表点 task → navigate("/workbench/" + tid)
+浏览器进入 /workbench/{tid} → 顶栏 WorkbenchBreadcrumb:
+  → pollTask(tid) → resource_kind + resource_id
+  → 渲染「样例|项目 > {name} > {kind 中文} #{tid 前 8}」
+  → resource 拉失败 → fallback "任务 #{tid 前 8}"
+```
+
 ---
 
 ## 6. 关键约定
@@ -315,3 +386,6 @@ python -m app.cli ingest-sample /local/path.mp4
 - **D32 sticker 时间在 IR 层间换坐标系**：Phase1AReport.stickers[i].sticker.start/end = 样例视频绝对秒；TemplateIR.skeleton[N].style.stickers[i].start/end = **slot-local 归一化 [0,1]**（由 `extract/skeleton.py:_stickers_in` 写入）；ProjectIR.sections[\*].segments[\*].applied_style.stickers[i].start/end = **segment-local 秒**（由 `apply/style.style_for_segment(slot, output_span)` 在装配 PlacedSegment.applied_style 时把 [0,1] × output_span 算出）。renderer 与 frontend 的 RemotionPlayer 一律按"segment-local 秒"读，自己再投影到 timeline-global 秒做命中检测。
 - **D33 apply 流水线含 bgm_mix stage**：style 选完 `bgm_track` 后 `apply/pipeline.py` 自动跑 stage `bgm_mix`（`_safe` 包裹）—— `ffmpeg.extract_audio` 取出用户素材的人声 → `ffmpeg.mix_bgm`（sidechaincompress + voice 触发的 ducking）→ 写 `projects/{id}/bgm_ducked.aac` → `ProjectIR.bgm_track` 更新为这条 ducked 路径。renderer 的 `<Audio src={bgmUrl}/>` 直接播 ducked 文件，与 user material 视频本身的人声轨叠加；不再有"渲染端听到原始 BGM 盖人声"。失败降级为保留原 bgm_track + warning 事件。
 - **D34 normalize 有两套 letterbox**：`render/ffmpeg.py:normalize(pad_mode="black"|"blur")`。`black` 用于 sample 上传（PLAN 1A 识别期不能用模糊背景污染原视频）；`blur` 用于 Phase 2 用户素材上传（`api/projects.py:upload_project`），符合 PLAN 1657 "letterbox 居中、背景模糊"——`split=2[bg][fg]; [bg]scale=increase,crop,boxblur=20; [fg]scale=decrease; [bg][fg]overlay`。两路径共享 `force_original_aspect_ratio=decrease` 的几何不变量，避免拉伸。
+- **D35 Phase 2.5 编辑链路统一走 Patch + Snapshot 栈**：`agent/nl_edit.py` 暴露 `nl_edit / panel_to_patches / apply_patches / push_snapshot / undo / list_patch_history` 六个函数；NL 与参数面板编辑都经 `Patch` op 枚举（`set_caption_style` / `set_visual_style` / `adjust_rhythm` / `set_emphasis` / `swap_template` / `delete_segment` / `set_canvas` / `set_bgm`）翻译。`apply_patches` 是 pure-function 调度器：`ProjectIR × list[Patch] → ProjectIR`，end 处 `model_validate` 兜底；**不写盘**。落盘由 `api/edit.py` 在 push_snapshot 之后做。Undo 用快照栈而非 per-op inverse——`push_snapshot` 把 apply 前的 `project.json` 拷贝到 `projects/{id}/snapshots/v{ir.version}.json`，`undo()` 弹栈写回 + 删快照。新增 PatchOp 不需要触动 undo（与 ISS-015 决策 008 对应）。
+- **D36 Patch 真理源 = events.jsonl**：Phase 2.5 NL / panel 编辑每生成一条 Patch 都发一条 `stage="2.5.nl_edit"` VisionEvent，`ir_value` 字段挂 Patch 的 `model_dump`；`GET /projects/{id}/history` 查 `tasks WHERE kind IN ('nl_edit','panel_edit','undo') AND resource_id={id}` 再聚合各 task events.jsonl 中 `stage="2.5.nl_edit"` 的事件即可还原 Patch 流。**绝不引入 `patch_history.jsonl`**——避免和 events.jsonl 两份真理源同步成本（与 ISS-015 决策 008 对应）。工作台事件否决（`POST /workbench/{tid}/reject-event/{eid}`）发 `stage="2.5.veto"` 事件而非 Patch（不修改原 events.jsonl 数据）。
+- **D37 项目级渲染节流走 supersede dict**：Phase 2.5 NL/panel 编辑频繁触发重渲染，`backend/app/render/throttle.py::trigger_render_supersede(project_id, task_id, ir)` 用 `defaultdict(asyncio.Lock)` + `dict[project_id → in_flight_task_id]` 串行化"取出旧 + 设置新"；旧任务存在时调 `cancel_render` → renderer `DELETE /render/{tid}`（renderer 端 `queue.ts` 的 RenderState 注册表：pending 任务的 wrapper 顶部 `state.cancelled` 检查直接 skip，running 任务的 onProgress 在完成时报 `cancelled`）。**不引入独立 `agent/render_queue.py` 模块**——~30 行 dict + lock 已满足 supersede 需求；当未来真的需要队列优先级 / 多 worker / 跨项目限速时再单独抽（与 ISS-015 决策 008 对应）。

@@ -6,6 +6,7 @@ import { Editor } from "./pages/Editor.js";
 import { SampleExtract } from "./pages/SampleExtract.js";
 import { SubcapabilityLab } from "./pages/SubcapabilityLab.js";
 import { TemplateLibrary } from "./pages/TemplateLibrary.js";
+import { Visualize } from "./pages/Visualize.js";
 import { Workbench } from "./pages/Workbench.js";
 import { WorkbenchLauncher } from "./pages/WorkbenchLauncher.js";
 
@@ -93,6 +94,22 @@ ReactDOM.createRoot(root).render(
           element={
             <Shell>
               <Workbench />
+            </Shell>
+          }
+        />
+        <Route
+          path="/projects/:projectId/replay"
+          element={
+            <Shell>
+              <Visualize />
+            </Shell>
+          }
+        />
+        <Route
+          path="/samples/:sampleId/replay"
+          element={
+            <Shell>
+              <Visualize />
             </Shell>
           }
         />

@@ -10,6 +10,7 @@ import {
   type TemplateDetail,
   type TemplateSummary,
 } from "../api/index.js";
+import { ExtractHistoryList } from "../components/ExtractHistoryList.js";
 
 /**
  * Phase 1B · KB browse page (PLAN 1553).
@@ -218,6 +219,20 @@ const TemplateDetailView: React.FC<{ id: string }> = ({ id }) => {
       <pre className="mt-3 max-h-[480px] overflow-auto border border-border bg-subtle p-3 text-xs font-mono">
         {JSON.stringify(ir, null, 2)}
       </pre>
+
+      {t.source_sample && (
+        <section className="mt-8">
+          <h2 className="font-serif text-xl">本样例其它提取记录</h2>
+          <p className="mt-1 text-secondary text-sm">
+            点击列表条目跳转到对应的 AI 工作台事件回放。
+          </p>
+          <ExtractHistoryList
+            resourceKind="sample"
+            resourceId={t.source_sample}
+            className="mt-3"
+          />
+        </section>
+      )}
     </div>
   );
 };

@@ -49,7 +49,8 @@ SceneEcho/
 │  │  ├─ samples/{id}/                      # 样例：source/normalized/thumbnail/extracted
 │  │  │  └─ extracted/events_{task_id}.jsonl  # AI 决策事件流（路径方案 B）
 │  │  ├─ projects/{id}/                     # 项目：user_material/normalized/project.json/outputs
-│  │  │  └─ pipeline/events_{task_id}.jsonl   # 项目应用事件流
+│  │  │  ├─ pipeline/events_{task_id}.jsonl   # 项目应用 / 编辑事件流
+│  │  │  └─ snapshots/v{N}.json              # Phase 2.5 编辑前 ProjectIR 快照栈（D35 undo 用）
 │  │  ├─ system/                            # 字体 / BGM 池 / 模型缓存 / 贴纸参考
 │  │  │  └─ dev_events/                     # 开发态事件流兜底（template/未知 kind）
 │  │  ├─ aigc/                              # AIGC 缓存（贴纸 / B-roll）
@@ -61,15 +62,17 @@ SceneEcho/
 │  │  ├─ config.py                          # pydantic-settings 读 .env，含 model_provider / dual_check_stages / enable_dev_mock
 │  │  ├─ logging.py                         # structlog JSON 配置 + task_id contextvar 绑定
 │  │  ├─ cli.py                             # typer：ingest-sample / ingest-project（dev 闸门）
-│  │  ├─ tasks_store.py                     # SQLite tasks 表 CRUD（WAL）+ Phase 0.5 idempotent ALTER
+│  │  ├─ tasks_store.py                     # SQLite tasks 表 CRUD（WAL）+ Phase 0.5 idempotent ALTER + Phase 2.5 list_by_resource + idx_tasks_resource 索引
 │  │  ├─ event_bus.py                       # 进程内事件总线：subscribe_with_snapshot / await put 反压 / jsonl 持久化 / jsonl tail seq 真理源 / lookup callback 注入
 │  │  ├─ api/
 │  │  │  ├─ __init__.py
-│  │  │  ├─ samples.py                      # POST /samples 上传归一化；POST /samples/{id}/render-demo；POST /samples/{id}/extract (1B)
-│  │  │  ├─ projects.py                     # POST /projects 上传；/recommend-templates / /apply / GET /projects/{id} / /preview-props / /render / /mix-bgm (Phase 2)
+│  │  │  ├─ samples.py                      # POST /samples 上传归一化；POST /samples/{id}/render-demo；POST /samples/{id}/extract (1B)；GET /samples/{id}/tasks (2.5)
+│  │  │  ├─ projects.py                     # POST /projects 上传；/recommend-templates / /apply / GET /projects/{id} / /preview-props / /render / /mix-bgm (Phase 2) / GET /projects/{id}/tasks + /lineage (2.5)
 │  │  │  ├─ tasks.py                        # GET /tasks/{id}（含 normalized_media_url · D27）；POST /internal/task-progress
 │  │  │  ├─ events.py                       # GET /tasks/{id}/events SSE + /events/history
 │  │  │  ├─ templates.py                    # 1B KB CRUD: GET/PATCH/DELETE /templates(/{id}) + /events 回放
+│  │  │  ├─ edit.py                         # Phase 2.5 编辑 HTTP 入口: POST /edit / /panel-edit / /undo + GET /history（events.jsonl 作 Patch 真理源 · D36）
+│  │  │  ├─ replay.py                       # Phase 2.5 回放: GET /projects/{id}/replay/events + /tasks; POST /replay/snapshot + /workbench/{tid}/reject-event/{eid} 否决；对称 /samples/* (D35-37)
 │  │  │  ├─ dev_workbench.py                # ENABLE_DEV_MOCK gated：mock-stream / scenarios 列表
 │  │  │  └─ lab.py                          # ENABLE_DEV_MOCK gated：SubcapabilityLab 子能力 registry / run / baselines
 │  │  ├─ ir/
@@ -97,6 +100,7 @@ SceneEcho/
 │  │  │     ├─ 2_recommend.md               # Phase 2 模板智能推荐 prompt（top-k VLM 排序 + 中文 reason）
 │  │  │     ├─ 2_caption_emphasis.md        # Phase 2 字幕 emphasis_words 选取（必为 unit_text 子串）
 │  │  │     ├─ 2_fill_gap.md                # Phase 2 缺口字幕文案补全（受 length_constraint 约束）
+│  │  │     ├─ 2_5_nl_edit.md               # Phase 2.5 NL 指令 → Patch 列表（8 op 清单 + ValueObject 约束 + 中文颜色映射）
 │  │  │     └─ scenarios/                   # Phase 0.5 mock 事件脚本（dev_workbench 消费）
 │  │  │        ├─ captions_demo.json
 │  │  │        ├─ stickers_demo.json
@@ -130,16 +134,18 @@ SceneEcho/
 │  │  │  ├─ fill.py                         # 2.fill — text_fill (LLM) / wrap_fill / reuse 三策略；output_span = slot.nominal；通过 outcomes 返回 fill 结果（不 mutate 原 gaps）
 │  │  │  ├─ style.py                        # 2.style — 套 StyleRule 到 PlacedSegment + LLM 选 emphasis_words + BGM 选曲；导出 `_segment_output_span` / `style_for_segment`（D31/D32 单一真理源）
 │  │  │  └─ pipeline.py                     # 2.pipeline — apply_short DAG 编排（_safe 降级 + STAGE_TO_IR_PATH 翻译 + bgm_mix 自动 ducking · D33 + project.json 落盘）
-│  │  ├─ agent/                             # Phase 5 占位（aigc / nl_edit / sfx_preset 等）
-│  │  │  ├─ __init__.py
-│  │  │  └─ aigc.py                         # 贴纸生图 / B-roll 占位（Phase 5 填）
+│  │  ├─ agent/                             # Phase 2.5 + 5 编辑/AIGC 模块
+│  │  │  ├─ __init__.py                     # Phase 5 占位（aigc / narrative / sfx_preset 等）
+│  │  │  ├─ aigc.py                         # 贴纸生图 / B-roll 占位（Phase 5 填）
+│  │  │  └─ nl_edit.py                      # Phase 2.5 核心：nl_edit(LLM NL→Patch) + panel_to_patches + apply_patches(pure dispatcher) + push_snapshot/undo(D35) + list_patch_history(via events.jsonl D36)
 │  │  ├─ understand/                        # Phase 1A 语义层分类器 + Phase 2 ASR
 │  │  │  ├─ __init__.py
 │  │  │  ├─ vision.py                       # classify_caption_function（caption_idx 入参，写 Phase1AReport.captions[idx].function；命名匹配 CI classify_ 前缀）
 │  │  │  └─ asr.py                          # Phase 2 WhisperX large-v3 + forced align；缺包 fallback 等距 ~3s 分段
 │  │  └─ render/
 │  │     ├─ __init__.py
-│  │     ├─ client.py                       # httpx 调 renderer /render；renderer_health 探活
+│  │     ├─ client.py                       # httpx 调 renderer /render；renderer_health 探活；Phase 2.5 cancel_render(taskId)（D37 supersede）
+│  │     ├─ throttle.py                     # Phase 2.5 项目级 supersede：dict[project_id→in_flight_task_id] + asyncio.Lock + trigger_render_supersede（D37）
 │  │     └─ ffmpeg.py                       # ffmpeg/ffprobe wrapper：normalize（pad_mode=black|blur · D34）/ thumbnail / probe / extract_audio / mix_bgm（sidechaincompress）/ compose_segments
 │  └─ tests/
 │     ├─ __init__.py
@@ -161,7 +167,8 @@ SceneEcho/
 │        ├─ __init__.py
 │        ├─ test_subcap_shapes.py           # 1A mock-level integration：seeded ctx 跑全部 subcap，断言事件结构 + Phase1AReport ir_target + parent 链路 + schema round-trip
 │        ├─ test_extract_1b.py              # 1B end-to-end pipeline：seeded ctx + 无 credentials → KB 落行 + 事件 ≥ 10 + done 事件压尾
-│        └─ test_apply_phase2.py            # Phase 2 验证 2/3/4/5/11：字幕同步 / speed 钳制 / 缺口补全 / canvas letterbox / Caption.text 不截断
+│        ├─ test_apply_phase2.py            # Phase 2 验证 2/3/4/5/11：字幕同步 / speed 钳制 / 缺口补全 / canvas letterbox / Caption.text 不截断
+│        └─ test_nl_edit.py                 # Phase 2.5 验证：8 个 PatchOp apply_patches + panel_to_patches + snapshot 栈 round-trip + lodash.set 三 op + _snapshot_payload 端到端重建 + list_by_resource DESC 排序
 │
 ├─ renderer/                                 # Node Remotion 渲染服务
 │  ├─ package.json                          # pnpm @sceneecho/renderer 依赖与脚本
@@ -170,9 +177,9 @@ SceneEcho/
 │  ├─ scripts/
 │  │  └─ gen-types.ts                       # 读 ir.schema.json 写 src/types/ir.ts
 │  └─ src/
-│     ├─ server.ts                          # Express :8001 入口；/health /render /render/queue
+│     ├─ server.ts                          # Express :8001 入口；/health /render /render/queue + Phase 2.5 DELETE /render/:taskId (D37)
 │     ├─ render.ts                          # bundle + selectComposition + renderMedia
-│     ├─ queue.ts                           # p-queue({concurrency:1}) 单 worker 串行
+│     ├─ queue.ts                           # p-queue({concurrency:1}) 单 worker 串行 + Phase 2.5 RenderState 注册表 (registerRender / cancelRender / finalizeRender) 支持 supersede
 │     ├─ progress.ts                        # POST 后端 /api/internal/task-progress
 │     ├─ logger.ts                          # pino JSON + withTask child binding
 │     ├─ paths.ts                           # DATA_ROOT 解析 + 渲染源目录定位（ESM 安全）
@@ -202,12 +209,12 @@ SceneEcho/
    ├─ scripts/
    │  └─ gen-types.ts                       # 读 ir.schema.json 写 src/types/ir.ts
    └─ src/
-      ├─ main.tsx                           # 路由入口（Shell + /sample-extract / /workbench/dev / /workbench/:taskId）
+      ├─ main.tsx                           # 路由入口（Shell + /sample-extract / /workbench/dev / /workbench/:taskId / /projects/:id/replay / /samples/:id/replay）
       ├─ styles/
       │  ├─ tokens.css                      # Anthropic 风 design tokens（颜色/字体/间距/圆角/stage 染色）
       │  └─ global.css                      # @tailwind 注入 + 基础排版 + se-* 组件类（卡片/按钮/动画）
       ├─ api/
-      │  ├─ index.ts                        # axios 封装：uploadSample / renderDemo / pollTask / dataUrl + 转出 events + templates
+      │  ├─ index.ts                        # axios 封装：uploadSample / renderDemo / pollTask / dataUrl + Phase 2 projects + Phase 2.5 edit/panelEdit/undoEdit/listPatchHistory/listSampleTasks/listProjectTasks/fetchReplayEvents/snapshotAtSequence/fetchProjectLineage/rejectEvent
       │  ├─ events.ts                       # subscribeEvents (EventSource) / fetchEventHistory / mock-stream / scenarios
       │  ├─ templates.ts                    # 1B KB API: triggerExtract / list / get / patchTags / patchPlaceholder / delete / getEvents
       │  └─ lab.ts                          # SubcapabilityLab API：listSubcaps / runSubcap / getBaseline
@@ -217,17 +224,24 @@ SceneEcho/
       ├─ components/
       │  ├─ TaskProgress.tsx                # task_id 轮询 + 进度条 + 错误展示
       │  ├─ RemotionPlayer.tsx              # Phase 2 CSS-based 预览（<video> + playbackRate + CSS zoom/caption/sticker 叠层，不打包 Remotion bundle）
+      │  ├─ ExtractHistoryList.tsx          # Phase 2.5 通用样例/项目历史列表（任务 kind 中文映射 + 状态色 + 相对时间）
+      │  ├─ editor/
+      │  │  ├─ NLBar.tsx                    # Phase 2.5 Editor 底部 NL 输入栏 → POST /projects/{id}/edit
+      │  │  ├─ ParamPanel.tsx               # Phase 2.5 Editor 左侧参数面板（字幕颜色/字号/位置/动画/换行/placeholder/节奏/画布/BGM） → POST /panel-edit
+      │  │  └─ PatchHistoryList.tsx         # Phase 2.5 Editor 右侧编辑历史（GET /history） + Undo 按钮（POST /undo）
       │  └─ workbench/
       │     ├─ WorkbenchVisionPane.tsx      # 左栏：选中事件帧 + bbox overlay + 「帧/原视频」toggle（video 单挂载，按 frame_ts 命令式 seek，autoFollow 时不打断连续观看）
       │     ├─ WorkbenchEventStream.tsx     # 中栏：默认按 stage 分组（可切按到达顺序）+ ↑↓/Enter/X 快捷键 + URL stage_filter/time_range + 否决线穿 + reasoning pre-wrap 自然多行
       │     ├─ WorkbenchIRPane.tsx          # 右栏：react-arborist 渲染 IR 树 + 命中字段 800ms 高亮 + 点击叶子 pin 到底部 detail strip（lodash.get 实时取值显示全文）
+      │     ├─ WorkbenchBreadcrumb.tsx      # Phase 2.5 工作台顶栏面包屑「样例|项目 > {resource} > {kind 中文} #{tid 前 8}」
       │     ├─ EventBadge.tsx               # stage 前缀染色徽章（badgeColor 导出）
       │     └─ BboxOverlay.tsx              # 0-999 → 像素的 SVG bbox + 标签气泡（bboxToRect 导出）
       ├─ pages/
-      │  ├─ SampleExtract.tsx               # 阶段 0/1B 上传 + 渲染 demo + 「提取模板（1B）」按钮 + 工作台跳转
-      │  ├─ TemplateLibrary.tsx             # 1B `/templates` 列表 + `/templates/:id` 详情（骨架/sanity/placeholder 编辑/事件回放）
-      │  ├─ Editor.tsx                      # Phase 2 出片闭环：上传 → 推荐 → 应用 → 预览 → 渲染（5 步），每步带工作台跳转
-      │  ├─ Workbench.tsx                   # /workbench/:taskId 三栏页面：SSE 订阅 + history 预填
+      │  ├─ SampleExtract.tsx               # 阶段 0/1B 上传 + 渲染 demo + 「提取模板（1B）」按钮 + 工作台跳转 + Phase 2.5 ExtractHistoryList + ?sample_id= 反向回跳
+      │  ├─ TemplateLibrary.tsx             # 1B `/templates` 列表 + `/templates/:id` 详情（骨架/sanity/placeholder 编辑/事件回放）+ Phase 2.5 详情页底部「本样例其它提取记录」
+      │  ├─ Editor.tsx                      # Phase 2 出片闭环：上传 → 推荐 → 应用 → 预览 → 渲染 + Phase 2.5 三栏 [ParamPanel | Preview+NLBar | PatchHistoryList]
+      │  ├─ Visualize.tsx                   # Phase 2.5 `/projects/:id/replay` 与 `/samples/:id/replay` 事件回放器（时间线 scrub + 倍速 + MediaRecorder 60s 录屏导出）
+      │  ├─ Workbench.tsx                   # /workbench/:taskId 三栏页面：SSE 订阅 + history 预填 + Phase 2.5 顶栏 WorkbenchBreadcrumb
       │  ├─ WorkbenchLauncher.tsx           # /workbench/dev：列出 mock scenarios + 启动按钮
       │  └─ SubcapabilityLab.tsx            # /lab：DEV-only Phase 1A 子能力 × fixture 单点验证
       ├─ vite-env.d.ts                      # /// <reference types="vite/client" /> 让 import.meta.env 可解析

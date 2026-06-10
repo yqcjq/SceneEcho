@@ -541,3 +541,61 @@ PLAN.md 1570-1666 行声明阶段 2 ★MVP 闭环：用户传 10–20s 一镜到
 
 
 
+---
+
+## [ISS-015] Phase 2.5 — NL 编辑 + 参数面板 + 工作台事件回放 + 提取历史入口
+
+**状态**：[已解决]
+**优先级**：[P1 严重]
+**类型**：[功能异常]
+**发现日期**：2026-06-09
+**解决日期**：2026-06-09
+
+**现象**：
+PLAN.md 1666-1759 声明阶段 2.5：用户用自然语言或参数面板改 ProjectIR → 自动重渲染拿新 mp4；前端 Visualize 页升级为工作台事件回放器；样例 / 项目详情页补「提取历史」区块 + 工作台顶栏补面包屑，把 task_id 唯一寻址升级为可寻址的目录视图。
+
+落地前 backend 没有 `agent/nl_edit.py` / `api/edit.py` / `api/replay.py` / `render/throttle.py`，renderer 没有 cancel 路由，前端没有 NLBar / ParamPanel / PatchHistoryList / Visualize 页 / ExtractHistoryList / WorkbenchBreadcrumb。
+
+**后果**：
+不开 Phase 2.5 就停留在「一次性出片」的形态：用户对 apply 结果不满意只能重新跑一遍 apply（5+ 分钟），不能像剪辑软件一样微调；用户离开 Workbench 后再也找不到这次提取/编辑的入口（task_id 在 URL 里，URL 一关就丢）。Phase 2.5 直接对应 PLAN 1675「task_id 唯一寻址升级为有目录的可寻址」。
+
+**初步判断**：
+已确认。Phase 2 已经完成 ProjectIR 的 ★MVP 闭环；Phase 2.5 是在它的基础上加编辑链路 + 寻址表 + 回放能力，与 Phase 2 同结构。设计沿用 1B / 2 的 `_safe` 降级范式与 events.jsonl 真理源约定。
+
+**方案讨论**（已确认，详见 `decisions/008-phase2-5-edit-storage.md`）：
+- Undo：snapshot 栈代替 per-op inverse（每个 apply_patches 前把 project.json 拷贝到 snapshots/v{N}.json；undo 弹栈写回 + 删快照文件）。
+- Patch 真理源：复用 events.jsonl（不引入 patch_history.jsonl），`GET /history` 查 nl_edit / panel_edit task 后聚合各 task events.jsonl 中 `stage="2.5.nl_edit"` 的事件。
+- 渲染节流：`render/throttle.py` 30 行 `dict + asyncio.Lock` 实现项目级 supersede，renderer 端 `DELETE /render/{tid}` 配合做软取消（不引入独立 `agent/render_queue.py` 模块）。
+- 工作台事件否决：保持为 UI 操作（`POST /workbench/{tid}/reject-event/{eid}` 产生 `stage="2.5.veto"` 事件）而非 Patch，避免把 UI 行为塞进 ProjectIR 编辑通道。
+
+**关联**：
+-> backend/app/agent/nl_edit.py（新增 — Text LLM NL→Patch / panel_to_patches / apply_patches 调度 / push_snapshot+undo / list_patch_history）
+-> backend/app/api/edit.py（新增 — /edit / /panel-edit / /undo / /history 端点）
+-> backend/app/api/replay.py（新增 — /replay/events / /replay/tasks / /replay/snapshot / /workbench/{tid}/reject-event/{eid}）
+-> backend/app/api/projects.py（扩展 — /projects/{id}/tasks + /projects/{id}/lineage）
+-> backend/app/api/samples.py（扩展 — /samples/{id}/tasks）
+-> backend/app/tasks_store.py（扩展 — list_by_resource(kind, id) + idx_tasks_resource 复合索引）
+-> backend/app/render/throttle.py（新增 — trigger_render_supersede）
+-> backend/app/render/client.py（扩展 — cancel_render）
+-> backend/app/main.py（扩展 — 挂载 edit / replay 路由）
+-> backend/app/llm/prompts/2_5_nl_edit.md（新增 — NL → Patch system prompt + op 清单）
+-> renderer/src/queue.ts（扩展 — registerRender / cancelRender / finalizeRender）
+-> renderer/src/server.ts（扩展 — DELETE /render/:taskId）
+-> frontend/src/api/index.ts（扩展 — nlEdit / panelEdit / undoEdit / listPatchHistory / listSampleTasks / listProjectTasks / fetchReplayEvents / snapshotAtSequence / fetchProjectLineage / rejectEvent）
+-> frontend/src/components/ExtractHistoryList.tsx（新增 — 通用样例/项目历史列表）
+-> frontend/src/components/workbench/WorkbenchBreadcrumb.tsx（新增 — 工作台顶栏面包屑）
+-> frontend/src/components/editor/NLBar.tsx（新增 — Editor 底部 NL 输入栏）
+-> frontend/src/components/editor/ParamPanel.tsx（新增 — Editor 左侧参数面板）
+-> frontend/src/components/editor/PatchHistoryList.tsx（新增 — Editor 右侧编辑历史 + Undo）
+-> frontend/src/pages/Editor.tsx（扩展 — 三栏布局 NL/Param/PatchHistory）
+-> frontend/src/pages/Visualize.tsx（新增 — /projects/:id/replay 与 /samples/:id/replay 工作台事件回放器）
+-> frontend/src/pages/Workbench.tsx（扩展 — 顶栏面包屑）
+-> frontend/src/pages/SampleExtract.tsx（扩展 — useSearchParams + ExtractHistoryList）
+-> frontend/src/pages/TemplateLibrary.tsx（扩展 — 详情页插入「本样例其它提取记录」）
+-> frontend/src/main.tsx（扩展 — /projects/:id/replay 与 /samples/:id/replay 路由）
+-> backend/tests/integration/test_nl_edit.py（新增 — per-op apply_patches / snapshot 栈 round-trip / lodash.set 语义 / list_by_resource 排序）
+-> docs/decisions/008-phase2-5-edit-storage.md（新增）
+-> 004CHANGELOG.md [2026-06-09-8]
+
+**解决方案**：
+按 PLAN 完整落地阶段 2.5：新增 `agent/nl_edit.py` 一文件覆盖 NL→Patch / panel→Patch / apply_patches / snapshot 栈 / list_patch_history 五个能力；新增 `api/edit.py` 与 `api/replay.py` 暴露 4+5 个端点；扩 `api/projects.py` 与 `api/samples.py` 加 history + lineage；扩 `tasks_store.py` 加 `list_by_resource` + 复合索引；新增 `render/throttle.py` 实现 project-level supersede + renderer 端 `DELETE /render/:taskId`；前端新增 3 个 Editor 子组件（NLBar / ParamPanel / PatchHistoryList）+ `Visualize` 回放页 + `ExtractHistoryList` / `WorkbenchBreadcrumb` 通用组件；扩 `Editor.tsx` / `Workbench.tsx` / `SampleExtract.tsx` / `TemplateLibrary.tsx` 挂载组件；新增 `2_5_nl_edit.md` Prompt；新增集成测试覆盖 PLAN 验证 1-8。决策详见 `decisions/008-phase2-5-edit-storage.md`。

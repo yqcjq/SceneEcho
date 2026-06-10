@@ -1,3 +1,65 @@
+## [2026-06-09-8] feat(phase2-5): wire NL edit + panel edit + undo + workbench event replay + history index [ISS-015]
+
+### 改动
+
+Phase 2.5 完整落地：编辑链路（NL / 参数面板 / Undo）+ 重渲染节流 + 工作台事件回放页 + 提取/编辑历史入口 + 面包屑。三个第一性原理决策（详见 `decisions/008-phase2-5-edit-storage.md`）替代 PLAN 原方案：用 snapshot 栈代替 per-op inverse undo（新增 op 不需要写 inverse）；用 events.jsonl 作为 patch 真理源（不再写并行的 patch_history.jsonl）；用 30 行 `render/throttle.py` 替代独立 `render_queue.py` 模块（dict + asyncio.Lock 串行化 supersede）。
+
+- backend/app/agent/nl_edit.py（新增）：`nl_edit` 调 Text LLM 翻译 NL 指令为 Patch 列表 + 同时发 `stage="2.5.nl_edit"` VisionEvent；`panel_to_patches` 不调 LLM 翻译参数面板字段；`apply_patches` pure-function 调度器覆盖 8 个 PatchOp + 完整 pydantic re-validate；`push_snapshot` / `undo` 实现快照栈；`list_patch_history` 通过 `tasks_store.list_by_resource` + `event_bus.replay` 聚合 patch 流
+- backend/app/api/edit.py（新增）：`POST /projects/{id}/edit` / `/panel-edit` / `/undo` / `GET /history` 四个端点；每条 edit 路径都创建对应 kind 的 task（nl_edit / panel_edit / undo）并把 patch 通过 VisionEvent 持久化到 events.jsonl；统一通过 `_maybe_kick_render` 经 `BackgroundTasks → trigger_render_supersede` 触发 supersede 重渲染
+- backend/app/api/replay.py（新增）：`GET /projects/{id}/replay/events` / `/replay/tasks` / `POST /replay/snapshot`，对称的 sample 三端点；`POST /workbench/{tid}/reject-event/{eid}` 发 `stage="2.5.veto"` 事件保留原事件不修改；内置 lodash.set 重放器 `_lodash_set` 支持 dotted+integer 路径与 `set/append/remove` 三 op，复用前端语义重建 IR 快照
+- backend/app/api/projects.py：新增 `GET /projects/{id}/tasks` 与 `GET /projects/{id}/lineage`（迁移链审计：模板骨架摘要 + 映射 + 缺口 + edit_count）
+- backend/app/api/samples.py：新增 `GET /samples/{id}/tasks` 供 SampleExtract / TemplateLibrary 详情页 ExtractHistoryList 使用
+- backend/app/tasks_store.py：新增 `list_by_resource(kind, id)`（按 created_at DESC）+ `idx_tasks_resource` 复合索引（`init_db` 幂等创建）
+- backend/app/render/throttle.py（新增）：`trigger_render_supersede(project_id, task_id, ir)` 用 `defaultdict(asyncio.Lock)` + `dict[project_id → in_flight_task_id]` 串行化"取出旧 + 设置新"，旧任务存在时调 `cancel_render` → renderer DELETE，再 await `render_project`
+- backend/app/render/client.py：新增 `cancel_render(task_id)`（httpx DELETE 5s 超时，best-effort 不 raise）
+- backend/app/main.py：挂载 `edit.router` + `replay.router`
+- backend/app/llm/prompts/2_5_nl_edit.md（新增）：NL → Patch system prompt；8 op 清单 + ValueObject 字段约束 + 中文颜色映射；用户消息含 ProjectIR 摘要 / 模板骨架 / 可用模板目录
+- renderer/src/queue.ts：新增 RenderState 注册表（`registerRender` / `cancelRender` / `finalizeRender`）；`queueStatus` 暴露 tracked 字段
+- renderer/src/server.ts：新增 `DELETE /render/:taskId` 路由；`POST /render` 处理 callback 内查 `state.cancelled` 实现 pre-start skip 与 mid-render mark-cancelled
+- frontend/src/api/index.ts：新增 11 个端点客户端方法（nlEdit / panelEdit / undoEdit / listPatchHistory / listSampleTasks / listProjectTasks / fetchReplayEvents / fetchReplayEventsForSample / snapshotAtSequence / fetchProjectLineage / rejectEvent）与配套 TS 类型
+- frontend/src/components/ExtractHistoryList.tsx（新增）：通用样例/项目历史列表，kind 中文映射 + 状态色 + 相对时间
+- frontend/src/components/workbench/WorkbenchBreadcrumb.tsx（新增）：Workbench 顶栏面包屑「样例 > {name} > 提取任务 #{tid}」；拉取 task → resource 链；fallback 到 `任务 #{tid}`
+- frontend/src/components/editor/{NLBar,ParamPanel,PatchHistoryList}.tsx（新增）：Editor 三件套，分别负责 NL 输入栏 / 参数面板（字幕颜色/字号/位置/动画/换行字符数/placeholder/节奏/画布/BGM）/ 编辑历史 + Undo 按钮 + 工作台链接
+- frontend/src/pages/Editor.tsx：升级为 `[ParamPanel | Preview+NLBar | PatchHistoryList]` 三栏布局；每次编辑都通过 `handleEditApplied` 刷新 preview + 触发 editTick 让历史栏重读
+- frontend/src/pages/Visualize.tsx（新增）：`/projects/:id/replay` 与 `/samples/:id/replay` 工作台事件回放页；时间线 scrub + 0.5×/1×/2×/4× 倍速 + MediaRecorder 60s 录屏导出（webm/vp9，Safari 提示不兼容）；复用三栏 Workbench panes
+- frontend/src/pages/Workbench.tsx：顶栏插入 `<WorkbenchBreadcrumb taskId={taskId}>`
+- frontend/src/pages/SampleExtract.tsx：`useSearchParams` 读 `?sample_id=`（供面包屑回跳）+ 详情区底部插入 `<ExtractHistoryList resourceKind="sample">`
+- frontend/src/pages/TemplateLibrary.tsx：详情页底部新增「本样例其它提取记录」段，复用 ExtractHistoryList
+- frontend/src/main.tsx：新增 `/projects/:projectId/replay` 与 `/samples/:sampleId/replay` 路由
+- backend/tests/integration/test_nl_edit.py（新增）：覆盖 8 个 PatchOp 的 apply_patches 行为（含 set_emphasis 子串过滤 / adjust_rhythm 钳速 / set_canvas allow-list 防越界字段 / delete_segment timeline 重组 / set_bgm 清空）+ panel_to_patches 字段表 + 3 patch → 2 undo round-trip + _lodash_set 三 op 语义 + _snapshot_payload 端到端重建 + list_by_resource DESC 排序
+
+### 涉及文件
+
+- backend/app/agent/nl_edit.py：NL→Patch + 调度器 + snapshot 栈 + patch 历史聚合
+- backend/app/api/edit.py：edit / panel-edit / undo / history HTTP 入口
+- backend/app/api/replay.py：replay events / tasks / snapshot + veto 事件
+- backend/app/api/projects.py：projects/{id}/tasks + lineage
+- backend/app/api/samples.py：samples/{id}/tasks
+- backend/app/tasks_store.py：list_by_resource + 复合索引
+- backend/app/render/throttle.py：项目级 render supersede
+- backend/app/render/client.py：cancel_render
+- backend/app/main.py：edit + replay 路由挂载
+- backend/app/llm/prompts/2_5_nl_edit.md：NL → Patch prompt
+- renderer/src/queue.ts：RenderState 注册表
+- renderer/src/server.ts：DELETE /render/:taskId
+- frontend/src/api/index.ts：11 个 Phase 2.5 客户端方法
+- frontend/src/components/ExtractHistoryList.tsx：通用历史列表
+- frontend/src/components/workbench/WorkbenchBreadcrumb.tsx：工作台面包屑
+- frontend/src/components/editor/{NLBar,ParamPanel,PatchHistoryList}.tsx：Editor 三件套
+- frontend/src/pages/Editor.tsx：三栏布局
+- frontend/src/pages/Visualize.tsx：工作台事件回放页
+- frontend/src/pages/{Workbench,SampleExtract,TemplateLibrary}.tsx：分别挂载面包屑 + 历史列表
+- frontend/src/main.tsx：replay 路由
+- backend/tests/integration/test_nl_edit.py：集成测试覆盖
+- docs/decisions/008-phase2-5-edit-storage.md：snapshot vs inverse / events.jsonl vs patch_history.jsonl / throttle.py vs render_queue.py 三决策
+
+### 关联
+
+-> ISS-015
+-> decisions/008-phase2-5-edit-storage.md
+
+---
+
 ## [2026-06-09-7] feat(phase2): make ASR backend configurable + co-locate HF cache with DATA_ROOT [ISS-014]
 
 ### 改动

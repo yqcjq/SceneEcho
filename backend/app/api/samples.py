@@ -188,3 +188,41 @@ async def extract_template_endpoint(
         "sample_id": sample_id,
         "workbench_url": f"/workbench/{task_id}",
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5 · extract history entry
+# ---------------------------------------------------------------------------
+
+
+@router.get("/samples/{sample_id}/tasks")
+def list_sample_tasks(sample_id: str) -> dict:
+    """Return every task attached to this sample, newest first.
+
+    Powers the ``ExtractHistoryList`` widget on the sample detail page:
+    the user uploads once, runs extract repeatedly, then wants to come
+    back days later and reopen a specific workbench. The composite
+    index added in Phase 2.5 keeps this O(log n) even at large
+    histories. ``result_json`` is intentionally NOT included — the
+    list view only needs metadata.
+    """
+    settings = get_settings()
+    if not (settings.data_root / "samples" / sample_id).exists():
+        raise HTTPException(404, f"sample {sample_id} not found")
+    rows = tasks_store.list_by_resource("sample", sample_id)
+    return {
+        "sample_id": sample_id,
+        "tasks": [
+            {
+                "task_id": r["id"],
+                "kind": r["kind"],
+                "status": r["status"],
+                "progress": r.get("progress", 0.0),
+                "stage": r.get("stage"),
+                "created_at": r.get("created_at"),
+                "updated_at": r.get("updated_at"),
+                "error": r.get("error"),
+            }
+            for r in rows
+        ],
+    }

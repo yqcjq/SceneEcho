@@ -391,3 +391,137 @@ async def mix_bgm_endpoint(project_id: str) -> dict:
     ir.bgm_track = rel
     (project_dir / "project.json").write_text(ir.model_dump_json(indent=2), encoding="utf-8")
     return {"bgm_track": rel}
+
+
+# ---------------------------------------------------------------------------
+# Phase 2.5: history list + lineage
+# ---------------------------------------------------------------------------
+
+
+@router.get("/projects/{project_id}/tasks")
+def list_project_tasks(project_id: str) -> dict:
+    """Mirror of ``/samples/{id}/tasks`` for project resources.
+
+    Used by the Editor's "本项目所有任务" listing and by the
+    ``WorkbenchBreadcrumb`` to show "本项目其它任务" alongside the
+    breadcrumb chain.
+    """
+    settings = get_settings()
+    if not (settings.data_root / "projects" / project_id).exists():
+        raise HTTPException(404, f"project {project_id} not found")
+    rows = tasks_store.list_by_resource("project", project_id)
+    return {
+        "project_id": project_id,
+        "tasks": [
+            {
+                "task_id": r["id"],
+                "kind": r["kind"],
+                "status": r["status"],
+                "progress": r.get("progress", 0.0),
+                "stage": r.get("stage"),
+                "created_at": r.get("created_at"),
+                "updated_at": r.get("updated_at"),
+                "error": r.get("error"),
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/projects/{project_id}/lineage")
+def project_lineage(project_id: str) -> dict:
+    """Return the apply-chain audit trail for migration visualisation.
+
+    Returns:
+    - ``template`` — the source TemplateIR (skeleton + style summary)
+    - ``mapping`` — per-slot user-unit assignments + ±20% speed clamps
+    - ``gaps`` — Gap list with fill_result text
+    - ``placed_segments`` — final PlacedSegment chain
+    - ``diff`` — fields touched by NL/panel edits since apply (read
+      from the snapshot stack — a missing v{1}.json means no edits).
+
+    The Editor's right pane shows this as a four-step strip
+    (抽取 / 映射 / 缺口 / 补全 / 编辑) — directly satisfies PLAN 1701.
+    """
+    ir = _load_project(project_id)
+    if ir is None:
+        raise HTTPException(404, f"project {project_id}: project.json missing — run apply first")
+    settings = get_settings()
+    project_dir = settings.data_root / "projects" / project_id
+
+    template_summary: dict | None = None
+    if ir.sections and ir.sections[0].template_id:
+        from app.kb import store as kb_store
+
+        full = kb_store.get_template(ir.sections[0].template_id)
+        if full:
+            tir = full.get("ir") or {}
+            template_summary = {
+                "id": full.get("id"),
+                "name": full.get("name"),
+                "tags": full.get("tags"),
+                "skeleton": [
+                    {
+                        "role": (s or {}).get("role"),
+                        "duration": (s or {}).get("duration"),
+                        "material_req": (s or {}).get("material_req"),
+                        "caption_function": (s or {}).get("caption_function"),
+                    }
+                    for s in (tir.get("skeleton") or [])
+                ],
+                "audio": tir.get("audio"),
+            }
+
+    mapping = []
+    gaps_summary: list[dict] = []
+    placed: list[dict] = []
+    for sec in ir.sections:
+        for s in sec.segments:
+            placed.append(
+                {
+                    "slot_role": s.slot_role,
+                    "source_unit_ids": list(s.source_unit_ids),
+                    "src_timerange": list(s.src_timerange),
+                    "timeline_start": s.timeline_start,
+                    "speed": s.speed,
+                    "is_fill": s.is_fill,
+                }
+            )
+            mapping.append(
+                {
+                    "slot_role": s.slot_role,
+                    "source_unit_ids": list(s.source_unit_ids),
+                    "src_timerange": list(s.src_timerange),
+                    "speed": s.speed,
+                    "is_fill": s.is_fill,
+                }
+            )
+        for g in sec.gaps:
+            gaps_summary.append(
+                {
+                    "slot_role": g.slot_role,
+                    "reason": g.reason,
+                    "fill_strategy": g.fill_strategy,
+                    "fill_result": g.fill_result,
+                }
+            )
+
+    # Diff: count snapshots (= number of forward edits still undo-able).
+    snap_dir = project_dir / "snapshots"
+    edit_count = (
+        len([p for p in snap_dir.iterdir() if p.suffix == ".json"]) if snap_dir.exists() else 0
+    )
+
+    return {
+        "project_id": project_id,
+        "template": template_summary,
+        "mapping": mapping,
+        "placed_segments": placed,
+        "gaps": gaps_summary,
+        "captions_count": len(ir.captions),
+        "bgm_track": ir.bgm_track,
+        "canvas": ir.canvas,
+        "version": ir.version,
+        "edit_count": edit_count,
+        "degraded": ir.degraded,
+    }

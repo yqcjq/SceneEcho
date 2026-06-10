@@ -2,6 +2,7 @@ import React from "react";
 import { useParams } from "react-router-dom";
 import { fetchEventHistory, subscribeEvents } from "../api/events.js";
 import { pollTask, type TaskStatus } from "../api/index.js";
+import { WorkbenchBreadcrumb } from "../components/workbench/WorkbenchBreadcrumb.js";
 import { WorkbenchEventStream } from "../components/workbench/WorkbenchEventStream.js";
 import { WorkbenchIRPane } from "../components/workbench/WorkbenchIRPane.js";
 import { WorkbenchVisionPane } from "../components/workbench/WorkbenchVisionPane.js";
@@ -126,8 +127,9 @@ export const Workbench: React.FC = () => {
   return (
     <div className="flex h-[calc(100vh-65px)] flex-col">
       <div className="flex items-center justify-between border-b border-border bg-surface px-6 py-3">
-        <div>
+        <div className="flex flex-col gap-1">
           <h1 className="font-serif text-lg text-primary">AI 透明工作台</h1>
+          <WorkbenchBreadcrumb taskId={taskId} />
           <p className="text-tertiary text-xs font-mono">{taskId}</p>
         </div>
         <div className="flex items-center gap-4 text-xs text-secondary">

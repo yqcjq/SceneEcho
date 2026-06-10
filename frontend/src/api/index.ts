@@ -160,5 +160,213 @@ export async function renderProject(
   return data;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 2.5 · NL / panel edits + history + replay
+// ---------------------------------------------------------------------------
+
+export interface EditResponse {
+  task_id: string;
+  workbench_url: string;
+  patches_applied: number;
+  ir: any | null;
+  render_task_id: string | null;
+}
+
+export async function nlEdit(
+  projectId: string,
+  instruction: string,
+  render = true,
+): Promise<EditResponse> {
+  const { data } = await api.post<EditResponse>(`/projects/${projectId}/edit`, {
+    instruction,
+    render,
+  });
+  return data;
+}
+
+export async function panelEdit(
+  projectId: string,
+  field: string,
+  value: unknown,
+  target?: Record<string, unknown>,
+  render = true,
+): Promise<EditResponse> {
+  const { data } = await api.post<EditResponse>(`/projects/${projectId}/panel-edit`, {
+    field,
+    value,
+    target,
+    render,
+  });
+  return data;
+}
+
+export async function undoEdit(
+  projectId: string,
+  render = true,
+): Promise<EditResponse> {
+  const { data } = await api.post<EditResponse>(`/projects/${projectId}/undo`, { render });
+  return data;
+}
+
+export interface PatchHistoryEntry {
+  task_id: string;
+  kind: string;
+  timestamp: string;
+  sequence: number;
+  op: string | null;
+  target: Record<string, unknown> | null;
+  value: Record<string, unknown> | null;
+  source: string | null;
+  reasoning: string;
+  event_id: string;
+}
+
+export async function listPatchHistory(
+  projectId: string,
+): Promise<{ project_id: string; patches: PatchHistoryEntry[] }> {
+  const { data } = await api.get<{ project_id: string; patches: PatchHistoryEntry[] }>(
+    `/projects/${projectId}/history`,
+  );
+  return data;
+}
+
+export interface ResourceTask {
+  task_id: string;
+  kind: string;
+  status: string;
+  progress: number;
+  stage: string | null;
+  created_at: number | null;
+  updated_at: number | null;
+  error: string | null;
+}
+
+export async function listSampleTasks(
+  sampleId: string,
+): Promise<{ sample_id: string; tasks: ResourceTask[] }> {
+  const { data } = await api.get<{ sample_id: string; tasks: ResourceTask[] }>(
+    `/samples/${sampleId}/tasks`,
+  );
+  return data;
+}
+
+export async function listProjectTasks(
+  projectId: string,
+): Promise<{ project_id: string; tasks: ResourceTask[] }> {
+  const { data } = await api.get<{ project_id: string; tasks: ResourceTask[] }>(
+    `/projects/${projectId}/tasks`,
+  );
+  return data;
+}
+
+export interface ReplayEvent {
+  event_id: string;
+  task_id: string;
+  sequence: number;
+  timestamp: string;
+  duration_ms: number;
+  source: string;
+  model_used: string | null;
+  stage: string;
+  frame_ts: number | null;
+  frame_url: string | null;
+  bbox_norm: [number, number, number, number] | null;
+  semantic_label: string;
+  reasoning: string;
+  confidence: number;
+  ir_target: { ir_type: string; path: string; field: string | null; op: string } | null;
+  ir_value: unknown;
+  parent_event_id: string | null;
+  cost_tokens: number | null;
+  severity: string;
+  confidence_warning: boolean;
+}
+
+export interface ReplayEventsResponse {
+  task_id: string;
+  task: {
+    kind: string | null;
+    status: string | null;
+    stage: string | null;
+    resource_kind: string | null;
+    resource_id: string | null;
+  };
+  events: ReplayEvent[];
+}
+
+export async function fetchReplayEvents(
+  projectId: string,
+  taskId?: string,
+): Promise<ReplayEventsResponse> {
+  const query = taskId ? `?task_id=${encodeURIComponent(taskId)}` : "";
+  const { data } = await api.get<ReplayEventsResponse>(
+    `/projects/${projectId}/replay/events${query}`,
+  );
+  return data;
+}
+
+export async function fetchReplayEventsForSample(
+  sampleId: string,
+  taskId?: string,
+): Promise<ReplayEventsResponse> {
+  const query = taskId ? `?task_id=${encodeURIComponent(taskId)}` : "";
+  const { data } = await api.get<ReplayEventsResponse>(
+    `/samples/${sampleId}/replay/events${query}`,
+  );
+  return data;
+}
+
+export async function snapshotAtSequence(
+  projectId: string,
+  taskId: string,
+  sequence: number,
+): Promise<{ task_id: string; sequence: number; snapshot: any; events_count: number }> {
+  const { data } = await api.post(`/projects/${projectId}/replay/snapshot`, {
+    task_id: taskId,
+    sequence,
+  });
+  return data;
+}
+
+export interface LineageResponse {
+  project_id: string;
+  template: any | null;
+  mapping: Array<{
+    slot_role: string;
+    source_unit_ids: number[];
+    src_timerange: [number, number];
+    speed: number;
+    is_fill: boolean;
+  }>;
+  placed_segments: any[];
+  gaps: Array<{
+    slot_role: string;
+    reason: string;
+    fill_strategy: string;
+    fill_result: string;
+  }>;
+  captions_count: number;
+  bgm_track: string | null;
+  canvas: any;
+  version: number;
+  edit_count: number;
+  degraded: Record<string, string>;
+}
+
+export async function fetchProjectLineage(projectId: string): Promise<LineageResponse> {
+  const { data } = await api.get<LineageResponse>(`/projects/${projectId}/lineage`);
+  return data;
+}
+
+export async function rejectEvent(
+  taskId: string,
+  eventId: string,
+): Promise<{ ok: boolean; vetoed_event_id: string; veto_event_id: string }> {
+  const { data } = await api.post(
+    `/workbench/${taskId}/reject-event/${encodeURIComponent(eventId)}`,
+  );
+  return data;
+}
+
 export * from "./events.js";
 export * from "./templates.js";
