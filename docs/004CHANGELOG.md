@@ -1,3 +1,24 @@
+## [2026-06-10-1] docs: rewrite 002STRUCTURE.md for external readers + add 006API.md placeholder [ISS-016]
+
+### 改动
+
+按外部新工程师视角重写 `002STRUCTURE.md`，剔除内部进度标签与函数级细节，让"第一次接手"的人能在 1 分钟内定位代码（呼应 `000README.md` 的判断标准）。同时新增 `006API.md` 占位文档作为接口侧的"带场景导览"。本轮不动 `001ARCHITECTURE.md`（D1–D37 精简留待后续 issue）。
+
+- docs/002STRUCTURE.md（重写）：结构由 ~250 行扁平树改为按主目录分组——每个目录段落先有 2–4 句平白导语介绍它的角色与解决的问题，再列文件一句话职责。删除全部 `Phase 0/1A/1B/2/2.5/5` / `D1`–`D37` / `ISS-NNN` / `★MVP` 等内部进度标签；删除 `_safe(label, field_key, coro)` / `SUBCAP_TO_IR_PATH` / `subscribe_with_snapshot` 等函数与常量级细节（可 grep 的不入文档）；`VisionEvent` / `Phase1AReport` / `Patch` / `StyleRule` 等内部类型在首次出现处用平白话解释（"AI 决策记录" / "识别结果聚合数据" / "一条编辑指令" 等）。占位状态精确化：真占位（`agent/aigc.py` + `agent/__init__.py` 中 AIGC 转发）显式标 `🚧 占位（计划中）`；dev-mode 闸门控制但已实现的（`api/dev_workbench.py` / `api/lab.py` / `frontend/src/pages/WorkbenchLauncher.tsx` / `frontend/src/pages/SubcapabilityLab.tsx`、两份 `types/ir.ts` 生成产物）纠正为非占位的平白说明；`extract/motion.py` 误标占位修复（实际为 VLM 缩放方向 + OpenCV 光流曲线已落地）。补回原文档遗漏项：`docs/proposals/`、`frontend/src/vite-env.d.ts`、`frontend/src/components/editor/ProjectHistoryStrip.tsx`、`frontend/src/components/editor/StepCard.tsx`。
+- docs/006API.md（新增）：占位骨架 + 命名约定 + 六条典型用户流程导览（上传 / 提取 / 出片 / 编辑 / 实时回放 / 跨页导航）+ 开发模式专用接口区段 + 渲染器内部回调区段 + 待补充清单（请求示例、错误码、鉴权说明、`/openapi.json` 索引化）。详细字段统一指向 FastAPI 自动生成的 `/docs`，不复制 OpenAPI 已有内容。
+
+### 涉及文件
+
+- docs/002STRUCTURE.md：按目录分组重写，剔除内部进度标签 / 函数级细节，纠正占位判定
+- docs/006API.md：新增"带场景的接口导览"占位文档
+
+### 关联
+
+-> ISS-016
+
+
+---
+
 ## [2026-06-09-8] feat(phase2-5): wire NL edit + panel edit + undo + workbench event replay + history index [ISS-015]
 
 ### 改动

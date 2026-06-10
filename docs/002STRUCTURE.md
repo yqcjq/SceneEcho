@@ -1,251 +1,321 @@
 # 目录结构
 
-> 约定：每新增或删除文件/目录后更新本文件。每个文件/目录一句话说明职责，不写模块间关系（关系在 `001ARCHITECTURE.md`）。
+> 这份文档是 **新工程师第一次接手项目时的代码导航**：每个目录解决什么问题、装什么、想做某件事该去哪里。
+>
+> 阅读约定：
+> - 模块之间的协作关系不在这里，去看 `001ARCHITECTURE.md`。
+> - 接口请求 / 返回的具体字段不在这里，去看 `006API.md`（建设中）或后端 FastAPI 自动生成的 `/docs`。
+> - 标注 🚧 的文件是已占位、计划中实现的；没有标注的就是当前可用的。
+> - 测试文件 (`backend/tests/`、`*.test.ts`)、`__init__.py`、`__pycache__/` 等基础设施一般不在导航重点，仅在与功能定位相关时提及。
+> - 文件 / 目录有增删时同步更新本文件。
 
-```
-SceneEcho/
-├─ PLAN.md                                  # 当前执行路径（阶段 0..7）
-├─ README-PLAN.md                           # Plan 文档写作规范
-├─ README.md                                # 项目顶层简介（占位）
-├─ taskRequirements.md                      # 任务原始需求
-├─ package.json                             # 根 workspace 脚本：dev / gen:types / build / lint
-├─ pnpm-workspace.yaml                      # 工作区声明，包含 renderer + frontend
-├─ .env.example                             # 环境变量样板，复制为 .env 使用
-├─ .gitignore                               # 含 backend venv / data / 生成产物的忽略规则
-│
-├─ .github/
-│  └─ workflows/
-│     └─ ci.yml                             # CI：type-sync / python / renderer / frontend 四 job
-│
-├─ docs/
-│  ├─ 000README.md                          # 文档体系规范（必须先读）
-│  ├─ 001ARCHITECTURE.md                    # 系统拓扑、分层、调用约束、运行时链路
-│  ├─ 002STRUCTURE.md                       # 本文件：目录与文件职责
-│  ├─ 003ISSUES.md                          # 问题追踪
-│  ├─ 004CHANGELOG.md                       # 改动记录（commit 级）
-│  ├─ 005DEVELOPMENT.md                     # 首次构建与运行指引
-│  ├─ decisions/                            # 拍板决策的 ADR
-│  └─ future-plans/                         # 远期演进规划
-│
-├─ shared/
-│  └─ ir.schema.json                        # 生成产物：pydantic IR 导出的 JSON Schema（gitignored）
-│
-├─ scripts/
-│  ├─ gen_schema.py                         # Pydantic → shared/ir.schema.json 的薄入口
-│  ├─ check_stage_naming.py                 # CI 守卫：VisionEvent 的 stage 字面量必匹配 PLAN.md 命名表
-│  ├─ check_event_emission.py               # CI 守卫（D13）：标记的 AI 客户端方法必发 event_bus.publish
-│  └─ check_parent_event_id.py              # CI 守卫：*_refine / *_phase2 / *_classify 函数必传 parent_event_id=
-│
-├─ tests/
-│  └─ fixtures/                             # 用户手动放置的测试视频（不入 backend/data）
-│     ├─ sample_basic_15s/source.mp4        # 5-20s 样例素材（Phase 0/1 测）
-│     └─ short_15s/source.mp4               # 10-20s 短口播（Phase 0/2 测）
-│
-├─ backend/                                  # Python FastAPI 服务
-│  ├─ pyproject.toml                        # 依赖与打包配置（pip install -e ".[dev]"）
-│  ├─ ruff.toml                             # lint + format 规则
-│  ├─ .venv/                                # 本地虚拟环境（gitignored）
-│  ├─ data/                                  # DATA_ROOT 默认根（gitignored）
-│  │  ├─ samples/{id}/                      # 样例：source/normalized/thumbnail/extracted
-│  │  │  └─ extracted/events_{task_id}.jsonl  # AI 决策事件流（路径方案 B）
-│  │  ├─ projects/{id}/                     # 项目：user_material/normalized/project.json/outputs
-│  │  │  ├─ pipeline/events_{task_id}.jsonl   # 项目应用 / 编辑事件流
-│  │  │  └─ snapshots/v{N}.json              # Phase 2.5 编辑前 ProjectIR 快照栈（D35 undo 用）
-│  │  ├─ system/                            # 字体 / BGM 池 / 模型缓存 / 贴纸参考
-│  │  │  └─ dev_events/                     # 开发态事件流兜底（template/未知 kind）
-│  │  ├─ aigc/                              # AIGC 缓存（贴纸 / B-roll）
-│  │  ├─ kb.sqlite                          # tasks 表（含 resource_kind/id + events_jsonl_path）+ 后续 KB 表
-│  │  └─ logs/                              # JSON 结构化日志按天落盘
-│  ├─ app/
-│  │  ├─ __init__.py
-│  │  ├─ main.py                            # FastAPI 入口：CORS + lifespan + 路由挂载 + /data 静态 + 工作台路由（dev gated）
-│  │  ├─ config.py                          # pydantic-settings 读 .env，含 model_provider / dual_check_stages / enable_dev_mock
-│  │  ├─ logging.py                         # structlog JSON 配置 + task_id contextvar 绑定
-│  │  ├─ cli.py                             # typer：ingest-sample / ingest-project（dev 闸门）
-│  │  ├─ tasks_store.py                     # SQLite tasks 表 CRUD（WAL）+ Phase 0.5 idempotent ALTER + Phase 2.5 list_by_resource + idx_tasks_resource 索引
-│  │  ├─ event_bus.py                       # 进程内事件总线：subscribe_with_snapshot / await put 反压 / jsonl 持久化 / jsonl tail seq 真理源 / lookup callback 注入
-│  │  ├─ api/
-│  │  │  ├─ __init__.py
-│  │  │  ├─ samples.py                      # POST /samples 上传归一化；POST /samples/{id}/render-demo；POST /samples/{id}/extract (1B)；GET /samples/{id}/tasks (2.5)
-│  │  │  ├─ projects.py                     # POST /projects 上传；/recommend-templates / /apply / GET /projects/{id} / /preview-props / /render / /mix-bgm (Phase 2) / GET /projects/{id}/tasks + /lineage (2.5)
-│  │  │  ├─ tasks.py                        # GET /tasks/{id}（含 normalized_media_url · D27）；POST /internal/task-progress
-│  │  │  ├─ events.py                       # GET /tasks/{id}/events SSE + /events/history
-│  │  │  ├─ templates.py                    # 1B KB CRUD: GET/PATCH/DELETE /templates(/{id}) + /events 回放
-│  │  │  ├─ edit.py                         # Phase 2.5 编辑 HTTP 入口: POST /edit / /panel-edit / /undo + GET /history（events.jsonl 作 Patch 真理源 · D36）
-│  │  │  ├─ replay.py                       # Phase 2.5 回放: GET /projects/{id}/replay/events + /tasks; POST /replay/snapshot + /workbench/{tid}/reject-event/{eid} 否决；对称 /samples/* (D35-37)
-│  │  │  ├─ dev_workbench.py                # ENABLE_DEV_MOCK gated：mock-stream / scenarios 列表
-│  │  │  └─ lab.py                          # ENABLE_DEV_MOCK gated：SubcapabilityLab 子能力 registry / run / baselines
-│  │  ├─ ir/
-│  │  │  ├─ __init__.py                     # 顶层 IR 类型聚合 export
-│  │  │  ├─ ledger.py                       # TranscriptLedger / Unit
-│  │  │  ├─ template.py                     # TemplateIR（含顶层 audio · D24）+ Slot/StyleRule/CaptionStyle/...
-│  │  │  ├─ project.py                      # ProjectIR + Section/PlacedSegment/Caption/Gap
-│  │  │  ├─ phase1a_report.py               # Phase1AReport：1A 识别结果聚合 IR（D17，子能力 VisionEvent 写入这棵树）
-│  │  │  ├─ patch.py                        # NL/面板/审核统一编辑 op
-│  │  │  ├─ vision_event.py                 # VisionEvent / IRTarget（AI 决策事件 IR · D9/D10；ir_type 含 Phase1AReport；ir_value: Any）
-│  │  │  ├─ path_validator.py               # lodash 风路径校验器（CI 验证 mock JSON 命中真实 IR）
-│  │  │  └─ export.py                       # pydantic → JSON Schema 聚合导出
-│  │  ├─ llm/
-│  │  │  ├─ __init__.py
-│  │  │  ├─ client.py                       # 真实双适配器：OpenAI-compat + Anthropic native + retry + dual-check + parent_event_id + 缺凭据 fallback
-│  │  │  └─ prompts/
-│  │  │     ├─ __init__.py                  # load_prompt / render_prompt（lru_cache）
-│  │  │     ├─ 1a_captions.md               # Phase 1A 字幕样式 + 位置 + placeholder 三件套 prompt
-│  │  │     ├─ 1a_stickers.md               # Phase 1A 贴纸网格抽帧 + semantic_category prompt
-│  │  │     ├─ 1a_zoom_direction.md         # Phase 1A 缩放方向粗判 prompt（首/中/末三帧）
-│  │  │     ├─ 1a_transitions.md            # Phase 1A 转场分类（硬切/叠化/滑入/推拉）prompt
-│  │  │     ├─ 1a_masks.md                  # Phase 1A 几何蒙版有无 + 参数 prompt
-│  │  │     ├─ 1a_color_lut.md              # Phase 1A 调色语义标签 + dominant_lut_id prompt
-│  │  │     ├─ 1a_caption_function.md       # Phase 1A 字幕功能分类 prompt（标题/强调/卖点/CTA/regular/过渡）
-│  │  │     ├─ 2_recommend.md               # Phase 2 模板智能推荐 prompt（top-k VLM 排序 + 中文 reason）
-│  │  │     ├─ 2_caption_emphasis.md        # Phase 2 字幕 emphasis_words 选取（必为 unit_text 子串）
-│  │  │     ├─ 2_fill_gap.md                # Phase 2 缺口字幕文案补全（受 length_constraint 约束）
-│  │  │     ├─ 2_5_nl_edit.md               # Phase 2.5 NL 指令 → Patch 列表（8 op 清单 + ValueObject 约束 + 中文颜色映射）
-│  │  │     └─ scenarios/                   # Phase 0.5 mock 事件脚本（dev_workbench 消费）
-│  │  │        ├─ captions_demo.json
-│  │  │        ├─ stickers_demo.json
-│  │  │        └─ full_extract_demo.json
-│  │  ├─ extract/                           # Phase 1A 视觉理解子能力（统一 ctx 签名 + STAGE 模块常量 + lazy import 缺包降级）
-│  │  │  ├─ __init__.py
-│  │  │  ├─ context.py                      # Phase1AContext：sample 路径 + scenes/frames lazy 缓存 + client(stage)
-│  │  │  ├─ scenes.py                       # 1A-T1 切点检测（PySceneDetect），写 Phase1AReport.scenes[]
-│  │  │  ├─ frame_sampler.py                # 1A-T2 关键帧抽样器（1fps + scene 边界 ±0.2s + 中点）
-│  │  │  ├─ captions.py                     # 1A-V1 字幕样式 + 位置（VLM，跨帧 IoU 合并），写 Phase1AReport.captions[]
-│  │  │  ├─ captions_anim.py                # 1A-V2 字幕动画细节验证（OpenCV 5fps 帧差 + 光流），写 Phase1AReport.captions[idx].verified_anim_in
-│  │  │  ├─ stickers.py                     # 1A-V3 贴纸两阶段（VLM 网格 → CV refine bbox 至 ±5px），写 Phase1AReport.stickers[]
-│  │  │  ├─ motion.py                       # 1A-V4 缩放方向粗判（VLM）+ 1A-V5 缩放曲线（CV 光流），写 Phase1AReport.zoom_directions/.zoom_curves
-│  │  │  ├─ transitions.py                  # 1A-V6 转场分类（VLM），写 Phase1AReport.transitions
-│  │  │  ├─ masks.py                        # 1A-V7 几何蒙版（CV HoughCircles/Canny/HoughLines 三帧多数决主路径 + VLM 兜底），写 Phase1AReport.masks
-│  │  │  ├─ color.py                        # 1A-V8 调色语义（VLM 标签 + OpenCV HSV 直方图微调），写 Phase1AReport.color
-│  │  │  ├─ audio.py                        # 1A-A1 BGM（Demucs htdemucs 分离 + librosa BPM/能量/情绪），写 Phase1AReport.audio.{has_bgm,bpm,mood_tag}
-│  │  │  ├─ skeleton.py                     # 1B 骨架推断（位置阈值发现 + StyleRule 聚合 + sticker 时间转 slot-local [0,1] · D32），读 Phase1AReport 写 TemplateIR.skeleton
-│  │  │  └─ pipeline.py                     # 1B extract DAG 编排（asyncio.gather + _safe 降级 + SUBCAP_TO_IR_PATH 翻译 + KB save）
-│  │  ├─ kb/                                # 1B 知识库
-│  │  │  ├─ __init__.py
-│  │  │  ├─ store.py                        # SQLite templates 表 CRUD（与 tasks 表共用 kb.sqlite WAL；init_db 只在 lifespan 调用 D26）
-│  │  │  ├─ tagging.py                      # 1B Tags 推断（VLM 综合骨架摘要 + 3 帧）
-│  │  │  ├─ sanity.py                       # 1B 整体复查（VLM 验骨架/material_req/placeholder/zoom）
-│  │  │  ├─ recommend.py                    # Phase 2 VLM 模板智能推荐 top-k（catalog + ASR 摘要 + 3 帧）
-│  │  │  └─ select.py                       # Phase 1B 占位：标签精确匹配；Phase 3 接 LLM rerank
-│  │  ├─ apply/                             # Phase 2 应用层（user material + template → ProjectIR）
-│  │  │  ├─ __init__.py
-│  │  │  ├─ mapping.py                      # 2.map — Unit → voice slot 时间顺序绑定 + ±20% speed 钳制 + 超 max 截短 src_timerange（D31）
-│  │  │  ├─ gaps.py                         # 2.gaps — slot 未覆盖检测，按 material_req 分类 fill_strategy
-│  │  │  ├─ fill.py                         # 2.fill — text_fill (LLM) / wrap_fill / reuse 三策略；output_span = slot.nominal；通过 outcomes 返回 fill 结果（不 mutate 原 gaps）
-│  │  │  ├─ style.py                        # 2.style — 套 StyleRule 到 PlacedSegment + LLM 选 emphasis_words + BGM 选曲；导出 `_segment_output_span` / `style_for_segment`（D31/D32 单一真理源）
-│  │  │  └─ pipeline.py                     # 2.pipeline — apply_short DAG 编排（_safe 降级 + STAGE_TO_IR_PATH 翻译 + bgm_mix 自动 ducking · D33 + project.json 落盘）
-│  │  ├─ agent/                             # Phase 2.5 + 5 编辑/AIGC 模块
-│  │  │  ├─ __init__.py                     # Phase 5 占位（aigc / narrative / sfx_preset 等）
-│  │  │  ├─ aigc.py                         # 贴纸生图 / B-roll 占位（Phase 5 填）
-│  │  │  └─ nl_edit.py                      # Phase 2.5 核心：nl_edit(LLM NL→Patch) + panel_to_patches + apply_patches(pure dispatcher) + push_snapshot/undo(D35) + list_patch_history(via events.jsonl D36)
-│  │  ├─ understand/                        # Phase 1A 语义层分类器 + Phase 2 ASR
-│  │  │  ├─ __init__.py
-│  │  │  ├─ vision.py                       # classify_caption_function（caption_idx 入参，写 Phase1AReport.captions[idx].function；命名匹配 CI classify_ 前缀）
-│  │  │  └─ asr.py                          # Phase 2 WhisperX large-v3 + forced align；缺包 fallback 等距 ~3s 分段
-│  │  └─ render/
-│  │     ├─ __init__.py
-│  │     ├─ client.py                       # httpx 调 renderer /render；renderer_health 探活；Phase 2.5 cancel_render(taskId)（D37 supersede）
-│  │     ├─ throttle.py                     # Phase 2.5 项目级 supersede：dict[project_id→in_flight_task_id] + asyncio.Lock + trigger_render_supersede（D37）
-│  │     └─ ffmpeg.py                       # ffmpeg/ffprobe wrapper：normalize（pad_mode=black|blur · D34）/ thumbnail / probe / extract_audio / mix_bgm（sidechaincompress）/ compose_segments
-│  └─ tests/
-│     ├─ __init__.py
-│     ├─ conftest.py                        # temp DATA_ROOT + fresh_event_bus + task_with_events fixtures
-│     └─ unit/
-│        ├─ __init__.py
-│        ├─ test_ir_models.py               # ProjectIR 最小构造 + JSON round-trip
-│        ├─ test_ir_schema.py               # IR JSON Schema 导出含期望 $defs
-│        ├─ test_event_bus.py               # 多订阅 / replay / snapshot 切分 / jsonl tail 续起 / silent
-│        ├─ test_scenarios.py               # mock JSON 解析 + ir_target.path 命中真实 IR + parent 顺序
-│        ├─ test_llm_client.py              # _extract_json / 双 provider fallback / silent / dual-check / 路由
-│        ├─ test_extract_subcaps.py         # 1A 子能力 fallback 形状（缺包 / 空输入 / 缺帧；用 Phase1AContext 直接喂 [] cache）
-│        ├─ test_lab_api.py                 # SubcapabilityLab API 行为（registry / 403 / 404 / dry_run）
-│        ├─ test_check_scripts.py           # 三脚本 grep 守卫在仓库自有代码上跑过
-│        ├─ test_skeleton.py                # 1B 骨架推断（role 阈值 / material_req / 同 role 合并）
-│        ├─ test_kb_store.py                # 1B KB store CRUD + IR round-trip + tags 双列同步
-│        └─ test_apply.py                   # Phase 2 ASR fallback / _clamp_speed / detect_gaps 分类 / ProjectIR.degraded round-trip
-│     └─ integration/
-│        ├─ __init__.py
-│        ├─ test_subcap_shapes.py           # 1A mock-level integration：seeded ctx 跑全部 subcap，断言事件结构 + Phase1AReport ir_target + parent 链路 + schema round-trip
-│        ├─ test_extract_1b.py              # 1B end-to-end pipeline：seeded ctx + 无 credentials → KB 落行 + 事件 ≥ 10 + done 事件压尾
-│        ├─ test_apply_phase2.py            # Phase 2 验证 2/3/4/5/11：字幕同步 / speed 钳制 / 缺口补全 / canvas letterbox / Caption.text 不截断
-│        └─ test_nl_edit.py                 # Phase 2.5 验证：8 个 PatchOp apply_patches + panel_to_patches + snapshot 栈 round-trip + lodash.set 三 op + _snapshot_payload 端到端重建 + list_by_resource DESC 排序
-│
-├─ renderer/                                 # Node Remotion 渲染服务
-│  ├─ package.json                          # pnpm @sceneecho/renderer 依赖与脚本
-│  ├─ tsconfig.json                         # 严格 TS + Bundler 模块解析
-│  ├─ tsconfig.build.json                   # 编译出 dist（CI build 用）
-│  ├─ scripts/
-│  │  └─ gen-types.ts                       # 读 ir.schema.json 写 src/types/ir.ts
-│  └─ src/
-│     ├─ server.ts                          # Express :8001 入口；/health /render /render/queue + Phase 2.5 DELETE /render/:taskId (D37)
-│     ├─ render.ts                          # bundle + selectComposition + renderMedia
-│     ├─ queue.ts                           # p-queue({concurrency:1}) 单 worker 串行 + Phase 2.5 RenderState 注册表 (registerRender / cancelRender / finalizeRender) 支持 supersede
-│     ├─ progress.ts                        # POST 后端 /api/internal/task-progress
-│     ├─ logger.ts                          # pino JSON + withTask child binding
-│     ├─ paths.ts                           # DATA_ROOT 解析 + 渲染源目录定位（ESM 安全）
-│     ├─ remotion.root.tsx                  # registerRoot 入口
-│     ├─ types/
-│     │  └─ ir.ts                           # 生成产物：zod schemas + 推导 TS 类型（gitignored）
-│     └─ compositions/
-│        ├─ Root.tsx                        # <Composition id="Project"> + calculateMetadata
-│        ├─ Project.tsx                     # 顶层组合：多 Sequence × per-seg ZoomLayer/Mask/Sticker + 全局 ColorLayer + Caption overlay + BGM Audio (Phase 2)
-│        ├─ Caption.tsx                     # 单条字幕的位置/动画/描边渲染（1B 双模式 + anim_in 全套 + 多行 + Phase 2 emphasis_words 高亮）
-│        ├─ Mask.tsx                        # 1B 几何蒙版（SVG clipPath circle/rectangle/line_split）
-│        ├─ ColorLayer.tsx                  # 1B 调色层（CSS filter 预设按 dominant_lut_id）
-│        ├─ ZoomLayer.tsx                   # Phase 2 缩放层（interpolate zoom_keyframes + CSS transform scale）
-│        ├─ Sticker.tsx                     # Phase 2 贴纸层（generated_image 双模式：Img / 虚线占位 + Phase 5 替换 badge）
-│        └─ projectMeta.ts                  # 从 IR 算 width/height/fps/durationInFrames（含 speed + caption.end 修正）
-│     └─ preflight.ts                       # Phase 2 渲染前资源校验（user_material / bgm_track / sticker.generated_image 缺则 throw）
-│
-└─ frontend/                                 # React + Vite 前端
-   ├─ package.json                          # pnpm @sceneecho/frontend 依赖与脚本（含 tailwind / radix / lucide / react-arborist / immer / lodash / vitest）
-   ├─ tsconfig.json
-   ├─ vite.config.ts                        # :5173 + /api /data 代理到后端 :18521
-   ├─ tailwind.config.ts                    # Tailwind theme 桥接 tokens.css 的 CSS 变量
-   ├─ postcss.config.js                     # postcss + tailwindcss + autoprefixer
-   ├─ vitest.config.ts                      # vitest + jsdom + react 插件
-   ├─ test-setup.ts                         # 引入 @testing-library/jest-dom matchers
-   ├─ index.html
-   ├─ scripts/
-   │  └─ gen-types.ts                       # 读 ir.schema.json 写 src/types/ir.ts
-   └─ src/
-      ├─ main.tsx                           # 路由入口（Shell + /sample-extract / /workbench/dev / /workbench/:taskId / /projects/:id/replay / /samples/:id/replay）
-      ├─ styles/
-      │  ├─ tokens.css                      # Anthropic 风 design tokens（颜色/字体/间距/圆角/stage 染色）
-      │  └─ global.css                      # @tailwind 注入 + 基础排版 + se-* 组件类（卡片/按钮/动画）
-      ├─ api/
-      │  ├─ index.ts                        # axios 封装：uploadSample / renderDemo / pollTask / dataUrl + Phase 2 projects + Phase 2.5 edit/panelEdit/undoEdit/listPatchHistory/listSampleTasks/listProjectTasks/fetchReplayEvents/snapshotAtSequence/fetchProjectLineage/rejectEvent
-      │  ├─ events.ts                       # subscribeEvents (EventSource) / fetchEventHistory / mock-stream / scenarios
-      │  ├─ templates.ts                    # 1B KB API: triggerExtract / list / get / patchTags / patchPlaceholder / delete / getEvents
-      │  └─ lab.ts                          # SubcapabilityLab API：listSubcaps / runSubcap / getBaseline
-      ├─ state/
-      │  ├─ index.ts                        # Zustand store：currentTask
-      │  └─ workbench.ts                    # 工作台 store：events / irSnapshot (immer + lodash.set) / childIndex / vetoedIds / autoFollow / 选中 / 过滤 / visionPaneMode / streamViewMode
-      ├─ components/
-      │  ├─ TaskProgress.tsx                # task_id 轮询 + 进度条 + 错误展示
-      │  ├─ RemotionPlayer.tsx              # Phase 2 CSS-based 预览（<video> + playbackRate + CSS zoom/caption/sticker 叠层，不打包 Remotion bundle）
-      │  ├─ ExtractHistoryList.tsx          # Phase 2.5 通用样例/项目历史列表（任务 kind 中文映射 + 状态色 + 相对时间）
-      │  ├─ editor/
-      │  │  ├─ NLBar.tsx                    # Phase 2.5 Editor 底部 NL 输入栏 → POST /projects/{id}/edit
-      │  │  ├─ ParamPanel.tsx               # Phase 2.5 Editor 左侧参数面板（字幕颜色/字号/位置/动画/换行/placeholder/节奏/画布/BGM） → POST /panel-edit
-      │  │  └─ PatchHistoryList.tsx         # Phase 2.5 Editor 右侧编辑历史（GET /history） + Undo 按钮（POST /undo）
-      │  └─ workbench/
-      │     ├─ WorkbenchVisionPane.tsx      # 左栏：选中事件帧 + bbox overlay + 「帧/原视频」toggle（video 单挂载，按 frame_ts 命令式 seek，autoFollow 时不打断连续观看）
-      │     ├─ WorkbenchEventStream.tsx     # 中栏：默认按 stage 分组（可切按到达顺序）+ ↑↓/Enter/X 快捷键 + URL stage_filter/time_range + 否决线穿 + reasoning pre-wrap 自然多行
-      │     ├─ WorkbenchIRPane.tsx          # 右栏：react-arborist 渲染 IR 树 + 命中字段 800ms 高亮 + 点击叶子 pin 到底部 detail strip（lodash.get 实时取值显示全文）
-      │     ├─ WorkbenchBreadcrumb.tsx      # Phase 2.5 工作台顶栏面包屑「样例|项目 > {resource} > {kind 中文} #{tid 前 8}」
-      │     ├─ EventBadge.tsx               # stage 前缀染色徽章（badgeColor 导出）
-      │     └─ BboxOverlay.tsx              # 0-999 → 像素的 SVG bbox + 标签气泡（bboxToRect 导出）
-      ├─ pages/
-      │  ├─ SampleExtract.tsx               # 阶段 0/1B 上传 + 渲染 demo + 「提取模板（1B）」按钮 + 工作台跳转 + Phase 2.5 ExtractHistoryList + ?sample_id= 反向回跳
-      │  ├─ TemplateLibrary.tsx             # 1B `/templates` 列表 + `/templates/:id` 详情（骨架/sanity/placeholder 编辑/事件回放）+ Phase 2.5 详情页底部「本样例其它提取记录」
-      │  ├─ Editor.tsx                      # Phase 2 出片闭环：上传 → 推荐 → 应用 → 预览 → 渲染 + Phase 2.5 三栏 [ParamPanel | Preview+NLBar | PatchHistoryList]
-      │  ├─ Visualize.tsx                   # Phase 2.5 `/projects/:id/replay` 与 `/samples/:id/replay` 事件回放器（时间线 scrub + 倍速 + MediaRecorder 60s 录屏导出）
-      │  ├─ Workbench.tsx                   # /workbench/:taskId 三栏页面：SSE 订阅 + history 预填 + Phase 2.5 顶栏 WorkbenchBreadcrumb
-      │  ├─ WorkbenchLauncher.tsx           # /workbench/dev：列出 mock scenarios + 启动按钮
-      │  └─ SubcapabilityLab.tsx            # /lab：DEV-only Phase 1A 子能力 × fixture 单点验证
-      ├─ vite-env.d.ts                      # /// <reference types="vite/client" /> 让 import.meta.env 可解析
-      └─ types/
-         ├─ ir.ts                           # 生成产物（gitignored）
-         └─ workbench.ts                    # 本地 VisionEvent / IRTarget / ScenarioListItem 类型镜像
-```
+---
+
+## 根目录与配置
+
+仓库是一个 pnpm workspace 组织的 monorepo，根目录下并列三个独立服务：`backend/`（Python FastAPI）、`renderer/`（Remotion 视频渲染）、`frontend/`（React 编辑器 UI）。`shared/` 放跨服务共享的类型定义，`scripts/`、`tests/`、`docs/` 是仓库级别的工具与文档。Node 侧用 pnpm 统一管理，Python 侧由 `backend/` 自己的 `pyproject.toml` 管。
+
+- `PLAN.md`              当前阶段的执行路径，刚接手项目时先读它了解全局节奏。
+- `README-PLAN.md`       `PLAN.md` 自身的写作规范，平时不用看，要修改 PLAN 时再读。
+- `README.md`            仓库门面（占位标题）；真正的上手指南在 `docs/005DEVELOPMNET.md`。
+- `taskRequirements.md`  课题原始需求书，写明产品目标与约束，做产品决策时回看。
+- `package.json`         根 workspace 的入口，定义 `pnpm dev`、`pnpm gen:types` 等聚合命令。
+- `pnpm-workspace.yaml`  声明 `renderer` 和 `frontend` 两个 Node 子包；`backend` 不属于 pnpm。
+- `.env.example`         所有服务读取的环境变量样例（数据根目录、服务端口、LLM 凭据等），复制成 `.env` 后填值，`.env` 本身被 gitignore。
+- `.gitignore`           标准 Python / Node 忽略规则，外加 `backend/data/`、生成的类型与 schema、测试视频素材。
+
+### .github/workflows/
+
+- `ci.yml`               GitHub Actions 配置，分四个 job：类型同步校验、Python 单测与守卫脚本、renderer 类型与测试、frontend 类型与构建。
+
+---
+
+## docs/  项目文档
+
+文档采用编号体系，001–005 是常驻主文档，分别覆盖架构、目录结构、活跃问题、变更历史、首次上手；`decisions/` 沉淀已拍板的架构决策，`proposals/` 与 `future-plans/` 分别放讨论中的方案与远期规划。每次新对话开始前应先读 `000README.md` 和 `001ARCHITECTURE.md` 建立基本认知。
+
+- `000README.md`           文档体系本身的使用说明，规定每个编号文档的职责与更新时机。
+- `001ARCHITECTURE.md`     系统怎么运作、模块怎么协作，理解整个项目的入口。
+- `002STRUCTURE.md`        本文件，代码与目录的导航地图。
+- `003ISSUES.md`           当前活跃的问题清单及其状态。
+- `004CHANGELOG.md`        按时间顺序的变更历史，回溯"什么时候改了什么"用。
+- `005DEVELOPMNET.md`      第一次 clone 仓库的开发者按它一步步把三个服务跑起来。
+- `006API.md`              🚧 占位（计划中）—— 带场景的接口导览，串起典型用户流程；详细字段查 FastAPI `/docs`。
+- `decisions/`             已拍板的架构决策记录（ADR），每份回答"当时为什么这么决定、否定了哪些方案"。
+- `proposals/`             讨论中尚未拍板的方案（如工作台 v4 设计、v3.1 一致性修复方案）。
+- `future-plans/`          暂不实施但已识别的远期想法，避免被反复重新讨论。
+
+---
+
+## shared/
+
+- `ir.schema.json`         backend 的 pydantic 模型导出的 JSON Schema，是 renderer 和 frontend 生成 TypeScript 类型的唯一源头；CI 自动生成，**已 gitignored**，本地需要先跑 `pnpm gen:types`。
+
+---
+
+## scripts/  CI 守卫与产物生成
+
+仓库级别的 Python 工具脚本：一类是从后端 pydantic 模型导出共享 schema 给前端用，另一类是 CI 守卫，对后端代码做静态检查，确保关键约定（事件命名、事件发射、因果链字段等）不被悄悄破坏。本地提交前可以手动跑一遍。
+
+- `gen_schema.py`              把后端的 IR 模型导出成 `shared/ir.schema.json`，前端类型生成的第一步。
+- `build_bgm_index.py`         扫描 BGM 资源目录，生成检索用的索引文件供后端的 BGM 推荐使用。
+- `check_stage_naming.py`      CI 守卫：保证 AI 调用发出的事件标签遵循统一命名规范。
+- `check_event_emission.py`    CI 守卫：保证每个 AI 调用方法都至少广播一条事件。
+- `check_parent_event_id.py`   CI 守卫：保证两段式 VLM 调用正确串联因果链字段。
+
+---
+
+## tests/fixtures/  测试用样例视频
+
+跨语言、跨服务共用的测试视频素材（短样例、含字幕、含贴纸、含蒙版等不同特征的口播片段）。**整目录除 README 外都不入 git**——文件体积大、不适合版本控制；每位开发者按 README 自行准备本地副本，集成测才能跑起来。
+
+---
+
+## backend/  顶层配置与数据目录
+
+后端是 Python FastAPI 服务，所有运行时产物（用户上传、提取结果、渲染输出、数据库、日志）都落在 `backend/data/`，便于一键清理与备份。代码本身在 `backend/app/`（见后续章节），测试在 `backend/tests/`，根级只有少量配置。
+
+- `pyproject.toml`         后端 Python 包定义：依赖清单（FastAPI、pydantic、httpx 等）、可选的重型 ML 依赖组、pytest 配置。新建 venv 后用 `pip install -e .[dev]` 安装。
+- `ruff.toml`              Python 代码格式与 lint 规则（行宽 100、Python 3.11、启用一组常用检查），CI 与本地保持一致。
+- `data/`                  默认的数据根目录，**整目录被 gitignore**。运行时分几类落地：`samples/` 用户上传的样例视频与提取产物；`projects/` 用户项目（实例化的时间线、渲染产物、编辑历史）；`system/` 字体、BGM 池等系统资源；`aigc/` AI 生成的贴纸与 B-roll 缓存；`kb.sqlite` 模板知识库数据库；`logs/` 运行日志。可通过 `.env` 的 `DATA_ROOT` 改到别处。
+
+### backend/tests/
+
+后端测试分两层：`unit/` 是不依赖外部资源的纯单测，覆盖 IR 模型、配置、事件总线、知识库、LLM 客户端、各子能力函数等；`integration/` 是端到端链路测，跑真实的提取、编辑、应用流程，依赖 `tests/fixtures/` 下的视频素材。
+
+- `conftest.py`            pytest 公共夹具，主要为每次会话准备一份临时的 `DATA_ROOT`，把 `tests/fixtures/` 的素材复制进去，避免污染本地数据目录。
+- `unit/`                  单元测试：覆盖 IR 数据模型与 schema、配置加载、事件总线、知识库存储、LLM 客户端封装、各子能力函数、CI 守卫脚本本身等。
+- `integration/`           集成测试：覆盖完整的提取链路、应用链路、自然语言编辑链路，以及子能力输出的形状校验，需要本地准备好 fixtures 才能通过。
+
+---
+
+## backend/app/  应用入口与基础设施
+
+后端 FastAPI 应用的根目录。新人启动服务、调整全局配置、追踪一次 AI 调用从产生到落盘到推送前端的链路时，会先来这里。装的是"任何子模块都可能用到的东西"：进程入口、配置、日志、事件总线、任务表。
+
+- `main.py`            FastAPI 应用入口，挂载所有路由、初始化数据目录、串接事件总线与任务表。
+- `config.py`          从 `.env` / `.env.local` 加载全局设置（数据根目录、各服务地址、模型名、AI 开关等）。
+- `logging.py`         结构化日志（JSON 输出）的初始化与取用入口。
+- `cli.py`             本地开发用的命令行工具，把素材文件拷进 `samples/` / `projects/` 目录并做归一化（需要 `ENABLE_CLI_INGEST` 才开启）。
+- `event_bus.py`       进程内的"AI 决策事件总线"：每次 AI 调用产出的事件先在这里广播，再分别落到 JSONL 文件、推给浏览器的 SSE 订阅者。
+- `tasks_store.py`     后台任务表（SQLite）的封装，记录每个长耗时任务的状态、进度、所属资源、事件文件路径。
+
+### backend/app/api/  HTTP 路由层
+
+所有对外暴露的 HTTP / SSE 端点都注册在这里。每个文件对应一类资源或一个使用场景，新人想加接口、查接口契约、排查前端报错时先打开对应文件。文件本身只做参数校验和编排，真正的算法逻辑在 `agent/` `extract/` `apply/` `render/` 等姊妹目录。
+
+- `samples.py`         样片上传与归一化接口，以及一个最小化的渲染示例端点。
+- `projects.py`        用户项目主线接口：上传素材、模板推荐、装配生成、查看项目数据、触发渲染、获取播放器属性、混入背景音乐。
+- `templates.py`       模板库（KB）的增删改查与事件流接口。
+- `tasks.py`           任务状态查询接口，并接收渲染器回调的进度 webhook。
+- `events.py`          AI 决策事件的 SSE 推送流，以及历史事件回放接口，是前端工作台三栏视图的数据来源。
+- `edit.py`            项目编辑接口：自然语言改稿、面板直接改、撤销、查看改动历史。
+- `replay.py`          按项目 / 素材 id 拉取一个任务跑过的全部事件，并可重建任意时间点上的中间产物，供前端"时间线回放"页使用。
+- `dev_workbench.py`   开发模式下的模拟事件流入口：让前端工作台在没有真实 AI 调用时也能联调（需打开 `ENABLE_DEV_MOCK`）。
+- `lab.py`             开发模式下的"单点能力实验室"后端：选一份样例 + 一个识别子能力跑一次，实时观察事件流（需打开 `ENABLE_DEV_MOCK`）。
+
+### backend/app/ir/  系统的"数据形状"定义
+
+整个后端共享的数据结构都在这里以 pydantic 模型形式定义：识别中间产物、可复用模板、最终项目时间线、AI 事件、编辑操作。前端 TypeScript 类型和渲染器的 zod 校验都从这里 codegen 出去，所以这是数据契约的唯一真源。新人想知道"某个字段叫什么、嵌在哪一层、谁能改"就来这里。
+
+- `ledger.py`              逐字带时间戳的语音转写结果（文本本身不可变，只允许 AI 改字号划分）。
+- `template.py`            可复用的"风格配方"模板：骨架槽位 + 各类风格规则 + 标签。
+- `project.py`             最终装配出来的项目时间线数据（剪辑片段、字幕轨道、背景音乐等），渲染器吃它出 MP4。
+- `phase1a_report.py`      视频素材识别阶段的中间报告，把切镜、画面字幕、贴纸、调色、镜头运动等多个子能力的结果汇总到一棵树上。
+- `vision_event.py`        一次 AI 决策的结构化记录：模型输入摘要、输出、置信度、要写入哪份数据的哪个字段；事件总线广播的就是它。
+- `patch.py`               统一的"编辑操作"数据结构：自然语言改、面板改、人工审核改都翻译成它。
+- `path_validator.py`      校验事件里引用的字段路径是否真的指向某个模型的真实字段，避免前后端字段错位。
+- `export.py`              把本目录所有顶层模型聚合导出成一份 JSON Schema 文档，供前端 / 渲染器代码生成对齐。
+
+### backend/app/extract/  视频原始信号识别
+
+把一段输入视频拆成机器可读的结构化信号——分镜、字幕、贴纸、缩放、转场、蒙版、调色、配乐——是后续模板生成与剪辑推荐的"眼睛"。文件按视频维度拆分：每个 .py 负责识别一类视觉/听觉要素，对外提供 `detect_*` / `classify_*` 异步函数，返回结构化结果与一串可观测事件。新人想加一种新的识别能力（比如人脸表情），就在这里加一个新文件并接进 `pipeline.py` 的 DAG。
+
+- `context.py`             一次抽取的共享上下文对象，把分镜、采样帧、LLM 客户端缓存起来，避免子识别器重复跑 PySceneDetect / ffmpeg。
+- `frame_sampler.py`       用 ffmpeg 按 1fps + 切点附近 ±0.2s + 每镜头首中末帧抽 JPEG。
+- `scenes.py`              用 PySceneDetect 切分镜头，给每个 scene 输出代表帧供工作台预览。
+- `captions.py`            调用 VLM 在采样帧上识别字幕的位置、字号、颜色、描边、动画类型，跨场景去重合并。
+- `captions_anim.py`       用 OpenCV 帧差和光流精修字幕入场动效（逐字弹入 / 整句滑入 / 淡入 / 打字机）。
+- `stickers.py`            VLM 网格采样识别贴纸的位置、语义类别，再用 Canny + 帧差细修边界框。
+- `motion.py`              VLM 粗判每个分镜的镜头缩放方向（推进 / 拉远 / 稳定），非稳定的再用光流估出关键帧曲线。
+- `transitions.py`         VLM 看相邻 scene 边界前后三帧，分类转场类型（硬切 / 叠化 / 滑动 等）。
+- `masks.py`               几何蒙版识别：CV 主路径（HoughCircles / Canny 矩形 / HoughLinesP）+ VLM 兜底。
+- `color.py`               VLM 给主观调色标签 + LUT id，OpenCV 算 HSV 直方图作为数值佐证。
+- `audio.py`               用 Demucs 分离人声/伴奏 + librosa 算 BPM、能量曲线、情绪标签，得到背景音乐画像。
+- `skeleton.py`            把上面所有识别结果按时间位置归并成"开头 / 主体 / 结尾"三段骨架，每段挂上对应的字幕、贴纸、缩放、蒙版、转场样式。
+- `pipeline.py`            把所有识别器编排成一个 DAG，统一处理并发、降级、事件汇总，最后产出模板数据并写入知识库。
+
+### backend/app/understand/  语音与高层语义理解
+
+视觉识别之外的两条理解通路。`extract/` 关心"画面里有什么"，这里关心"声音说了什么、字幕在干什么"，输出供后续口播匹配与字幕功能识别使用。
+
+- `asr.py`                 WhisperX large-v3 中文转写 + 词级时间戳 + 强制对齐，按 0.3s 停顿合并出语句单元；模型缺失时降级为按时长均匀切块，并打降级事件。
+- `vision.py`              字幕功能分类器：拿 `extract/captions.py` 已识别的字幕条目，调一次 VLM 判断功能（强调 / 标题 / 旁白 / 普通…）。
+
+### backend/app/llm/  大模型调用层
+
+所有对外 LLM / VLM 调用统一从这里出去。新人接入新模型、调超时、改重试策略，都改这一处即可。客户端层会自动计时、把每次调用包装成可观测事件、在凭据缺失或上游连错三次时退化成空 schema 兜底，保证识别管线不会因为单次网络故障整体崩掉。
+
+- `client.py`              LLM/VLM 客户端：抽象基类 + OpenAI 兼容适配器（Qwen-VL / GPT-4o / 本地 vLLM）+ 原生 Anthropic 适配器，统一处理结构化输出校验、计时、事件发射、降级兜底。
+
+#### backend/app/llm/prompts/  提示词模板
+
+按"识别能力"组织的 markdown 提示词文件，每个 .md 对应一个识别 / 推荐场景的 system prompt，由模块入口按文件名加载并缓存。改提示词不需要动 Python 代码，直接编辑对应 .md 即可。
+
+- `scenarios/`             端到端验收用的示例任务 JSON（字幕、贴纸、整套抽取 demo），用于本地跑通完整链路时的固定输入。
+
+### backend/app/kb/  模板库
+
+模板是从样例视频中提取出来的"剪辑骨架"（一连串镜头槽位 + 字幕 / 贴纸 / 转场风格）。这个目录负责把模板存进 SQLite、给模板打标签、做质量复查，以及在用户上传素材时挑出最合适的模板。新人想新增一种推荐策略、调整模板存储字段、或者改打标签的提示词，都来这里。
+
+- `store.py`               模板的持久化层：在 `data/kb.sqlite` 里维护一张 `templates` 表，提供新增、查询、按 ID 取详情等接口。
+- `tagging.py`             模板标签合成：让视觉模型从位置、功能、场景、备注四个维度给模板打标签，结果写回模板数据。
+- `sanity.py`              模板整体复查：抽几张代表帧，让视觉模型判断这个模板的骨架顺序、字幕占位、缩放参数是否自洽。
+- `recommend.py`           推荐入口：把用户素材的几帧抽样 + 语音摘要丢给视觉模型，让它在整个模板库里挑出排名靠前的几个并给出中文理由。
+- `select.py`              简版选模板器：按标签精确匹配返回最相似的一条，作为推荐链路的兜底选项。
+
+### backend/app/apply/  自动出片装配
+
+"用户素材 + 选中模板 → 最终可渲染视频结构"的核心装配线。每个文件对应装配流水线的一个环节，串起来就是把一段口播按模板的节奏切片、补缺、上字幕和贴纸。新人想调整素材匹配规则、新增补缺策略、改字幕样式来源，主要工作在这里。
+
+- `mapping.py`             按时间顺序把用户语音切片绑定到模板的镜头槽位，并按槽位时长计算变速（限制在 ±20%）。
+- `gaps.py`                识别哪些模板槽位没有用户素材覆盖，标记为待补缺的"缺口"，区分口播缺口和包装类缺口。
+- `fill.py`                给缺口补内容：三种策略——文本模型生成补字幕、用占位风格做"包装型"片段、或复用相邻片段尾帧做停留。
+- `style.py`               把模板里每个槽位的样式（字幕、缩放、贴纸、转场、调色）套到对应片段上，并选定背景音乐。
+- `pipeline.py`            装配流水线总控：依次跑归一化、语音识别、绑定、缺口、补缺、上样式、存盘，并把任何一步的失败信息收集到产物的"降级标记"里，不中断后续步骤。
+
+### backend/app/agent/  编辑代理
+
+用户拿到自动出的初版视频后，会通过自然语言（"把第二段字幕字号调大点"）或参数面板做局部调整。这个目录负责把编辑请求落到项目数据上，并提供撤销能力。新人想接入新的编辑指令类型、调整撤销策略，从 `nl_edit.py` 入手。
+
+- `nl_edit.py`             自然语言 / 面板编辑核心：把指令翻译成结构化编辑指令并应用到项目数据，应用前先把旧版项目快照存盘以便撤销，同时把每次编辑过程广播给前端工作台。
+- `aigc.py`                🚧 占位（计划中）—— 贴纸图片、B-roll 视频等 AIGC 生成接口，目前只返回 None。
+
+### backend/app/render/  渲染基础设施
+
+视频最终输出依赖两个外部能力：本地 ffmpeg（做转码、归一化、缩略图等基础处理）和一个独立的 Node 渲染服务（Remotion 把项目数据出成最终 MP4）。这个目录是这两者的封装层，外加一个防止重复渲染的节流器。新人想调整渲染参数、对接新的渲染后端、或者改连续编辑时的渲染合并策略，来这里。
+
+- `ffmpeg.py`              ffmpeg / ffprobe 命令行封装：读媒体信息、归一化分辨率帧率、做黑边或模糊背景填充、抽缩略图。优先用系统 ffmpeg，找不到则回退到 imageio-ffmpeg 自带的二进制。
+- `client.py`              通过 httpx 调远端渲染服务的 HTTP 客户端，支持发起渲染、取消渲染、健康检查。
+- `throttle.py`            项目级渲染节流：用 `asyncio.Lock` 保证同一项目同时只有一个渲染在跑，新的渲染请求会自动取消旧任务，避免连续编辑时排队堆积。
+
+---
+
+## renderer/  视频渲染服务（Node + Remotion）
+
+一个独立运行的 Node 进程，监听 `RENDERER_PORT`（默认 8001），接收后端推过来的项目数据并把它渲染成最终的 mp4 文件。内部用 Remotion + 无头 Chromium 把 React 组件逐帧渲染成视频，再用 ffmpeg 编码成 H.264。后端只负责生成项目描述并 POST 过来，进度通过回调写回后端的 `/api/internal/task-progress`，渲染好的文件落到共享数据目录里供前端预览。
+
+顶层只有 TypeScript 工程的标配：`package.json`（依赖 Remotion、Express、pino、p-queue、zod 等）、`tsconfig.json` / `tsconfig.build.json` 配置编译。
+
+### renderer/scripts/
+
+- `gen-types.ts`           从 `shared/ir.schema.json` 生成 TypeScript 类型 + zod 校验代码，让渲染端和后端共用同一份数据结构定义。
+
+### renderer/src/
+
+- `server.ts`              渲染服务的 HTTP 入口；提供健康检查、查询渲染队列、提交渲染任务、按任务 ID 取消任务四个接口。
+- `render.ts`              单次渲染的主流程：解析素材路径成可访问 URL、调 Remotion 打包页面、计算画布参数、逐帧渲染并写出 mp4，途中向后端汇报进度。
+- `queue.ts`               渲染任务的串行队列（一次只跑一个，避免无头浏览器互相抢资源），同时维护每个任务的取消标记，用于"自动取消旧渲染"。
+- `progress.ts`            把渲染过程中的进度百分比和阶段名回传给后端的小工具。
+- `preflight.ts`           渲染前的资源体检：扫描项目里引用到的用户素材、背景音乐、贴纸图等，逐一确认文件存在；缺哪个就直接报错，避免渲染出半截画面是 404 的废片。
+- `logger.ts`              日志封装（pino），统一附带服务名和任务 ID 字段。
+- `paths.ts`               解析数据根目录、把项目里的相对路径转成绝对路径的小工具。
+- `remotion.root.tsx`      Remotion 的入口注册文件，把根组件挂上去。
+- `types/ir.ts`            生成产物（gitignored）：由 `scripts/gen-types.ts` 从共享 schema 生成的 zod schema + TS 类型。
+
+### renderer/src/compositions/  渲染组件
+
+按视觉元素拆分的渲染组件，每个文件负责一种叠加层；最外层 `Project.tsx` 把它们按"全局调色 → 每段视频 + 缩放 + 贴纸 + 蒙版 → 顶层字幕 → 背景音乐"的顺序组合起来。
+
+- `Root.tsx`               Remotion 的根组件，声明可渲染的合成；画布尺寸、帧率、总时长由项目数据动态推导。
+- `Project.tsx`            把项目数据组合成一段完整的可渲染时间线（用户素材、字幕、贴纸、蒙版、缩放、调色、背景音乐都在这里编排）。
+- `projectMeta.ts`         从项目数据里推导画布尺寸、帧率和总时长的小工具，给 Root 和渲染日志共用。
+- `Caption.tsx`            字幕条渲染组件，支持模板预览（占位文案）和正式输出（真实台词）两种模式，带描边和入场动画。
+- `Sticker.tsx`            贴纸渲染组件；有图就放图，没图则画一个明显的占位框提示"此处待生成图片"。
+- `Mask.tsx`               几何蒙版叠加层（圆形 / 矩形 / 上下分割），把蒙版外的区域压暗以突出主体。
+- `ZoomLayer.tsx`          根据关键帧曲线对单段视频做平滑缩放推拉的包裹层。
+- `ColorLayer.tsx`         整片调色层，把语义化色调标签（暖调、冷调、电影感）映射成一组 CSS 滤镜。
+
+---
+
+## frontend/  前端（React + Vite）
+
+浏览器单页应用，开发态由 Vite 起在 `5173`，所有数据请求都打到后端的 `/api`，所有素材资源（视频、JPEG 帧、字幕字体等）走 `/data`，由 Vite 代理转发到 FastAPI。代码分五块：`pages/` 是路由级页面、`components/` 是可复用 UI、`state/` 是全局状态、`api/` 是后端调用封装、`styles/` 是设计令牌与全局样式。它围绕两条主线展开：「上传素材 → 推荐模板 → 出片 → 编辑」的出片流程，以及「实时观看 AI 决策每一步」的透明工作台。
+
+顶层是标准 Vite + React + Tailwind + Vitest 配置（`package.json` / `vite.config.ts` / `tailwind.config.ts` / `tsconfig.json` / `vitest.config.ts` / `postcss.config.js` / `test-setup.ts` / `index.html`），新人只在改构建或调试 Tailwind 时才需要看。
+
+### frontend/scripts/
+
+- `gen-types.ts`           从 `shared/ir.schema.json` 生成 `src/types/ir.ts`（zod schema + TS 类型），保证前后端共用同一份视频结构定义。
+
+### frontend/src/
+
+- `main.tsx`               应用入口。挂载 `<BrowserRouter>`、注册全部路由（样例提取、模板库、出片编辑器、工作台、复盘页、Dev 入口）、提供顶部带导航的统一外壳；访问 `/` 重定向到 `/sample-extract`，Dev 路由仅在开发构建下挂载。
+- `vite-env.d.ts`          Vite 客户端类型声明，让 `import.meta.env` 可解析。
+
+### frontend/src/api/  接口封装
+
+浏览器到后端的 HTTP 客户端封装（基于 axios 与浏览器原生 EventSource / SSE），所有页面只通过它访问后端，不直接拼 URL。
+
+- `index.ts`               汇总导出。封装上传素材、模板推荐、应用模板、查询和触发渲染、自然语言编辑、参数面板编辑、撤销、读取编辑历史、按序号回放快照、查询素材族谱、否决某条 AI 事件等所有 REST 接口。
+- `events.ts`              工作台事件流订阅。基于 SSE 长连接订阅一个任务的 AI 决策事件（断线由浏览器自动重连），并提供历史回放接口与 Dev 模拟流的启动入口。
+- `templates.ts`           模板库接口封装：触发提取、列模板、读模板详情、改标签 / 字幕占位、删模板、读单个模板的提取事件流。
+- `lab.ts`                 单点能力实验室接口封装：列出全部子能力、用某个样例素材跑单步检测、读取基线 JSON 用于对比。
+
+### frontend/src/state/  全局状态
+
+基于 Zustand 的两个轻量 store。
+
+- `index.ts`               存当前关注的后台任务状态，给跨组件的 loading / 错误条用。
+- `workbench.ts`           工作台核心 store：保存事件流、根据事件实时累积出的视频结构快照（用 immer + lodash 做不可变更新）、当前选中事件、用户否决标记、过滤范围、暂停 / 跟随状态、视图切换。事件按 ID 去重，所以 SSE 直推和历史回灌可以并行不冲突。
+
+### frontend/src/components/  可复用组件
+
+跨页面复用的展示与交互组件。
+
+- `RemotionPlayer.tsx`             浏览器内的视频预览。基于 HTML `<video>` 加 CSS 叠加字幕、缩放、贴纸，无需打包 Remotion 编排代码就能 1:1 模拟最终成片，给编辑器实时预览用。
+- `TaskProgress.tsx`               通用的后台任务进度条：每秒轮询一次任务状态，跑完或失败时回调宿主组件。
+- `ExtractHistoryList.tsx`         给样例 / 出片项目页用的"过往任务"列表：列出该资源的所有提取 / 编辑 / 渲染任务，每条都是回到工作台的链接。
+
+#### frontend/src/components/editor/  出片编辑器三栏组件
+
+出片页用到的左 / 中 / 下 / 右组件，配合主页面构成"参数面板 + 实时预览 + 自然语言指令 + 历史"的工作流。
+
+- `NLBar.tsx`                      底部自然语言指令输入框：用户敲"字幕改黄色"等回车，调后端做一次自然语言编辑并通知主页面刷新预览。
+- `ParamPanel.tsx`                 左侧参数面板：把字幕颜色 / 动画 / 位置、节奏、画布尺寸、BGM 等做成可视控件，每个控件改动直接调后端的面板编辑接口。
+- `PatchHistoryList.tsx`           右侧编辑历史：逆序列出本项目每次编辑，每条带跳到工作台的链接，顶部按钮做撤销。
+- `ProjectHistoryStrip.tsx`        编辑器顶部的"最近项目"横向条，点一下即可切换历史项目，当前项目以高亮形式保留在条上。
+- `StepCard.tsx`                   数字编号的步骤卡容器，给出片页和样例页的多步流程做统一外观（编号徽章 + 状态色 + 标题 + 内容槽）。
+
+#### frontend/src/components/workbench/  AI 透明工作台三栏组件
+
+工作台页用到的左中右三栏视图组件，目标是把 AI 的每一次"看 / 想 / 改"都展示出来。
+
+- `WorkbenchVisionPane.tsx`        左栏画面视图：默认放选中事件的单帧截图并叠检测框，可一键切到完整视频回放。
+- `WorkbenchEventStream.tsx`       中栏事件流列表：按阶段分组或按到达顺序展示每条事件的徽章 / 摘要 / 严重度边线，支持选中、否决、跟随最新事件。
+- `WorkbenchIRPane.tsx`            右栏视频结构树：基于 react-arborist 把当前累积出的视频结构以可折叠树展示，叶子节点显示截断后的字段值预览。
+- `WorkbenchBreadcrumb.tsx`        顶栏面包屑：根据任务的资源类别拼出"样例 > xxx > 提取任务 #abc"或"项目 > xxx > 应用任务 #abc"。
+- `EventBadge.tsx`                 按阶段前缀渲染不同底色的徽章，颜色统一来自 CSS 变量。
+- `BboxOverlay.tsx`                把归一化的检测框换算到帧的真实像素并以 SVG 叠在画面上。
+
+### frontend/src/pages/  页面
+
+每个文件对应 `main.tsx` 里注册的一条路由。
+
+- `SampleExtract.tsx`              起始页（`/sample-extract`）。上传一段口播视频，看到时长 / 流信息，可一键试渲染或触发模板提取，下方列出该样例的历史任务。
+- `TemplateLibrary.tsx`            模板库（`/templates` 列表 + `/templates/:id` 详情）。详情页能改标签和字幕占位、删除模板，并提供回到工作台看本模板提取过程的入口。
+- `Editor.tsx`                     出片编辑器（`/editor` 与 `/editor/:projectId`）。串起完整出片流程：上传素材 → 取推荐 → 选模板应用 → 进入三栏（参数面板 / 实时预览 / 编辑历史）边看边调 → 渲染最终 MP4。
+- `Workbench.tsx`                  实时工作台（`/workbench/:taskId`）。挂上 SSE 实时拿事件，同时拉一遍历史事件回灌做兜底，喂进 store 后渲染顶部面包屑加三栏视图。
+- `Visualize.tsx`                  复盘页（`/projects/:projectId/replay` 与 `/samples/:sampleId/replay`）。从后端拉某个任务的全部事件 JSONL，按选定速度重新喂进同一个工作台 store，达到"重播一遍"的效果，并支持一键 MediaRecorder 录屏导出。
+- `WorkbenchLauncher.tsx`          开发模式入口（`/workbench/dev`）。列出所有内置 mock 场景，点一下让后端按脚本广播一串假事件，便于在没有真实视觉模型时调试三栏 UI。
+- `SubcapabilityLab.tsx`           开发模式单点能力实验室（`/lab`）。挑一个子能力 + 一个样例跑单步检测，跳到工作台查看结果并对照基线。
+
+### frontend/src/types/
+
+- `ir.ts`                          生成产物（gitignored）：由 `scripts/gen-types.ts` 从 `shared/ir.schema.json` 生成的 zod schema 与 TS 类型，前后端共用。
+- `workbench.ts`                   工作台事件、阶段、检测框等结构的 TS 接口定义；手写一份与后端镜像，避免新人拉下代码立即能跑、不必先做代码生成。
+
+### frontend/src/styles/
+
+- `tokens.css`                     设计令牌（CSS 变量）：统一定义颜色、字体、间距、圆角、阴影，以及工作台事件徽章的阶段调色板。所有页面共用，禁止页面级配色。
+- `global.css`                     全局样式入口：引入 `tokens.css`、Tailwind 三件套、基础排版，以及少量复用类（卡片、主按钮、ghost 按钮、检测框脉冲、事件入场动画等）。

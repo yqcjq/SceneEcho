@@ -599,3 +599,47 @@ PLAN.md 1666-1759 声明阶段 2.5：用户用自然语言或参数面板改 Pro
 
 **解决方案**：
 按 PLAN 完整落地阶段 2.5：新增 `agent/nl_edit.py` 一文件覆盖 NL→Patch / panel→Patch / apply_patches / snapshot 栈 / list_patch_history 五个能力；新增 `api/edit.py` 与 `api/replay.py` 暴露 4+5 个端点；扩 `api/projects.py` 与 `api/samples.py` 加 history + lineage；扩 `tasks_store.py` 加 `list_by_resource` + 复合索引；新增 `render/throttle.py` 实现 project-level supersede + renderer 端 `DELETE /render/:taskId`；前端新增 3 个 Editor 子组件（NLBar / ParamPanel / PatchHistoryList）+ `Visualize` 回放页 + `ExtractHistoryList` / `WorkbenchBreadcrumb` 通用组件；扩 `Editor.tsx` / `Workbench.tsx` / `SampleExtract.tsx` / `TemplateLibrary.tsx` 挂载组件；新增 `2_5_nl_edit.md` Prompt；新增集成测试覆盖 PLAN 验证 1-8。决策详见 `decisions/008-phase2-5-edit-storage.md`。
+
+
+
+---
+
+## [ISS-016] 002STRUCTURE.md 对外部新人不友好 + 缺接口导览文档
+
+**状态**：[已解决]
+**优先级**：[P3 轻微]
+**类型**：[体验]
+**发现日期**：2026-06-10
+**解决日期**：2026-06-10
+
+**现象**：
+`docs/002STRUCTURE.md` 在迭代过程中累积了大量内部细节：
+
+- 阶段编号当主语：每行注释里穿插 `Phase 0.5 / Phase 1A / Phase 1B / Phase 2 / Phase 2.5 / Phase 5` 与 `D9 / D11 / D17 / D27 / D35 / D37 (2.5)` 等内部进度标签。新工程师不知道这些含义，第一眼读起来全是噪音。
+- 内部术语裸露：`VisionEvent` / `IRTarget` / `Phase1AReport` / `StyleRule` / `output_span` / `supersede` 等内部概念直接当名词使用，没有平白话解释。
+- 函数级别细节超纲：`_safe(label, field_key, coro)` / `SUBCAP_TO_IR_PATH` / `subscribe_with_snapshot` / `chat_vision_dual` 等可 grep 的函数 / 常量名也写进了目录文件，稀释了"导航"功能。
+- 形态是一棵 ~250 行扁平树，没有目录段落分组与导语，新人想找"字幕识别在哪"得逐行扫树。
+- `000README.md` 自己定的判断标准是"1 分钟内找到要改的代码"，目前文件做不到。
+
+同时 `docs/` 下没有面向外部接入方的 HTTP 接口导览文档，新人理解后端能力只能逐个翻 `backend/app/api/*.py` 或者起服务后看 FastAPI `/docs`。
+
+**后果**：
+对外部接入工程师与新加入的内部工程师不友好。第一眼定位失败会显著拉长上手时间，且容易绕过 STRUCTURE 直接靠搜索代码摸索（违背文档定位）。接口侧没有"按场景串"的导览，外部接入方需要自己脑补"上传 → 推荐 → 应用 → 编辑 → 渲染"的调用顺序。
+
+**初步判断**：
+已确认。`000README.md` 已规定 STRUCTURE 的文体应是"目录树 + 一句话职责，纯描述、零分析"，当前文件违背这条规定。修复属于纯文档重写，不涉及任何代码逻辑。
+
+**方案讨论**（已确认）：
+- STRUCTURE 重写形态：保留目录结构，但按主目录分组（"目录分组式"），每个目录段落先有 2–4 句平白介绍，再列文件一句话——避免一棵无差别扁平树。
+- 写作风格硬约束：删除所有 `Phase N` / `D1–D37` / `ISS-NNN` 标签；内部类型首次出现要平白解释；不写函数 / 变量 / 常量名（可 grep 的细节不进文档）。
+- 占位标注：真占位（`agent/aigc.py` 等）显式标 `🚧 占位（计划中）`；dev-mode 闸门控制的功能（`api/dev_workbench.py` / `api/lab.py` / `WorkbenchLauncher.tsx` / `SubcapabilityLab.tsx`）不算占位，平白说明它们是开发模式入口即可。
+- 接口文档：新增 `006API.md` 作为"带场景的接口导览"占位——按典型用户流程串接口（上传 / 提取 / 出片 / 编辑 / 实时回放 / 跨页导航），详细字段指向 FastAPI 自动生成的 `/docs`，不重复造 OpenAPI 已有内容。
+- 不动 `001ARCHITECTURE.md`：本轮范围限定在 STRUCTURE + 新增 API 文档；ARCHITECTURE 里 D1–D37 列表的精简留待后续 issue。
+
+**关联**：
+-> docs/002STRUCTURE.md（重写 — 改成"目录分组 + 段落导语 + 文件一句话"形态；删除全部 Phase / D / ISS 内部进度标签；删除函数 / 变量名级别细节；内部类型首次出现平白解释；纠正 `motion.py` / `dev_workbench.py` / `lab.py` / `WorkbenchLauncher.tsx` / `SubcapabilityLab.tsx` 等已实现文件原误标的占位状态；补回 `docs/proposals/`、`vite-env.d.ts`、`ProjectHistoryStrip.tsx`、`StepCard.tsx` 等遗漏项）
+-> docs/006API.md（新增 — 占位骨架 + 六条典型流程导览 + 开发模式接口 + 渲染器内部回调；详细字段指向 FastAPI `/docs`）
+-> 004CHANGELOG.md [2026-06-10-1]
+
+**解决方案**：
+按外部读者视角重写 `002STRUCTURE.md`，结构由扁平树改为按主目录分组（每段先平白导语再列文件），全面剔除 Phase / D / ISS 等内部进度标签与函数级细节，对内部 IR / 事件类型在首次出现处给出平白解释。新增 `006API.md` 占位文档作为接口侧的"带场景导览"，留出待补充清单（请求示例、错误码、鉴权说明）由后续 issue 渐进填充。
