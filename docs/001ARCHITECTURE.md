@@ -144,13 +144,16 @@ python -m app.cli ingest-sample /local/path.mp4
 **链路 D：Phase 1A SubcapabilityLab 单点验证（`ENABLE_DEV_MOCK=true` 时启用）**
 ```
 浏览器 /lab
-  → GET /api/lab/subcaps → 列出 11 个子能力 + 各自兼容 fixture
-  → 用户选 subcap × fixture，点「跑此子能力」
+  → GET /api/lab/subcaps → 列出 10 个子能力（每条 {name, label, stage, baseline_key}）
+  → GET /api/lab/samples → 运行时扫 data/samples/*/ 列出可跑样例 [{id, has_normalized, has_source, thumbnail_url}]
+  → 用户选 subcap × sample（任意自由组合，无 fixture 兼容性约束），点「跑此子能力」
+  ↳ 用户也可点「＋ 上传新样例」→ <input type="file"> → uploadSample() 调既有 POST /samples ingest
+       → 上传完自动 refreshSamples + setFixture(new_id) 刷新 dropdown
 浏览器 → POST /api/lab/run-subcap/{name} {fixture_id, dry_run:false}
   → backend.api.lab.run_subcap：
      → tasks_store.create_task("lab_<name>", resource_kind="sample", resource_id=fixture_id)
         路径方案 B → events_jsonl_path = samples/{fixture_id}/extracted/events_{task_id}.jsonl
-     → BackgroundTask: REGISTRY[name].runner(normalized_path, task_id)
+     → BackgroundTask: REGISTRY[name].runner(Phase1AContext)
         runner 是 extract/* 子能力的薄编排（先 detect_scenes → frame_sampler → 该 subcap）
         每一步 chat_vision/chat_text 由 llm.client 自动 publish 事件 + 缺依赖时 fallback warning
      → 完成后 tasks_store.update_task(status=...) + bus.close_task → SSE done
@@ -386,7 +389,7 @@ python -m app.cli ingest-sample /local/path.mp4
 - **D20 几何 mask CV 主路径**：`extract/masks.py::detect_masks` 在每个 scene 首/中/末三帧只跑 `HoughCircles` 圆形检测器，多数决（同 kind 至少 ceil(n_frames/2) 票）确认 `has_mask`；CV 全 false 时调一次 VLM 看三帧网格，由 VLM 判断矩形 / 分屏等其他形状（VLM prompt 显式排除字幕 / 标题条 / 水印 / UI / letterbox 等非蒙版元素）。决策详见 decisions/010 决策 4：原 `Canny 矩形` / `HoughLinesP` 两类 CV 检测器在口播视频里几乎全是字幕带 / 标题条边缘的误报，已删除。CV 候选与最终判定事件都带 frame_url + bbox。
 - **D21 1B pipeline 单点降级**：`extract/pipeline.py::_safe(label, field_key, coro)` 包裹每个子能力调用；任一抛异常 → `TemplateIR.degraded[_ir_path_for(field_key)] = str(e)` + 发 `severity="warning"` 事件 + 不阻塞下游。pipeline 自身永不 raise（顶层 `try/except` 仅防御非 `_safe` 路径的 programmer error）；最坏情况是一个 degraded 字段全标的 TemplateIR 仍可入 KB。`_ir_path_for` 翻译规则见 D25。
 - **D22 模板 = KB 主键 + events 路径回链**：`kb.sqlite` 的 `templates` 表只存 `ir_json + tags + thumbnail + last_extract_task_id`，**绝不复制 events.jsonl**。事件流通过 `tasks.events_jsonl_path`（按 `last_extract_task_id` 反查）就地读取，工作台「回放」一键打开 `/workbench/{last_extract_task_id}`。
-- **D23 Renderer Caption 双模式**：`compositions/Caption.tsx` 由调用方传 `renderMode: "template_preview" | "project_output"` props 区分；前者渲染 `placeholder_text[0]` 作为示例字幕（TemplateLibrary 详情 / 0.5 dev_workbench 预览），后者渲染 ProjectIR 的 `Caption.text`（Phase 2+ 用户素材产物）。组件内**绝不**根据 `text` 是否为空自动切换模式——隐式 fallback 在用户合法传空字符串时会无声跑错。
+- **D23 Renderer Caption 双模式 + 单 prop 契约**：`compositions/Caption.tsx` 由调用方传 `renderMode: "template_preview" | "project_output"` props 区分；前者渲染 `style.placeholder_text[0]` 作为示例字幕（TemplateLibrary 详情 / 0.5 dev_workbench 预览），后者渲染 ProjectIR 的 `Caption.text`（Phase 2+ 用户素材产物）。组件内**绝不**根据 `text` 是否为空自动切换模式——隐式 fallback 在用户合法传空字符串时会无声跑错。组件接收 `{text, startSec, endSec, style: CaptionStyleShape, renderMode}` 五个 prop（decisions/010 P5）；CaptionStyleShape 镜像 `backend/app/ir/template.py::CaptionStyle`，IR 加视觉字段渲染端零改动。`bbox_norm` 非 0 时优先于 `position` 中心点作锚点，前端 RemotionPlayer CSS 预览同步该 fallback 顺序；frontend 与 renderer 共用一份 placement / shadow / padding 约定但不共用代码（PLAN L1644-1647 RemotionPlayer 注释说明为何不打包 Remotion 到 frontend）。
 - **D24 全局信号挂 TemplateIR 顶层，per-slot 信号挂 StyleRule**：`audio` / `tags` / `sanity_check` / `degraded` / `caption_style_palette` 这类整模板共享的字段直接挂在 TemplateIR；`StyleRule` 只放真正按 slot 变化的事物（caption_palette_idx / visual.zoom_keyframes / mask / color_lut / stickers / transition_in/out）。decisions/010 落地后 caption 视觉样式由模板级 `caption_style_palette` 集中存放，Slot.style 通过 `caption_palette_idx: int | None` 引用——多个 Slot 共享同一种字幕样式时无须值拷贝。1A 的 `extract_bgm` 单全局 `AudioStyle` 直接装配到 `TemplateIR.audio`，不再被 skeleton.py 复制到每个 slot。Phase 2+ 若出现 per-slot BGM 切换需求，再单独引入 `StyleRule.audio_override: AudioStyle | None`，不复用此前的 per-slot 默认字段。
 - **D25 degraded 路径统一翻译**：`TemplateIR.degraded` 的键一律是 TemplateIR 相对路径。`pipeline.py` 顶部的 `SUBCAP_TO_IR_PATH` 表是单一真理源——subcap 自带的 field_key（含 Phase1AReport 路径，如 `zoom_curves.3` / `captions.5.function`）在写入 `ir.degraded` 前由 `_ir_path_for(field_key)` 翻译为 TemplateIR 路径（如 `skeleton.*.style.visual.zoom_keyframes` / `caption_style_palette` / `caption_functions`）。`*` 是 slot glob，UI banner 据此展示 + 跳转，不需要再认识 Phase1AReport 字段名。
 - **D26 SQLite 表初始化只在 lifespan**：`tasks_store.init_db` / `kb_store.init_db` 只由 `main.py` 的 lifespan 调用一次，CRUD 入口绝不 per-call init；测试用 `tests/conftest.py::task_with_events` fixture 镜像 lifespan，把两个 init 都跑一遍。两个 store 共用 `data/kb.sqlite` 的 WAL 连接，schema 全 `CREATE IF NOT EXISTS` 幂等，重复 init 不报错也不损失数据但会让单元 CRUD 跑出无谓的 DDL。

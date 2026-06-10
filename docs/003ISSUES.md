@@ -846,10 +846,11 @@ SubcapabilityLab 跑同一 9.4s 样例的 `1A.masks` 子能力，每个字幕首
 
 ## [ISS-022] 字幕功能分类 IR 信息密度过低，模板复用时字幕样式细节丢失
 
-**状态**：[进行中]
+**状态**：[已解决]
 **优先级**：[P1 严重]
 **类型**：[技术债]
 **发现日期**：2026-06-10
+**解决日期**：2026-06-10
 
 **现象**：
 当前 `Slot.style.caption: CaptionStyle | None` 每个 slot 挂一个字幕样式；CaptionStyle 字段也只有 `font_family / size / color / stroke_color / stroke_width / position(中心点) / layout / max_chars_per_line / anim_in / anim_emphasis / placeholder_text / length_constraint / semantic_purpose`——缺少 shadow（颜色/偏移/模糊）/ background / padding / text_align / letter_spacing / line_height / 完整 bbox（仅有 center 没有 size）等视觉细节。`caption_function` 子能力当前仅给单个字符串 label（标题/强调/卖点/CTA/regular）。
@@ -879,6 +880,12 @@ SubcapabilityLab 跑同一 9.4s 样例的 `1A.masks` 子能力，每个字幕首
 -> PLAN.md 1A 节子能力清单 / 依赖 DAG 同步更新（删 captions_anim 节点）
 -> decisions/010-phase1a-subcap-rework.md
 -> decisions/011-drop-captions-anim-merge-into-caption-function.md
+-> 004CHANGELOG.md [2026-06-10-4]
+-> 004CHANGELOG.md [2026-06-10-6]
+-> 004CHANGELOG.md [2026-06-10-7]
+
+**解决方案**：
+分四阶段交付。P1（[2026-06-10-4]）做 IR 重构：CaptionStyle 字段大扩充 + TemplateIR.caption_style_palette 模板级共享 + Slot.style.caption_palette_idx 引用 + 删 1A.captions_anim 子能力 + caption_function schema 升级承载 anim_in_type/anim_emphasis/stagger/role + 已存模板迁移脚本。P2（[2026-06-10-6]）做 1A extract 重写：CV 文本带预扫 + bbox 契约修复 + 13 类 zoom + b_roll 新子能力 + skeleton 加 AI生成画面 分支（不属于本 issue 但同期完成）。P5（[2026-06-10-7]）做渲染端：Caption.tsx 收口为 `style: CaptionStyleShape` 单 prop 落地全部 9 视觉字段（shadow/background/padding/text_align/letter_spacing/line_height/bbox_norm）+ ZoomLayer.tsx 加 dx/dy 平移 + frontend RemotionPlayer 同步。P6（[2026-06-10-7]）做 NL 编辑：仅升级 `2_5_nl_edit.md` prompt 教 LLM 用 caption_indices 过滤 + 完整新视觉字段清单（不引入 update_palette_style op，因 ProjectIR 已 materialize palette 为各 Caption 独立 CaptionStyle，加间接层会破坏 emphasis_words per-Caption 表达力）。
 
 ---
 
@@ -916,10 +923,11 @@ SubcapabilityLab 跑同一 9.4s 样例的 `1A.masks` 子能力，每个字幕首
 
 ## [ISS-024] SubcapabilityLab 文件选择写死 fixture id 列表，无法自由选样例
 
-**状态**：[讨论中]
+**状态**：[已解决]
 **优先级**：[P2 一般]
 **类型**：[体验]
 **发现日期**：2026-06-10
+**解决日期**：2026-06-10
 
 **现象**：
 `backend/app/api/lab.py` 的 `REGISTRY` 把每个子能力可用的 fixtures 硬编码（如 `"sample_basic_15s"`、`"sample_with_sticker_12s"`）；前端 `SubcapabilityLab.tsx` 的 dropdown 只显示这几条；新加样例必须改后端代码 + 重启服务才能在 Lab 里跑。又因为 `_resolve_fixture_path` 只在 `data/samples/{fixture_id}/` 下找 `normalized.mp4` / `source.mp4`，开发者每次想跑新样例都要先重命名为 normalized.mp4 + 同目录下不能有其他 normalized 文件。
@@ -932,11 +940,16 @@ SubcapabilityLab 跑同一 9.4s 样例的 `1A.masks` 子能力，每个字幕首
 已确认。改造方向：dropdown 改为列出 `data/samples/` 下所有目录（运行时扫描而不是 REGISTRY 写死）+ 旁边一个 "上传新样例" 按钮触发浏览器 file dialog → 调现有 `POST /samples` ingest 流程 → 完成后自动 select。
 
 **关联**：
--> backend/app/api/lab.py（`REGISTRY` 的 fixtures 字段去硬编码）
+-> backend/app/api/lab.py（`SubcapDef` 删 `fixtures` 字段 + 新增 `GET /lab/samples` 扫盘端点）
 -> backend/app/api/samples.py（复用现有 ingest 流程）
--> frontend/src/pages/SubcapabilityLab.tsx（dropdown 改运行时拉取 + 上传按钮）
--> frontend/src/api/lab.ts（list_samples 接口）
+-> frontend/src/pages/SubcapabilityLab.tsx（dropdown 运行时拉取 + 上传按钮）
+-> frontend/src/api/lab.ts（listLabSamples 客户端 + LabSample 类型 + SubcapDef 去 fixtures）
+-> backend/tests/unit/test_lab_api.py（三新测试守住 fixtures 字段已消除 + 扫盘逻辑 + 403 dev gate）
 -> decisions/010-phase1a-subcap-rework.md
+-> 004CHANGELOG.md [2026-06-10-7]
+
+**解决方案**：
+`SubcapDef.fixtures` 字段彻底删除——子能力 × 样例全自由组合，原 fixture 是软 hint 不是物理约束。`/lab/subcaps` 响应同步去掉该字段。新增 `GET /api/lab/samples` 扫 `data/samples/*/` 返回 `[{id, has_normalized, has_source, thumbnail_url}]`，前端 dropdown 改运行时拉取；`has_normalized=false` 项标注且禁用跑按钮提示重 ingest。新增"＋ 上传新样例"按钮触发隐藏 `<input type="file">` → 调现有 `uploadSample()`（POST /samples ingest 全流程）→ 完成后 refreshSamples + 自动 setFixture(new_id)。后端单测三条覆盖：fixtures 字段已消除、扫盘 normalized-only/source-only/缺 mp4/非目录四种 case、403 dev gate。
 
 ---
 

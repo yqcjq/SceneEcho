@@ -4,8 +4,14 @@ export interface SubcapDef {
   name: string;
   label: string;
   stage: string;
-  fixtures: string[];
   baseline_key: string;
+}
+
+export interface LabSample {
+  id: string;
+  has_normalized: boolean;
+  has_source: boolean;
+  thumbnail_url: string | null;
 }
 
 export interface RunSubcapResponse {
@@ -27,6 +33,17 @@ export async function listSubcaps(): Promise<SubcapDef[]> {
     "/api/lab/subcaps",
   );
   return data.subcaps;
+}
+
+/** List every directory under ``data/samples/`` runnable by the lab.
+ *
+ * Replaces the old per-subcap ``fixtures: string[]`` allowlist. Every
+ * subcap can run against every returned sample (decisions/010 P7). */
+export async function listLabSamples(): Promise<LabSample[]> {
+  const { data } = await axios.get<{ samples: LabSample[] }>(
+    "/api/lab/samples",
+  );
+  return data.samples;
 }
 
 export async function runSubcap(

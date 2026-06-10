@@ -7,8 +7,17 @@ stream in the workbench.
 
 Each subcap exposes: a ``runner`` async callable taking a single
 ``Phase1AContext`` (which lazily computes scenes/frames once and caches
-them across subcap calls), a list of compatible fixture sample ids, and
-a ``baseline`` key under ``tests/baselines.json``.
+them across subcap calls) and a ``baseline`` key under
+``tests/baselines.json``.
+
+Sample fixture compatibility is **not modeled** — every subcap can run
+against every sample under ``data/samples/`` (decisions/010 P7). The
+old per-subcap ``fixtures: tuple[str, ...]`` field was a soft hint
+("this subcap is most demonstrable on these samples"), not a physical
+constraint, and froze the lab to whatever ids were ingested at registry
+write-time. The dropdown now scans ``data/samples/`` at request time
+and a sibling button uploads a new mp4 through the regular
+``POST /samples`` ingest path.
 """
 
 from __future__ import annotations
@@ -41,7 +50,6 @@ class SubcapDef:
     name: str
     label: str
     stage: str
-    fixtures: tuple[str, ...]
     baseline_key: str
     runner: SubcapRunner
 
@@ -134,7 +142,6 @@ REGISTRY: dict[str, SubcapDef] = {
         name="scenes",
         label="切点检测 (CV)",
         stage="1A.scenes",
-        fixtures=("sample_basic_15s", "sample_fast_pace_8s"),
         baseline_key="subcap.scenes",
         runner=_run_scenes,
     ),
@@ -142,7 +149,6 @@ REGISTRY: dict[str, SubcapDef] = {
         name="captions",
         label="字幕样式 + 位置 (VLM)",
         stage="1A.captions",
-        fixtures=("sample_basic_15s",),
         baseline_key="subcap.captions",
         runner=_run_captions,
     ),
@@ -150,7 +156,6 @@ REGISTRY: dict[str, SubcapDef] = {
         name="stickers",
         label="贴纸检测 (VLM + CV refine)",
         stage="1A.stickers",
-        fixtures=("sample_with_sticker_12s",),
         baseline_key="subcap.stickers",
         runner=_run_stickers,
     ),
@@ -158,7 +163,6 @@ REGISTRY: dict[str, SubcapDef] = {
         name="zoom",
         label="缩放方向 + 曲线 (VLM + CV)",
         stage="1A.zoom_direction",
-        fixtures=("sample_basic_15s",),
         baseline_key="subcap.zoom",
         runner=_run_zoom,
     ),
@@ -166,7 +170,6 @@ REGISTRY: dict[str, SubcapDef] = {
         name="transitions",
         label="转场分类 (VLM)",
         stage="1A.transitions",
-        fixtures=("sample_fast_pace_8s",),
         baseline_key="subcap.transitions",
         runner=_run_transitions,
     ),
@@ -174,7 +177,6 @@ REGISTRY: dict[str, SubcapDef] = {
         name="masks",
         label="几何蒙版 (VLM)",
         stage="1A.masks",
-        fixtures=("sample_with_mask_10s",),
         baseline_key="subcap.masks",
         runner=_run_masks,
     ),
@@ -182,7 +184,6 @@ REGISTRY: dict[str, SubcapDef] = {
         name="color_lut",
         label="调色语义 (VLM + CV)",
         stage="1A.color_lut",
-        fixtures=("sample_warm_lut_10s",),
         baseline_key="subcap.color_lut",
         runner=_run_color,
     ),
@@ -190,7 +191,6 @@ REGISTRY: dict[str, SubcapDef] = {
         name="audio",
         label="BGM (Demucs + librosa)",
         stage="1A.audio",
-        fixtures=("sample_basic_15s", "sample_no_bgm_10s"),
         baseline_key="subcap.audio",
         runner=_run_audio,
     ),
@@ -198,7 +198,6 @@ REGISTRY: dict[str, SubcapDef] = {
         name="caption_function",
         label="字幕功能分类 (VLM, two-stage)",
         stage="1A.caption_function",
-        fixtures=("sample_basic_15s", "sample_with_sticker_12s"),
         baseline_key="subcap.caption_function",
         runner=_run_caption_function,
     ),
@@ -206,7 +205,6 @@ REGISTRY: dict[str, SubcapDef] = {
         name="b_roll",
         label="画面构成 / B-roll 识别 (VLM)",
         stage="1A.b_roll",
-        fixtures=("sample_basic_15s",),
         baseline_key="subcap.b_roll",
         runner=_run_b_roll,
     ),
@@ -232,12 +230,51 @@ def list_subcaps() -> dict:
                 "name": s.name,
                 "label": s.label,
                 "stage": s.stage,
-                "fixtures": list(s.fixtures),
                 "baseline_key": s.baseline_key,
             }
             for s in REGISTRY.values()
         ]
     }
+
+
+@router.get("/lab/samples")
+def list_lab_samples() -> dict:
+    """List every directory under ``data/samples/`` that has a runnable mp4.
+
+    Replaces the old per-subcap fixture allowlist (decisions/010 P7).
+    The lab UI consumes this for the sample dropdown and bypasses any
+    subcap-specific compatibility — every subcap runs against any
+    sample. ``has_normalized=true`` items are preferred (the lab runner
+    needs normalized.mp4); ``source.mp4``-only entries are surfaced so
+    the UI can prompt the user to re-ingest if normalize failed.
+    """
+    _require_dev()
+    settings = get_settings()
+    base = settings.data_root / "samples"
+    if not base.exists():
+        return {"samples": []}
+    items: list[dict[str, Any]] = []
+    for child in sorted(base.iterdir()):
+        if not child.is_dir():
+            continue
+        norm = child / "normalized.mp4"
+        src = child / "source.mp4"
+        thumb = child / "thumbnail.jpg"
+        has_normalized = norm.exists()
+        has_source = src.exists()
+        if not has_normalized and not has_source:
+            continue
+        items.append(
+            {
+                "id": child.name,
+                "has_normalized": has_normalized,
+                "has_source": has_source,
+                "thumbnail_url": (
+                    f"/data/samples/{child.name}/thumbnail.jpg" if thumb.exists() else None
+                ),
+            }
+        )
+    return {"samples": items}
 
 
 @router.get("/lab/baselines/{name}")

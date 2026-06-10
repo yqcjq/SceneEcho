@@ -138,21 +138,12 @@ export const Project: React.FC<ProjectIRProps> = ({
           text={cap.text ?? ""}
           startSec={cap.start}
           endSec={cap.end}
-          fontFamily={cap.style?.font_family}
-          size={cap.style?.size}
-          color={cap.style?.color}
-          strokeColor={cap.style?.stroke_color}
-          strokeWidth={cap.style?.stroke_width}
-          position={cap.style?.position}
-          animIn={cap.style?.anim_in}
-          layout={cap.style?.layout}
-          maxCharsPerLine={cap.style?.max_chars_per_line}
-          // placeholder_text lives ON the style now (1B IR change), not on
-          // the Caption itself — every consumer (Phase 2 fill LLM included)
-          // reads the same canonical field.
-          placeholderText={cap.style?.placeholder_text ?? []}
-          emphasisWords={cap.style?.emphasis_words ?? []}
-          animEmphasis={cap.style?.anim_emphasis ?? null}
+          // Pass the entire CaptionStyle object — the renderer is the
+          // canonical consumer (decisions/010 P5). Adding visual fields
+          // to the IR (shadow / background / padding / text_align /
+          // letter_spacing / line_height / bbox_norm) needs zero
+          // changes here.
+          style={cap.style ?? {}}
           renderMode={renderMode}
         />
       ))}

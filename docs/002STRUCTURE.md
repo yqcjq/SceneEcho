@@ -118,7 +118,7 @@
 - `edit.py`            项目编辑接口：自然语言改稿、面板直接改、撤销、查看改动历史。
 - `replay.py`          按项目 / 素材 id 拉取一个任务跑过的全部事件，并可重建任意时间点上的中间产物，供前端"时间线回放"页使用。
 - `dev_workbench.py`   开发模式下的模拟事件流入口：让前端工作台在没有真实 AI 调用时也能联调（需打开 `ENABLE_DEV_MOCK`）。
-- `lab.py`             开发模式下的"单点能力实验室"后端：选一份样例 + 一个识别子能力跑一次，实时观察事件流（需打开 `ENABLE_DEV_MOCK`）。
+- `lab.py`             开发模式下的"单点能力实验室"后端：列出子能力 + 运行时扫 `data/samples/` 列出可跑样例（任意子能力 × 任意样例自由组合），选一份样例 + 一个识别子能力跑一次，实时观察事件流（需打开 `ENABLE_DEV_MOCK`）。
 
 ### backend/app/ir/  系统的"数据形状"定义
 
@@ -237,10 +237,10 @@
 - `Root.tsx`               Remotion 的根组件，声明可渲染的合成；画布尺寸、帧率、总时长由项目数据动态推导。
 - `Project.tsx`            把项目数据组合成一段完整的可渲染时间线（用户素材、字幕、贴纸、蒙版、缩放、调色、背景音乐都在这里编排）。
 - `projectMeta.ts`         从项目数据里推导画布尺寸、帧率和总时长的小工具，给 Root 和渲染日志共用。
-- `Caption.tsx`            字幕条渲染组件，支持模板预览（占位文案）和正式输出（真实台词）两种模式，带描边和入场动画。
+- `Caption.tsx`            字幕条渲染组件，接收整个 CaptionStyle 对象作单 prop，落地全部视觉字段（描边 / 阴影 / 背景填充 / 内边距 / 对齐 / 字距 / 行高 / bbox 锚点），支持模板预览（占位文案）和正式输出（真实台词）两种模式与多种入场动画。
 - `Sticker.tsx`            贴纸渲染组件；有图就放图，没图则画一个明显的占位框提示"此处待生成图片"。
 - `Mask.tsx`               几何蒙版叠加层（圆形 / 矩形 / 上下分割），把蒙版外的区域压暗以突出主体。
-- `ZoomLayer.tsx`          根据关键帧曲线对单段视频做平滑缩放推拉的包裹层。
+- `ZoomLayer.tsx`          根据关键帧曲线对单段视频做平滑缩放推拉与归一化平移的包裹层（每个关键帧含 scale + dx + dy 三通道，组合成 translate + scale 单 transform）。
 - `ColorLayer.tsx`         整片调色层，把语义化色调标签（暖调、冷调、电影感）映射成一组 CSS 滤镜。
 
 ---
@@ -324,7 +324,7 @@
 - `WorkbenchMediaTimeline.tsx`     媒体时间线视图（`?view=media_timeline`）。顶部嵌入原视频，下面是按视频秒为横轴的事件 marker——单帧锚点画三角形、跨段事件画半透明矩形条；播放头在哪一秒就高亮邻近 marker，点击 marker 把视频跳到对应秒同时选中事件。给创作者 / 产品视角看"视频第 N 秒 AI 都在做什么决定"。
 - `Visualize.tsx`                  复盘页（`/projects/:projectId/replay` 与 `/samples/:sampleId/replay`）。从后端拉某个任务的全部事件 JSONL，按选定速度重新喂进同一个工作台 store，达到"重播一遍"的效果，并支持一键 MediaRecorder 录屏导出。
 - `WorkbenchLauncher.tsx`          开发模式入口（`/workbench/dev`）。列出所有内置 mock 场景，点一下让后端按脚本广播一串假事件，便于在没有真实视觉模型时调试三栏 UI。
-- `SubcapabilityLab.tsx`           开发模式单点能力实验室（`/lab`）。挑一个子能力 + 一个样例跑单步检测，跳到工作台查看结果并对照基线。
+- `SubcapabilityLab.tsx`           开发模式单点能力实验室（`/lab`）。挑一个子能力 + 一个样例跑单步检测，跳到工作台查看结果并对照基线；样例 dropdown 运行时拉取 `/api/lab/samples` 扫盘结果，旁边「＋ 上传新样例」按钮调既有 `POST /samples` ingest 流程后自动选中新样例。
 
 ### frontend/src/types/
 

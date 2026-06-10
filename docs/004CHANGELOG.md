@@ -1,3 +1,41 @@
+## [2026-06-10-7] feat(renderer/lab): finish decisions/010 P5-P7 — caption style as single prop + nl-edit prompt for new visual fields + lab samples scan [ISS-022/024]
+
+### 改动
+
+decisions/010 P5-P7 三个剩余阶段一并落地，与 P1（[2026-06-10-4]）和 P2（[2026-06-10-6]）的 IR / extract 已交付内容收尾。这次只动渲染端 + NL edit prompt + Lab 后端/前端 + 一处单测，不动 IR 模型 / KB / pipeline / 业务逻辑。
+
+1. **P5 渲染端收口为 `style: CaptionStyleShape` 单 prop**：`renderer/src/compositions/Caption.tsx` 把原来散开的 16 个 prop（fontFamily / size / color / strokeColor / strokeWidth / position / animIn / layout / maxCharsPerLine / placeholderText / emphasisWords / animEmphasis / renderMode + text/startSec/endSec）收口为 `{text, startSec, endSec, style: CaptionStyleShape, renderMode}` 五个 prop——CaptionStyleShape 镜像 `backend/app/ir/template.py::CaptionStyle`，IR 加字段无需改 prop 签名。落地新 9 视觉字段（shadow_color / shadow_offset / shadow_blur / background_color / padding / text_align / letter_spacing / line_height / bbox_norm）：`buildTextShadow` 复合 stroke + drop shadow；`placementFromStyle` bbox_norm 非 0 时按 0-999 转 CSS 坐标作锚点（优先于 `position` 中心点），`text_align` 透传到 CSS textAlign，`padding` 给 4 元 px 元组，`letter_spacing/line_height/background_color/border_radius` 直传 CSS。`renderTypewriter` 函数删除——typewriter 改为主路径里 `displayText = renderedText.slice(0, visible)` 一行覆盖，placement / shadow / padding 与其他 anim_in 共用。
+2. **P5 ZoomLayer.tsx dx/dy 平移**：`ZoomKeyframe` 接口加 `dx?: number; dy?: number`；transform 改为 `translate(dx*100%, dy*100%) scale(s)`，dx/dy 默认 0 旧模板不变；`isIdentity` 同时检查 scale ≈ 1 且 dx/dy ≈ 0 才跳 wrapper；单帧曲线 duplicate 时三通道（scale/dx/dy）同步 dup 不漂移。
+3. **P5 Project.tsx 调用点改单 prop**：`<Caption text={cap.text} startSec={...} endSec={...} style={cap.style ?? {}} renderMode={renderMode} />`——以后 IR 加字段渲染端 0 改动。
+4. **P5 frontend RemotionPlayer.tsx 同步**：`activeZoomScale` 替换为 `activeZoomTransform` 返回 `{scale, dx, dy}`；视频 transform 改 translate + scale；caption 渲染路径同步落地全部 9 视觉字段（按 displayWidth/canvas.width 比例缩放 size / padding / letter_spacing 给浏览器实时预览像素级一致）。
+5. **P6 仅升级 NL edit prompt，不加 op**：`backend/app/llm/prompts/2_5_nl_edit.md` `set_caption_style` 行的 value 列扩成"CaptionStyle 视觉字段完整清单"——15 个字段（排版 13 + 布局 4 + 行为 3 + 占位与语义 3）按子集罗列；新增"跨 caption 群体编辑（palette-style 一次到位）"小节解释 ProjectIR 无 palette、用 `caption_indices` 过滤 + 单条 set_caption_style 等价 palette 一次到位；附 4 个具体示例（CTA 字幕变色、字幕加发光、字幕加半透明背景、第 0 条字幕换左对齐）。**未新增 `update_palette_style` op**——decision 010 P6 字面建议的 op 在 ProjectIR 无 palette 的现状下没有合法 target idx；编辑效果（"一次到位"）由 `set_caption_style({all|caption_indices})` 完整覆盖，避免在 ProjectIR 引入 palette 间接层破坏 emphasis_words 的 per-Caption 表达力。
+6. **P7 Lab `fixtures` 字段彻底砍掉**：`backend/app/api/lab.py` `SubcapDef` 删 `fixtures: tuple[str, ...]` 字段；`/lab/subcaps` 响应不再带该字段；新增 `GET /lab/samples` 端点扫 `data/samples/*/` 返回 `[{id, has_normalized, has_source, thumbnail_url}]`——子能力 × 样例全自由组合。`_resolve_fixture_path` 不变（仍找 normalized.mp4 / source.mp4 兜底）。
+7. **P7 SubcapabilityLab 前端**：`frontend/src/api/lab.ts` SubcapDef 删 `fixtures`，加 `LabSample` 类型 + `listLabSamples()` 客户端。`frontend/src/pages/SubcapabilityLab.tsx` dropdown 改 `listLabSamples()` 运行时拉取，`has_normalized=false` 项标"（仅 source.mp4）"且禁用"跑此子能力"按钮提示"缺 normalized.mp4——请在样例页重新触发 ingest"；`＋ 上传新样例` 按钮触发隐藏 `<input type="file">`、读 mp4 → 调现有 `uploadSample()`（复用 `POST /samples` ingest 全流程）→ 上传完自动 `refreshSamples()` + setFixture(new_id)。
+8. **测试**：`backend/tests/unit/test_lab_api.py` 新增三测试——`test_subcaps_response_omits_fixtures_field` 守住 P7 不回退；`test_lab_samples_scans_data_samples_dir` 覆盖 normalized-only / source-only / 缺 mp4 跳过 / 非目录跳过四种 case；`test_lab_samples_403_when_dev_disabled` 与 subcaps 403 对称。
+
+### 涉及文件
+
+- renderer/src/compositions/Caption.tsx：16-prop 散开 → `style: CaptionStyleShape` 单 prop + 9 视觉字段落地 + 删 renderTypewriter 子函数（typewriter 并入主路径）
+- renderer/src/compositions/ZoomLayer.tsx：ZoomKeyframe.dx/dy 落地 + transform 改 translate+scale + isIdentity 检查 dx/dy
+- renderer/src/compositions/Project.tsx：Caption 调用点改单 prop
+- frontend/src/components/RemotionPlayer.tsx：CSS 预览同步 dx/dy 平移 + 9 视觉字段（按 displayWidth 等比缩放 size/padding/letter_spacing）
+- backend/app/llm/prompts/2_5_nl_edit.md：set_caption_style 完整字段清单 + 跨群体编辑模式 + 4 个示例
+- backend/app/api/lab.py：SubcapDef 删 fixtures + GET /lab/samples 新端点 + 顶部注释解释 P7 决策
+- frontend/src/api/lab.ts：SubcapDef 去 fixtures + LabSample 类型 + listLabSamples
+- frontend/src/pages/SubcapabilityLab.tsx：dropdown 运行时拉取 + 上传按钮 + 缺 normalized 警告 + 跑按钮 disable
+- backend/tests/unit/test_lab_api.py：三新测试覆盖 fixtures 字段消除 + samples 端点 + 403 dev gate
+- docs/001ARCHITECTURE.md：链路 D 描述更新（dropdown 运行时扫盘 + 上传按钮）
+- docs/002STRUCTURE.md：lab.py / SubcapabilityLab.tsx 描述补"任意子能力 × 任意样例自由组合"
+
+### 关联
+
+-> ISS-022
+-> ISS-024
+-> decisions/010-phase1a-subcap-rework.md
+-> decisions/011-drop-captions-anim-merge-into-caption-function.md
+
+---
+
 ## [2026-06-10-6] feat(extract): wire CV text-band pre-scan + 13-class zoom + b_roll subcap [ISS-019/020/021/023]
 
 ### 改动
