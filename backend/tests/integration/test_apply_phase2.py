@@ -57,6 +57,7 @@ def _make_template(
     slots: list[Slot] | None = None,
     has_bgm: bool = False,
     bgm_path: str | None = None,
+    caption_style_palette: list[CaptionStyle] | None = None,
 ) -> TemplateIR:
     if slots is None:
         slots = [
@@ -64,26 +65,33 @@ def _make_template(
                 role="开头",
                 duration={"min": 1.4, "nominal": 2.0, "max": 3.0},
                 material_req="人物口播",
-                style=StyleRule(caption=_make_caption_style()),
+                style=StyleRule(caption_palette_idx=0),
             ),
             Slot(
                 role="主体",
                 duration={"min": 3.5, "nominal": 5.0, "max": 7.5},
                 material_req="人物口播",
-                style=StyleRule(caption=_make_caption_style()),
+                style=StyleRule(caption_palette_idx=0),
             ),
             Slot(
                 role="结尾",
                 duration={"min": 2.0, "nominal": 3.0, "max": 4.5},
                 material_req="人物口播",
-                style=StyleRule(caption=_make_caption_style()),
+                style=StyleRule(caption_palette_idx=0),
             ),
         ]
+    palette = caption_style_palette
+    if palette is None:
+        # Default palette: a single CaptionStyle every default slot points
+        # at via caption_palette_idx=0. Tests that build their own slots
+        # must pass ``caption_style_palette`` explicitly.
+        palette = [_make_caption_style()]
     return TemplateIR(
         id="tpl_test",
         name="测试模板",
         source_sample="smp_test",
         skeleton=slots,
+        caption_style_palette=palette,
         audio=AudioStyle(has_bgm=has_bgm, bgm_path=bgm_path),
         tags=Tags(),
     )
@@ -162,13 +170,13 @@ async def test_detect_and_fill_gap_for_uncovered_slot(
             role="开头",
             duration={"min": 1.0, "nominal": 1.5, "max": 2.0},
             material_req="人物口播",
-            style=StyleRule(caption=_make_caption_style()),
+            style=StyleRule(caption_palette_idx=0),
         ),
         Slot(
             role="主体",
             duration={"min": 1.5, "nominal": 2.0, "max": 3.0},
             material_req="人物口播",
-            style=StyleRule(caption=_make_caption_style()),
+            style=StyleRule(caption_palette_idx=0),
         ),
         Slot(
             role="主体",
@@ -180,7 +188,7 @@ async def test_detect_and_fill_gap_for_uncovered_slot(
             role="结尾",
             duration={"min": 1.0, "nominal": 1.5, "max": 2.0},
             material_req="人物口播",
-            style=StyleRule(caption=_make_caption_style()),
+            style=StyleRule(caption_palette_idx=0),
         ),
     ]
     template = _make_template(slots=slots)
@@ -224,11 +232,10 @@ async def test_long_unit_text_does_not_exceed_max_chars_per_line(
                 role="主体",
                 duration={"min": 1.0, "nominal": 2.0, "max": 3.0},
                 material_req="人物口播",
-                style=StyleRule(
-                    caption=_make_caption_style(max_chars=4, max_chars_per_line=6)
-                ),
+                style=StyleRule(caption_palette_idx=0),
             )
-        ]
+        ],
+        caption_style_palette=[_make_caption_style(max_chars=4, max_chars_per_line=6)],
     )
     long_text = "这是一段远远超过模板字幕长度限制的中文文本将由多行布局自然换行展示"
     ledger = _make_ledger(units_spec=[(long_text, 0.0, 2.0)])
@@ -265,19 +272,19 @@ async def test_caption_sync_under_150ms(task_with_events, no_credentials):
                 role="开头",
                 duration={"min": 1.5, "nominal": 2.0, "max": 2.5},
                 material_req="人物口播",
-                style=StyleRule(caption=_make_caption_style()),
+                style=StyleRule(caption_palette_idx=0),
             ),
             Slot(
                 role="主体",
                 duration={"min": 4.0, "nominal": 5.0, "max": 6.0},
                 material_req="人物口播",
-                style=StyleRule(caption=_make_caption_style()),
+                style=StyleRule(caption_palette_idx=0),
             ),
             Slot(
                 role="结尾",
                 duration={"min": 2.0, "nominal": 3.0, "max": 4.0},
                 material_req="人物口播",
-                style=StyleRule(caption=_make_caption_style()),
+                style=StyleRule(caption_palette_idx=0),
             ),
         ]
     )
@@ -446,7 +453,7 @@ async def test_mapping_truncates_src_when_clamped_speed_overshoots_max(
                 role="主体",
                 duration={"min": 1.0, "nominal": 2.0, "max": 2.0},
                 material_req="人物口播",
-                style=StyleRule(caption=_make_caption_style()),
+                style=StyleRule(caption_palette_idx=0),
             )
         ]
     )
@@ -490,7 +497,7 @@ async def test_apply_style_remaps_stickers_to_segment_local_seconds(
                 role="主体",
                 duration={"min": 2.0, "nominal": 4.0, "max": 6.0},
                 material_req="人物口播",
-                style=StyleRule(caption=_make_caption_style(), stickers=[sticker]),
+                style=StyleRule(caption_palette_idx=0, stickers=[sticker]),
             )
         ]
     )
@@ -546,7 +553,7 @@ async def test_apply_pipeline_runs_bgm_mix_when_bgm_selected(
                 role="主体",
                 duration={"min": 1.0, "nominal": 2.0, "max": 3.0},
                 material_req="人物口播",
-                style=StyleRule(caption=_make_caption_style()),
+                style=StyleRule(caption_palette_idx=0),
             )
         ],
         has_bgm=True,

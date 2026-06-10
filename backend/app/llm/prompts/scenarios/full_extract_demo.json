@@ -66,7 +66,7 @@
         "semantic_label": "字幕样式（开头 slot）",
         "reasoning": "底部黄字白边水平字幕，单行，整句滑入。开头段一般承担「标题」语义。",
         "confidence": 0.91,
-        "ir_target": {"ir_type": "TemplateIR", "path": "skeleton[0].style.caption", "field": null, "op": "set"},
+        "ir_target": {"ir_type": "TemplateIR", "path": "caption_style_palette[0]", "field": null, "op": "set"},
         "ir_value": {
           "color": "#FFD400",
           "size": 64,
@@ -250,7 +250,7 @@
         "semantic_label": "CTA 字幕（结尾 slot）",
         "reasoning": "结尾 slot 出现红底白字 CTA 短句。",
         "confidence": 0.89,
-        "ir_target": {"ir_type": "TemplateIR", "path": "skeleton[2].style.caption", "field": null, "op": "set"},
+        "ir_target": {"ir_type": "TemplateIR", "path": "caption_style_palette[2]", "field": null, "op": "set"},
         "ir_value": {
           "size": 72,
           "color": "#FFFFFF",

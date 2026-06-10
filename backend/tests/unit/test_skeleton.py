@@ -43,15 +43,16 @@ async def test_build_skeleton_three_roles_for_3_scenes(task_with_events):
         audio=AudioStyle(),
         color=Phase1AColorReport(),
     )
-    slots, events = await build_skeleton(report, total, task_id=task_id)
+    slots, _palette, events = await build_skeleton(report, total, task_id=task_id)
     assert [s.role for s in slots] == ["开头", "主体", "结尾"]
     # Per-slot duration band: nominal ≈ span, min = 0.7 * span, max = 1.5 * span
     open_span = slots[0].duration["nominal"]
     assert slots[0].duration["min"] == pytest.approx(open_span * 0.7, abs=0.01)
     assert slots[0].duration["max"] == pytest.approx(open_span * 1.5, abs=0.01)
-    # One VisionEvent per slot.
-    assert len(events) == 3
-    for ev in events:
+    # One VisionEvent per slot (palette is empty for this caption-less report).
+    skeleton_events = [ev for ev in events if ev.ir_target and ev.ir_target.path == "skeleton"]
+    assert len(skeleton_events) == 3
+    for ev in skeleton_events:
         assert ev.stage == "1B.skeleton"
         assert ev.ir_target is not None
         assert ev.ir_target.ir_type == "TemplateIR"
@@ -77,7 +78,7 @@ async def test_build_skeleton_material_req_by_signal(task_with_events):
             )
         ],
     )
-    slots, _ = await build_skeleton(report, total, task_id=task_id)
+    slots, _palette, _ = await build_skeleton(report, total, task_id=task_id)
     assert len(slots) == 1
     assert slots[0].material_req == "人物口播"
 
@@ -97,20 +98,21 @@ async def test_build_skeleton_material_req_by_signal(task_with_events):
             )
         ],
     )
-    slots, _ = await build_skeleton(report2, total, task_id=task_id)
+    slots, _palette, _ = await build_skeleton(report2, total, task_id=task_id)
     assert slots[0].material_req == "B-roll/包装"
 
     # Neither caption nor sticker/zoom/mask → 待定
     report3 = Phase1AReport(scenes=[Phase1AScene(idx=0, start_sec=4.0, end_sec=6.0)])
-    slots, _ = await build_skeleton(report3, total, task_id=task_id)
+    slots, _palette, _ = await build_skeleton(report3, total, task_id=task_id)
     assert slots[0].material_req == "待定"
 
 
 @pytest.mark.asyncio
 async def test_build_skeleton_empty_report(task_with_events):
     task_id, _ = task_with_events
-    slots, events = await build_skeleton(Phase1AReport(), 0.0, task_id=task_id)
+    slots, palette, events = await build_skeleton(Phase1AReport(), 0.0, task_id=task_id)
     assert slots == []
+    assert palette == []
     assert events == []
 
 
@@ -138,7 +140,7 @@ async def test_build_skeleton_normalizes_sticker_times_to_slot_local(
             )
         ],
     )
-    slots, _ = await build_skeleton(report, 10.0, task_id=task_id)
+    slots, _palette, _ = await build_skeleton(report, 10.0, task_id=task_id)
     assert len(slots) == 1
     s = slots[0]
     assert len(s.style.stickers) == 1
@@ -162,7 +164,7 @@ async def test_build_skeleton_consecutive_same_role_merges(task_with_events):
             "1": [ZoomKeyframe(relative_time=0.5, scale=1.2)],
         },
     )
-    slots, _ = await build_skeleton(report, 10.0, task_id=task_id)
+    slots, _palette, _ = await build_skeleton(report, 10.0, task_id=task_id)
     # Both scenes land in 主体 (start_ratio 0.35 and 0.50) → one slot.
     assert len(slots) == 1
     assert slots[0].role == "主体"

@@ -224,6 +224,7 @@ def test_phase1a_report_schema_round_trips_typical_payloads():
     1B's skeleton.py won't be able to read them back."""
     from app.ir.phase1a_report import (
         Phase1ACaptionEvent,
+        Phase1ACaptionFunctionEvent,
         Phase1AColorReport,
         Phase1AMaskParams,
         Phase1AReport,
@@ -245,9 +246,17 @@ def test_phase1a_report_schema_round_trips_typical_payloads():
                 bbox_norm_0_999=(100, 800, 800, 100),
                 frames_appeared=[0.5, 1.0],
                 confidence=0.8,
-                verified_anim_in="淡入",
-                stagger_ms=0,
+                palette_idx=0,
+            )
+        ],
+        caption_style_palette=[CaptionStyle()],
+        caption_functions=[
+            Phase1ACaptionFunctionEvent(
+                caption_idx=0,
                 function="regular",
+                anim_in_type="淡入",
+                stagger_ms_estimate=0,
+                confidence=0.8,
             )
         ],
         stickers=[
@@ -287,5 +296,8 @@ def test_phase1a_report_schema_round_trips_typical_payloads():
     js = report.model_dump_json()
     again = Phase1AReport.model_validate_json(js)
     assert again.scenes[0].start_sec == 0.0
-    assert again.captions[0].function == "regular"
+    # function moved off Phase1ACaptionEvent into the parallel
+    # caption_functions list (decisions/011).
+    assert again.caption_functions[0].caption_idx == 0
+    assert again.caption_functions[0].function == "regular"
     assert again.zoom_directions["0"] == "推进"

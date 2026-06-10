@@ -344,9 +344,6 @@ def _to_caption_entry(draft: _CaptionDraft) -> Phase1ACaptionEvent:
         frames_appeared=draft.ts_appeared,
         confidence=draft.raw.confidence,
         reasoning=draft.raw.reasoning[:200],
-        color_hex_raw=draft.raw.color_hex,
-        anim_in_type_raw=draft.raw.anim_in_type,
-        layout_raw=draft.raw.layout,
     )
 
 
@@ -392,9 +389,9 @@ def _to_caption_style(cap: _CaptionRaw, bbox: tuple[int, int, int, int]) -> Capt
 # ---------- legacy alias (back-compat for callers that import the dataclass) ----------
 
 # The pre-二核 implementation exposed ``CaptionEvent`` (a dataclass) as the
-# return-type of detect_captions; downstream code (captions_anim, the lab
-# runner, integration tests) imports it. Map the alias to the new pydantic
-# IR model so existing imports keep working without ABC churn.
+# return-type of detect_captions; downstream code (the lab runner,
+# integration tests) imports it. Map the alias to the new pydantic IR
+# model so existing imports keep working without ABC churn.
 CaptionEvent = Phase1ACaptionEvent
 
 __all__ = [

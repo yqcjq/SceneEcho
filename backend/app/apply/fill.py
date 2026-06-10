@@ -114,7 +114,7 @@ async def _fill_text(
     settings = get_settings()
     cl = get_llm_client(stage=f"{STAGE}.text")
 
-    cap_style = slot.style.caption
+    cap_style = template.get_slot_caption(slot)
     placeholder = list(cap_style.placeholder_text) if cap_style else []
     length_constraint = dict(cap_style.length_constraint) if cap_style else {}
     semantic_purpose = cap_style.semantic_purpose if cap_style else "regular"
@@ -318,7 +318,7 @@ async def fill_gaps(
                 parent_event_id=parent_event_id,
             )
             seg = _wrap_segment_for(slot, timeline_cursor, last_real_src)
-            cap_style = slot.style.caption
+            cap_style = template.get_slot_caption(slot)
             cap = None
             if cap_style is not None:
                 nominal = float(slot.duration.get("nominal", 1.5))

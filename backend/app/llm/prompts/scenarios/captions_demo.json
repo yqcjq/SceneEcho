@@ -42,7 +42,7 @@
         "semantic_label": "字幕首现：底部居中单行",
         "reasoning": "在 1.2s 帧底部检测到水平字幕，黄字白边、单行布局。归一化 bbox 覆盖底部约 10% 高度。该事件回填 7-12 字陈述句的标题占位（占位文本字段在 1A 才入 IR）。",
         "confidence": 0.91,
-        "ir_target": {"ir_type": "TemplateIR", "path": "skeleton[0].style.caption", "field": null, "op": "set"},
+        "ir_target": {"ir_type": "TemplateIR", "path": "caption_style_palette[0]", "field": null, "op": "set"},
         "ir_value": {
           "font_family": "Source Han Sans SC",
           "size": 64,
@@ -63,30 +63,6 @@
     {
       "delay_ms": 700,
       "event": {
-        "event_id": "ev_cap_003",
-        "task_id": "__placeholder__",
-        "timestamp": "2026-06-08T08:00:01.200+00:00",
-        "duration_ms": 80,
-        "source": "cv",
-        "model_used": null,
-        "stage": "1A.captions_anim",
-        "frame_ts": 1.2,
-        "frame_url": "/data/system/dev_events/test_frame.jpg",
-        "bbox_norm": [120.0, 720.0, 760.0, 96.0],
-        "semantic_label": "动画细节：整句滑入 stagger 95ms",
-        "reasoning": "5fps 帧差 + Lucas-Kanade 跟踪 bbox 顶点，Y 轴位移 8.4% 内完成 → 整句滑入。逐字 stagger 中位数 95ms（CV 测得，与 VLM 判定一致）。",
-        "confidence": 0.88,
-        "ir_target": {"ir_type": "TemplateIR", "path": "skeleton[0].style.caption.anim_in", "field": null, "op": "set"},
-        "ir_value": "整句滑入",
-        "parent_event_id": "ev_cap_002",
-        "cost_tokens": null,
-        "confidence_warning": false,
-        "severity": "info"
-      }
-    },
-    {
-      "delay_ms": 700,
-      "event": {
         "event_id": "ev_cap_004",
         "task_id": "__placeholder__",
         "timestamp": "2026-06-08T08:00:02.000+00:00",
@@ -100,7 +76,7 @@
         "semantic_label": "多行字幕：双行 22 字解释段",
         "reasoning": "4.1s 出现一段双行说明字幕，每行 11 字、行距 1.4 倍字号。布局判定 multi。VLM 描述：核心卖点说明，断行控制在 11 字内。",
         "confidence": 0.93,
-        "ir_target": {"ir_type": "TemplateIR", "path": "skeleton[1].style.caption", "field": null, "op": "set"},
+        "ir_target": {"ir_type": "TemplateIR", "path": "caption_style_palette[1]", "field": null, "op": "set"},
         "ir_value": {
           "size": 56,
           "color": "#FFFFFF",
@@ -155,7 +131,7 @@
         "semantic_label": "CTA 字幕：底部居中强调",
         "reasoning": "8.2s 帧底部出现红底白字短句，宽度仅占 36% → CTA 类。建议长度 4-6 字。",
         "confidence": 0.89,
-        "ir_target": {"ir_type": "TemplateIR", "path": "skeleton[2].style.caption", "field": null, "op": "set"},
+        "ir_target": {"ir_type": "TemplateIR", "path": "caption_style_palette[2]", "field": null, "op": "set"},
         "ir_value": {
           "size": 72,
           "color": "#FFFFFF",
@@ -165,30 +141,6 @@
         },
         "parent_event_id": null,
         "cost_tokens": 510,
-        "confidence_warning": false,
-        "severity": "info"
-      }
-    },
-    {
-      "delay_ms": 700,
-      "event": {
-        "event_id": "ev_cap_007",
-        "task_id": "__placeholder__",
-        "timestamp": "2026-06-08T08:00:06.300+00:00",
-        "duration_ms": 90,
-        "source": "cv",
-        "model_used": null,
-        "stage": "1A.captions_anim",
-        "frame_ts": 8.2,
-        "frame_url": "/data/system/dev_events/test_frame.jpg",
-        "bbox_norm": [320.0, 800.0, 360.0, 110.0],
-        "semantic_label": "逐字弹入：每字 110ms stagger",
-        "reasoning": "光流跟踪显示 bbox 宽度阶梯增长 → 逐字弹入；中位数 stagger 110ms 与 VLM 判定一致。",
-        "confidence": 0.92,
-        "ir_target": {"ir_type": "TemplateIR", "path": "skeleton[2].style.caption.anim_in", "field": null, "op": "set"},
-        "ir_value": "逐字弹入",
-        "parent_event_id": "ev_cap_006",
-        "cost_tokens": null,
         "confidence_warning": false,
         "severity": "info"
       }

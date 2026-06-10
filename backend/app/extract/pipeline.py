@@ -5,9 +5,9 @@ it just sequences and accumulates results. PLAN.md 1511 explicitly bans
 "and now we rewrite 1A here" — this module imports each detector and
 treats it as a black box.
 
-The DAG (PLAN 1516):
+The DAG (PLAN 1516; decisions/011 删除 captions_anim 节点):
 
-    normalize ─▶ scenes ─┬─▶ frame_sampler ─┬─▶ captions ─▶ captions_anim
+    normalize ─▶ scenes ─┬─▶ frame_sampler ─┬─▶ captions
                          │                  ├─▶ stickers
                          │                  ├─▶ zoom_direction ─▶ zoom_curve
                          │                  ├─▶ transitions
@@ -16,8 +16,8 @@ The DAG (PLAN 1516):
                          └─▶ extract_bgm (audio independent of frames)
 
     after all of the above:
-        skeleton → caption_function (per-caption) → tagging → sanity_check
-        → save_template → KB
+        skeleton (含 caption_style_palette 聚类) → caption_function
+        (per-caption, 含动画语义) → tagging → sanity_check → save_template → KB
 
 Concurrency:
 - Top of DAG: ``Phase1AContext.scenes()`` + ``Phase1AContext.frames()`` are
@@ -68,14 +68,11 @@ T = TypeVar("T")
 # every ``field_key`` through this table before writing to ``ir.degraded``,
 # so the UI banner can navigate from a degraded entry to the affected IR
 # field with a single lodash get/set. ``*`` is a glob over slots — the
-# field applies to every Slot in skeleton, not a specific one. Phase 1A
-# field_keys (e.g. ``zoom_curves.0`` / ``captions.3.verified_anim_in``)
-# strip their per-index suffix and resolve to the same skeleton path
-# because the UI cares which IR field is partial, not which scene index.
+# field applies to every Slot in skeleton, not a specific one.
 SUBCAP_TO_IR_PATH: dict[str, str] = {
     "scenes": "skeleton",
     "frames": "skeleton",
-    "captions": "skeleton.*.style.caption",
+    "captions": "caption_style_palette",
     "stickers": "skeleton.*.style.stickers",
     "zoom_directions": "skeleton.*.style.visual.zoom_keyframes",
     "zoom_curves": "skeleton.*.style.visual.zoom_keyframes",
@@ -87,9 +84,8 @@ SUBCAP_TO_IR_PATH: dict[str, str] = {
     "tags": "tags",
     "sanity_check": "sanity_check",
     "duration": "global_style.duration_sec",
-    # Per-caption sub-fields fold under the same path.
-    "captions.verified_anim_in": "skeleton.*.style.caption",
-    "captions.function": "skeleton.*.style.caption",
+    # Per-caption function classification folds under caption_functions.
+    "captions.function": "caption_functions",
 }
 
 
@@ -199,12 +195,11 @@ async def _run_phase1a(
     one ``asyncio.gather`` so frames are computed once (by the first
     awaiter) and the rest of the call latency stacks instead of summing.
     Audio is independent — fires in the same gather to overlap with the
-    visual subcaps. captions_anim and zoom_curve are dependent and fire
-    only after their parent resolves.
+    visual subcaps. zoom_curve and caption_function are dependent and fire
+    only after their parents resolve.
     """
     from app.extract.audio import extract_bgm
     from app.extract.captions import detect_captions
-    from app.extract.captions_anim import verify_caption_anim
     from app.extract.color import classify_color_lut
     from app.extract.masks import detect_masks
     from app.extract.motion import estimate_zoom_curve, judge_zoom_direction
@@ -295,42 +290,9 @@ async def _run_phase1a(
             kfs, _ = res.value
             zoom_curves[str(sidx)] = kfs
 
-    # Dependent: captions_anim verifies each detected caption.
-    cached_frames = await ctx.frames()
-    anim_tasks = []
-    for idx, cap in enumerate(captions):
-        anchor = (
-            min(cached_frames, key=lambda f: abs(f.ts - cap.start))
-            if cached_frames
-            else None
-        )
-        anchor_url = (
-            f"/data/{anchor.rel_path.lstrip('/')}" if anchor is not None else None
-        )
-        anim_tasks.append(
-            _safe(
-                f"captions_anim.{idx}",
-                f"captions.{idx}.verified_anim_in",
-                verify_caption_anim(
-                    cap,
-                    ctx.normalized_path,
-                    task_id=task_id,
-                    caption_idx=idx,
-                    anchor_frame_url=anchor_url,
-                ),
-                task_id=task_id,
-                degraded=degraded,
-            )
-        )
-    if anim_tasks:
-        anim_results = await asyncio.gather(*anim_tasks)
-        for idx, res in enumerate(anim_results):
-            if res.ok and res.value:
-                detail, _ = res.value
-                captions[idx].verified_anim_in = detail.verified_anim_in
-                captions[idx].stagger_ms = detail.stagger_ms
-
     # Dependent: classify_caption_function (per caption, parallel).
+    # decisions/011: caption_function 现承担动画语义，输出 Phase1ACaptionFunctionEvent
+    # 列表写入 Phase1AReport.caption_functions（不再写 captions[idx].function）。
     from app.understand.vision import classify_caption_function
 
     fn_tasks = []
@@ -353,12 +315,13 @@ async def _run_phase1a(
                 degraded=degraded,
             )
         )
+    caption_functions: list = []
     if fn_tasks:
         fn_results = await asyncio.gather(*fn_tasks)
-        for idx, res in enumerate(fn_results):
+        for res in fn_results:
             if res.ok and res.value:
-                fn_result, _ = res.value
-                captions[idx].function = fn_result.function
+                fn_event, _ = res.value
+                caption_functions.append(fn_event)
 
     from app.extract.color import to_color_report
 
@@ -368,6 +331,10 @@ async def _run_phase1a(
     return Phase1AReport(
         scenes=[s.to_report_entry() for s in scenes],
         captions=captions,
+        # caption_style_palette is built in 1B build_skeleton (cluster pass);
+        # 1A leaves it empty so the right-pane shows it filling at 1B time.
+        caption_style_palette=[],
+        caption_functions=caption_functions,
         stickers=stickers,
         zoom_directions={str(k): v.direction for k, v in zoom_dirs.items()},
         zoom_curves=zoom_curves,
@@ -464,13 +431,17 @@ async def extract_template(
         task_id=task_id,
         degraded=degraded,
     )
-    slots = skel_res.value[0] if skel_res.ok and skel_res.value else []
+    if skel_res.ok and skel_res.value:
+        slots, palette, _skel_events = skel_res.value
+    else:
+        slots, palette = [], []
 
     ir = TemplateIR(
         id=template_id,
         name=name or f"模板·{sample_id}",
         source_sample=sample_id,
         skeleton=slots,
+        caption_style_palette=palette,
         audio=report.audio,
         global_style={
             "canvas": {"width": 1080, "height": 1920, "fps": 30},

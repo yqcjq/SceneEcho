@@ -66,7 +66,7 @@ def _summarize_for_audit(ir: TemplateIR) -> str:
         )
     slot_lines: list[str] = []
     for i, slot in enumerate(ir.skeleton):
-        cap = slot.style.caption
+        cap = ir.get_slot_caption(slot)
         cap_brief = "—"
         if cap is not None:
             ph = (cap.placeholder_text or [""])[0][:40]

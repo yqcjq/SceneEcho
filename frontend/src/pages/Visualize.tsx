@@ -134,7 +134,7 @@ export const Visualize: React.FC = () => {
         a.download = `workbench_replay_${Date.now()}.webm`;
         a.click();
         URL.revokeObjectURL(url);
-        stream.getTracks().forEach((t) => t.stop());
+        stream.getTracks().forEach((t: MediaStreamTrack) => t.stop());
         setRecording(false);
       };
       recorder.start();

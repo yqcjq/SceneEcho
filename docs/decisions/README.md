@@ -79,26 +79,4 @@
 
 ## 现有决策
 
-- [001 — Agent 调度器采用 dataflow + 按物理设备加锁](001-agent-scheduler-dataflow-model.md)
-- [002 — 执行控制事件订阅从 Screen 级提升到 App 级](002-execution-control-global-subscription.md)
-- [003 — 主 Agent 决策日志采用结构化 + 精简模型](003-agent-decision-log-context-structure.md)（已废弃，被 005 取代）
-- [004 — 主 Agent 决策上下文重新设计](004AGENT-CONTEXT-REDESIGN.md)（已废弃，被 005 取代）
-- [005 — 主 Agent 决策上下文 V3：从"记录"转向"决策"](005AGENT-CONTEXT-DECISION-MODEL.md)
-- [006 — 主 Agent 后台展示层重构](006-admin-visualization.md)
-- [007 — 主 Agent 通过心跳信号进行 Step 级 liveness 检测](007-step-liveness-via-heartbeat.md)
-- [008 — AI System Prompt 按调用情境分离为三份独立 prompt](008-ai-prompt-split-by-context.md)
-- [009 — AI 工具集合按"原子 + 可观察 + 必要"三原则收敛](009-ai-tool-set-rationalization.md)
-- [010 — Schedule 从 Task 字段解耦为一等实体](010-schedule-entity-decoupled-from-task.md)
-- [011 — AI 顶层短等待原语 Wait + 心跳冻结 STEP_TIMEOUT 机制](011-ai-wait-primitive-with-step-timeout-freeze.md)
-- [012 — AI 用户检查点原语 UserGate（含统一的用户确认 UX）](012-ai-usergate-primitive.md)
-- [013 — AI 任务委托与调度原语族（CallTask / ScheduleTask / UnscheduleTask）](013-ai-task-delegation-and-scheduling-primitives.md)
-- [014 — AI 工具注册表 — 单一来源 + 局部代码生成](014-tool-registry-single-source.md)
-- [015 — GitHub Actions 阶段 1 CI — 确认触发条件与最小范围](015-ci-pipeline-stage1.md)
-- [016 — agent 线协议前后端字段同构——pytest 接入 model_json_schema](016-agent-contract-parity-test.md)
-- [017 — SendReminder / CancelReminder AI 原语与 Android 通知 channel 集中管理](017-send-reminder-notification-channel-system.md)
-- [018 — SendReminder 时间参数从绝对 triggerAtMs 改为相对 delayMs](018-send-reminder-delay-ms.md)
-- [019 — admin agent_detail 信息密度与单页诊断动线重排](019-admin-agent-detail-ux-pass2.md)
-- [020 — DecisionEvent 增加 raw_response 字段并升级展示](020-decision-event-raw-response-and-visualization.md)
-- [021 — 测试 pipeline 数据模型与后台合并 — 复用生产 AgentSession，新增 4 张测试元数据表](021-test-pipeline-data-model-and-merge.md))
-- [022 — Server-originated agent.goal 链路 — 抽出公共函数复用主路径，删除 admin debug 端点](022-server-originated-agent-goal.md)
-- [023 — 全链路 AI 调用 token/cost 追踪 — 新建价格表 + 三类调用点写入 + AgentSession 原子累计](023-ai-call-token-cost-tracking.md)
+- [00X — 标题](文件名)

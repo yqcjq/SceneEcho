@@ -227,7 +227,7 @@ async def apply_style(
         if slot_idx is None:
             continue
         slot = template.skeleton[slot_idx]
-        cap_style = slot.style.caption
+        cap_style = template.get_slot_caption(slot)
         if cap_style is None or not seg.source_unit_ids or seg.is_fill:
             continue
         for unit_id in seg.source_unit_ids:

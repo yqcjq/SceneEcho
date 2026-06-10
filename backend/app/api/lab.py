@@ -64,30 +64,6 @@ async def _run_captions(ctx: Phase1AContext) -> None:
     await detect_captions(ctx)
 
 
-async def _run_captions_anim(ctx: Phase1AContext) -> None:
-    from app.extract.captions import detect_captions
-    from app.extract.captions_anim import verify_caption_anim
-
-    captions, _ = await detect_captions(ctx)
-    frames = await ctx.frames()
-    for idx, cap in enumerate(captions):
-        # Match the same anchor frame the caption entity event used so the
-        # CV refine event lands on the same frame in the workbench.
-        anchor = (
-            min(frames, key=lambda f: abs(f.ts - cap.start)) if frames else None
-        )
-        anchor_url = (
-            f"/data/{anchor.rel_path.lstrip('/')}" if anchor is not None else None
-        )
-        await verify_caption_anim(
-            cap,
-            ctx.normalized_path,
-            task_id=ctx.task_id,
-            caption_idx=idx,
-            anchor_frame_url=anchor_url,
-        )
-
-
 async def _run_stickers(ctx: Phase1AContext) -> None:
     from app.extract.stickers import detect_stickers
 
@@ -163,14 +139,6 @@ REGISTRY: dict[str, SubcapDef] = {
         fixtures=("sample_basic_15s",),
         baseline_key="subcap.captions",
         runner=_run_captions,
-    ),
-    "captions_anim": SubcapDef(
-        name="captions_anim",
-        label="字幕动画细节 (CV)",
-        stage="1A.captions_anim",
-        fixtures=("sample_basic_15s", "sample_no_bgm_10s"),
-        baseline_key="subcap.captions_anim",
-        runner=_run_captions_anim,
     ),
     "stickers": SubcapDef(
         name="stickers",

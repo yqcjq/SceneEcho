@@ -50,7 +50,7 @@ def _summarize_ir(ir: TemplateIR) -> str:
     """Compact text summary fed to the VLM as the user prompt."""
     slots_brief = []
     for i, slot in enumerate(ir.skeleton):
-        cap = "有字幕" if slot.style.caption else "无字幕"
+        cap = "有字幕" if ir.get_slot_caption(slot) else "无字幕"
         zoom_n = len(slot.style.visual.zoom_keyframes)
         stickers_n = len(slot.style.stickers)
         slots_brief.append(

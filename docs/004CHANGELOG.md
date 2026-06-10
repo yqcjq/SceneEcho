@@ -1,3 +1,51 @@
+## [2026-06-10-4] refactor(ir): hoist caption styles into model-level palette + drop captions_anim subcap [ISS-022]
+
+### 改动
+
+decisions/010 + decisions/011 P1 落地：把 caption 视觉样式从 Slot 内联升级为 `TemplateIR.caption_style_palette` 模板级共享 + Slot 通过 `caption_palette_idx: int | None` 引用；删除 `1A.captions_anim` 子能力，其动画语义并入 `1A.caption_function`（schema 升级承载 anim_in_type / anim_emphasis / stagger_ms_estimate / role_in_template）。本次仅做 IR 重构 + 让全栈编译通过 + 已存模板迁移；CV 文本带预扫、bbox 契约修复、masks CV 砍除、zoom 平移、b_roll 子能力等留给 P2-P7。
+
+1. **CaptionStyle 字段扩充**：在视觉子集上加 shadow_color / shadow_offset / shadow_blur / background_color / padding / text_align / letter_spacing / line_height / bbox_norm；行为子集（anim_in / anim_emphasis / emphasis_words）保留，作为 palette 默认值，apply 阶段或 caption_function 阶段覆盖。
+2. **Slot.style.caption → caption_palette_idx**：删除 inline CaptionStyle 字段，改为 int 索引；新增 `TemplateIR.caption_style_palette: list[CaptionStyle]`；`TemplateIR.get_slot_caption(slot)` helper 给下游解引用。
+3. **删除 1A.captions_anim 子能力**：移除 `extract/captions_anim.py`；`api/lab.py` REGISTRY / `_run_captions_anim` 删除；pipeline.py DAG 同步去掉该节点；`Phase1ACaptionEvent.verified_anim_in / stagger_ms / function / *_raw` 字段移除。
+4. **caption_function schema 升级 + 输出迁移**：新增 `Phase1ACaptionFunctionEvent`（caption_idx / function / anim_in_type / anim_emphasis / stagger_ms_estimate / role_in_template / confidence / reasoning）；`understand/vision.py::classify_caption_function` 写 `Phase1AReport.caption_functions` 而非 `captions[idx].function`；pipeline.py 调用收集成 list。
+5. **skeleton.py 重写**：build_skeleton 签名改为返回 `tuple[list[Slot], list[CaptionStyle], list[VisionEvent]]`；`_build_palette` 按 (font / size / color / stroke / layout / semantic_purpose) 签名聚类（采纳簇内最高置信度字幕的视觉字段）；`_dominant_caption_palette_idx` 给每个 Slot 选一个 idx；`Slot.caption_function` 由 `_vote_caption_function` 在 `caption_functions` 上多数投票。
+6. **下游 8 处 slot.style.caption 解引用迁移**：`apply/style.py`、`apply/fill.py`（×2）、`kb/sanity.py`、`kb/store.py::update_caption_placeholder`、`kb/tagging.py` 全部改为 `template.get_slot_caption(slot)` / 操作 palette idx。
+7. **nl_edit `_ALLOWED_CAPTION_FIELDS` 同步**：加入 9 个新视觉字段（shadow_*, background_color, padding, text_align, letter_spacing, line_height, bbox_norm），让 panel 编辑兼容。
+8. **类型自动生成 + 已存模板迁移**：`scripts/gen_schema.py` 重新导出；`pnpm -F renderer/frontend gen:types` 重生成 zod + TS 类型；新增 `backend/scripts/migrate_caption_palette.py` 一次性脚本扫 `kb.sqlite` 把每个旧 TemplateIR 的 inline caption 抽到 palette 并改 idx，对 6 条已存模板 dry-run 验证通过；同步 mock json 中的 ir_target.path（`skeleton[N].style.caption` → `caption_style_palette[N]`，移除 captions_anim 事件）。
+9. **测试适配**：`test_skeleton.py` 解构 3-tuple；`test_kb_store.py::_sample_ir` 改用 palette 形式；`test_apply_phase2.py::_make_template` 加 `caption_style_palette` 参数；`test_subcap_shapes.py` round_trip 改读 `caption_functions[0].function`。
+10. **顺手修 frontend typecheck 预存的 Visualize.tsx 隐式 any 错误**（`stream.getTracks().forEach((t) => ...)` 加显式 `MediaStreamTrack` 类型）—— 与 P1 IR 重构同期修干净，避免 typecheck 长期红色掩盖真实错误。
+
+### 涉及文件
+
+- backend/app/ir/template.py：CaptionStyle 字段大扩充 + StyleRule.caption_palette_idx + TemplateIR.caption_style_palette + ZoomKeyframe.dx/dy + get_slot_caption helper
+- backend/app/ir/phase1a_report.py：Phase1ACaptionEvent 删 raw + 加 palette_idx；新增 Phase1ACaptionFunctionEvent；Phase1AReport 加 caption_style_palette / caption_functions
+- backend/app/extract/captions.py：_to_caption_entry 删 raw 字段写入；back-compat 注释更新
+- backend/app/extract/captions_anim.py：整文件删除
+- backend/app/extract/skeleton.py：palette 聚类 + Slot 引用 idx + caption_function 投票；签名改 3-tuple
+- backend/app/extract/pipeline.py：DAG 文档 + import 删 captions_anim；caption_function 输出收集到 list；build_skeleton 解构改
+- backend/app/understand/vision.py：classify_caption_function 输出 Phase1ACaptionFunctionEvent + ir_target 改 caption_functions append
+- backend/app/api/lab.py：REGISTRY 删 captions_anim + _run_captions_anim 删
+- backend/app/apply/style.py / fill.py：slot.style.caption → template.get_slot_caption(slot)
+- backend/app/kb/sanity.py / tagging.py / store.py：同上 + update_caption_placeholder 改 palette
+- backend/app/agent/nl_edit.py：_ALLOWED_CAPTION_FIELDS 加 9 个视觉字段
+- backend/app/llm/prompts/scenarios/captions_demo.json + full_extract_demo.json：mock IR 路径改 caption_style_palette；删 captions_anim mock 事件
+- backend/scripts/migrate_caption_palette.py：新增一次性迁移脚本
+- backend/tests/integration/test_apply_phase2.py + test_subcap_shapes.py：fixture 改 palette 形式
+- backend/tests/unit/test_skeleton.py + test_kb_store.py：解构新签名 / 改 palette 路径
+- shared/ir.schema.json：自动生成
+- renderer/src/types/ir.ts + frontend/src/types/ir.ts：自动生成
+- frontend/src/pages/Visualize.tsx：MediaStreamTrack 类型标注
+- docs/001ARCHITECTURE.md：D17 / D19 / D24 / D25 + 流程图 196-207 行同步
+- docs/002STRUCTURE.md：删除 captions_anim.py 行 + vision.py 描述升级
+
+### 关联
+
+-> ISS-022
+-> decisions/010-phase1a-subcap-rework.md
+-> decisions/011-drop-captions-anim-merge-into-caption-function.md
+
+---
+
 ## [2026-06-10-3] refactor(workbench): hoist by-id event index to store + dedup gantt/media-timeline mapping [ISS-018]
 
 ### 改动

@@ -746,3 +746,175 @@ PLAN.md 1759-1870 声明阶段 2.6：把工作台从「事件列表 + 回放器�
 **解决方案**：
 工作台 store 加 `eventsById: Map<event_id, VisionEvent>` 派生索引（与 `childIndex` 同源、`appendEvent` 时 O(1) 增量更新、`reset` 时清空）；`CausalChainOverlay` 的两个 hook 与 `WorkbenchVisionPane` 选中事件 lookup 改为读 store `eventsById` 而非 `events.find` / 临时 byId Map；`aggregateEvents.ts` 抽 `toGanttEvent(ev, start_ms, end_ms)` helper，`buildGantt` 传 origin-relative ms、`buildMediaTimeline` 传 0/0（X 轴是视频秒，不是壁钟），消除 17 行字段映射重复；ARCHITECTURE D42 末尾补一句关于 `eventsById` / `childIndex` forward+reverse 双索引的事实陈述。修改前后对外行为不变——`buildGantt` / `buildMediaTimeline` 返回结构相同（aggregateEvents.test.ts 测试通过）、`useChainResolver` / `useChainHighlight` 输出语义相同；改动是纯内部 O(N²) → O(N) 性能 + DRY 清理。
 
+---
+
+## [ISS-019] Phase 1A 字幕样式/位置识别 bbox 偏斜 + 召回率低于真实字幕数
+
+**状态**：[讨论中]
+**优先级**：[P1 严重]
+**类型**：[功能异常]
+**发现日期**：2026-06-10
+
+**现象**：
+SubcapabilityLab 跑 9.4s × 9 字幕的口播样例，`1A.captions` 子能力只识别出 4 条字幕；几何蒙版（`1A.masks`）的 VLM 兜底反而把 9 个字幕首现位置全部当矩形 mask 标记出来——侧面证明字幕在画面里都"长得像可被识别的矩形带"，但 captions 子能力的 VLM grid 识别在小字号 / 短停留上漏了一半以上。同时识别到的字幕 bbox 普遍偏中下、只框 6 个字里的 2 个——视觉上像 bbox 整体被估小且位置略向中下偏移。
+
+**后果**：
+- 字幕样式 + 位置子能力的召回率与人工标注差距过大，PLAN 1415 预计的"首现时刻 median 误差 < 0.3s / 位置 median 误差 < 5%" 在该样例上远不能满足。
+- bbox 不准导致下游 1B skeleton.py / 渲染端 Caption.tsx 渲染字幕时和原样例位置不一致，复用模板时字幕位置错位。
+- 评审 demo 时 Lab 页面会暴露该缺陷，可解释性证明力受损。
+
+**初步判断**：
+两条根因推测，至少前者已确认：
+
+1. **prompt 与代码契约歧义**（已读 `1a_captions.md` + `captions.py::_bbox_from_pos_size` 确认）：prompt 同时声明 `position_norm_0_999: [x, y, w, h]` 与 `size_norm_0_999: [w, h]`——两个字段都含宽高，VLM 容易把 position 解读为 `[cx, cy, w, h]`（COCO/YOLO 习惯），代码 `_bbox_from_pos_size` 优先用 `pos[:4]` 作 (x, y, w, h) → bbox 整体偏移 + 尺寸异化。
+2. **召回率低**（推测）：当前每个 scene 6 帧合一个 grid 给 VLM；短停留字幕（仅 1-2 帧）+ 小字号在 6-grid 缩略图里容易被忽略；纯 VLM 路径没有 CV 预扫候选区域作为锚点。
+
+**关联**：
+-> backend/app/extract/captions.py（`_bbox_from_pos_size` / `_to_caption_style` 转换、跨窗口 dedup）
+-> backend/app/llm/prompts/1a_captions.md（contract 歧义）
+-> backend/app/ir/template.py（CaptionStyle 字段扩充触点）
+-> decisions/010-phase1a-subcap-rework.md
+
+---
+
+## [ISS-020] 几何蒙版子能力误把字幕带认成矩形蒙版
+
+**状态**：[讨论中]
+**优先级**：[P1 严重]
+**类型**：[功能异常]
+**发现日期**：2026-06-10
+
+**现象**：
+SubcapabilityLab 跑同一 9.4s 样例的 `1A.masks` 子能力，每个字幕首现位置都被当成蒙版事件标到 MediaTimeline 上。9 个字幕全命中，但样例里实际**没有几何蒙版**——这些事件全是误报。
+
+**后果**：
+- 模板 IR 里 `Phase1AReport.masks` 被填上虚假记录；1B skeleton.py 把它带进 Slot.style.visual.mask；下游渲染端 Mask.tsx 会试图叠加并不存在的几何蒙版。
+- "几何蒙版"这一子能力的存在感几乎只来自字幕误报，对真实使用场景（口播视频中本来就极少出现真几何蒙版）没有正面贡献。
+
+**初步判断**：
+读 `backend/app/extract/masks.py` + `1a_masks.md` 确认两条机制都会触发误报：
+
+1. **VLM 兜底**（`_vlm_fallback`）prompt 没有显式排除"字幕 / 标题条 / UI 元素 ≠ 几何蒙版"，VLM 看 3 帧 grid 把字幕带认作矩形 mask。
+2. **CV `_detect_rectangle`**（10% 面积阈值 + 短边 15%）+ **`_detect_line_split`**（60% 长度的近水平/竖直线）这两个检测器在口播视频里几乎只会被字幕带 / 字幕条边缘的 Hough 线段命中——口播一镜到底场景没有真矩形 / 分屏蒙版。
+
+**关联**：
+-> backend/app/extract/masks.py（CV 三检测器、VLM fallback）
+-> backend/app/llm/prompts/1a_masks.md（缺排除项）
+-> backend/app/ir/phase1a_report.py（Phase1AMaskParams.kind 枚举可能要收窄）
+-> decisions/010-phase1a-subcap-rework.md
+
+---
+
+## [ISS-021] 缩放方向子能力缺平移 8 方向识别能力
+
+**状态**：[讨论中]
+**优先级**：[P2 一般]
+**类型**：[功能异常]
+**发现日期**：2026-06-10
+
+**现象**：
+当前 `_ZoomDirection.direction` 枚举仅 `{推进, 拉远, 稳定, 抖动}` 四类，覆盖不到口播视频里同样常见的"画面整体平移"——向左 / 向右 / 向上 / 向下 / 左上 / 右上 / 左下 / 右下 八个方向的镜头平移类型，体感上系统对平移几乎没有识别能力。
+
+**后果**：
+模板 IR 里"画面运动风格"这一维度信息流失；用户素材应用模板时只能复用推进/拉远，平移无法迁移；模板复用价值打折。
+
+**初步判断**：
+推测。当前 `motion.py::judge_zoom_direction` 用 VLM 判 4 类，`estimate_zoom_curve` 仅用 LK 光流估 scale 比率（centroid 距离比），没有提取 (dx, dy) 平移向量；技术上 LK 光流的 keypoint 位移已经包含 (dx, dy)，只是没用。
+
+**关联**：
+-> backend/app/extract/motion.py（`_ZoomDirection` 枚举扩展、`estimate_zoom_curve` 输出加 dx/dy）
+-> backend/app/ir/template.py（VisualStyle 的 zoom_keyframes 是否需要新字段表达 pan）
+-> backend/app/llm/prompts/1a_zoom_direction.md
+-> decisions/010-phase1a-subcap-rework.md
+
+---
+
+## [ISS-022] 字幕功能分类 IR 信息密度过低，模板复用时字幕样式细节丢失
+
+**状态**：[进行中]
+**优先级**：[P1 严重]
+**类型**：[技术债]
+**发现日期**：2026-06-10
+
+**现象**：
+当前 `Slot.style.caption: CaptionStyle | None` 每个 slot 挂一个字幕样式；CaptionStyle 字段也只有 `font_family / size / color / stroke_color / stroke_width / position(中心点) / layout / max_chars_per_line / anim_in / anim_emphasis / placeholder_text / length_constraint / semantic_purpose`——缺少 shadow（颜色/偏移/模糊）/ background / padding / text_align / letter_spacing / line_height / 完整 bbox（仅有 center 没有 size）等视觉细节。`caption_function` 子能力当前仅给单个字符串 label（标题/强调/卖点/CTA/regular）。
+用户反馈：复用模板时拿到的字幕信息"只是用中文描述，非常模糊，后续使用的时候不知道如何使用"——核心问题不是"识别准不准"，是"识别出的样式信息根本不够后续复用"。
+
+**后果**：
+- demo 阶段最大的卖点之一"模板复用 = 改文字、保样式"在字幕这一最重要可复用元素上落不下来。
+- 同一模板里如果出现两种字幕样式（如顶部标题 + 底部 CTA），现在的 `Slot.style.caption` 只能保留其一，另一种被覆盖——无法跨 Slot 共享同一种样式。
+- 后续 NL 编辑 / 参数面板想"把开头的字幕颜色改成红色"时，无法定位到一个清晰的字幕样式实例。
+
+**初步判断**：
+已确认。第一性原理：字幕样式应作为**模板级 palette**存在（一个模板里出现的所有不同字幕样式去重列出），而不是被强行平摊到每个 Slot 里。Slot 改为引用 palette index；palette 元素本身字段大幅扩充，覆盖所有视觉复用所需细节。
+
+**关联**：
+-> backend/app/ir/template.py（CaptionStyle 字段扩充 + TemplateIR 加 caption_style_palette）
+-> backend/app/ir/phase1a_report.py（Phase1ACaptionEvent 字段扩充 + palette 聚合层 + 新增 Phase1ACaptionFunctionEvent）
+-> backend/app/extract/captions.py（跨窗口 dedup → 跨窗口聚类合并到 palette）
+-> backend/app/extract/captions_anim.py（删除整个文件，详见 decisions/011）
+-> backend/app/extract/skeleton.py（Slot.style.caption 改 caption_style_idx）
+-> backend/app/apply/style.py / mapping.py / fill.py（通过 palette index 查 CaptionStyle）
+-> backend/app/agent/nl_edit.py + backend/app/llm/prompts/2_5_nl_edit.md（NL 操作 palette）
+-> backend/app/llm/prompts/1a_captions.md / 1a_caption_function.md（VLM 输出更多视觉细节 + caption_function 升级承载动画类型）
+-> backend/app/api/lab.py（REGISTRY 删 captions_anim 条目）
+-> renderer/src/compositions/Caption.tsx（渲染层支持新字段）
+-> renderer/src/types/ir.ts / frontend/src/types/ir.ts（自动生成）
+-> 已存模板的迁移脚本
+-> PLAN.md 1A 节子能力清单 / 依赖 DAG 同步更新（删 captions_anim 节点）
+-> decisions/010-phase1a-subcap-rework.md
+-> decisions/011-drop-captions-anim-merge-into-caption-function.md
+
+---
+
+## [ISS-023] Phase 1A 缺「额外画面 / B-roll 场景」子能力
+
+**状态**：[讨论中]
+**优先级**：[P2 一般]
+**类型**：[技术债]
+**发现日期**：2026-06-10
+
+**现象**：
+当前 1A 子能力清单里没有"画面里是否还有人物以外的额外画面（图片 / B-roll / 画中画 / 侧栏）"这一识别能力。但口播视频实际拍摄场景中，作者讲到具体内容时常会插入 AI 生图或 B-roll 视频，让画面不至于单调。Phase 5 已在 PLAN 里规划了 generate_broll，但提取阶段没有任何子能力告诉模板"原样例的哪段时间用了 B-roll、占画面多大比例"——下游 Phase 5 也就没有可消费的字段。
+
+**后果**：
+- 模板提取丢失"画面构成节奏"维度；用户素材应用模板时无法判断哪些 Slot 应启用 AIGC 补画面。
+- Phase 5 的 generate_broll 只能靠用户在 UI 上手动指定时间段，缺自动建议依据。
+
+**初步判断**：
+推测。VLM 看每个 scene 的中间帧分类四类 `{人物主导, 全屏 B-roll, 画中画, 侧栏}` 是足够的；不需要立即接入 generate_broll API，仅在 Phase1AReport 写一个 `b_roll_segments: list[BRollSegment]` 字段。识别本身和 D10（AIGC 用户主动触发）不冲突——识别只是给模板打标签，应用阶段是否真生成仍由用户决定。
+
+**关联**：
+-> backend/app/extract/b_roll.py（新增）
+-> backend/app/llm/prompts/1a_b_roll.md（新增）
+-> backend/app/api/lab.py（REGISTRY 加 b_roll 子能力）
+-> backend/app/ir/phase1a_report.py（Phase1AReport.b_roll_segments）
+-> backend/app/extract/skeleton.py（Slot.material_req 新增 "AI生成画面" 分支）
+-> decisions/010-phase1a-subcap-rework.md
+
+---
+
+## [ISS-024] SubcapabilityLab 文件选择写死 fixture id 列表，无法自由选样例
+
+**状态**：[讨论中]
+**优先级**：[P2 一般]
+**类型**：[体验]
+**发现日期**：2026-06-10
+
+**现象**：
+`backend/app/api/lab.py` 的 `REGISTRY` 把每个子能力可用的 fixtures 硬编码（如 `"sample_basic_15s"`、`"sample_with_sticker_12s"`）；前端 `SubcapabilityLab.tsx` 的 dropdown 只显示这几条；新加样例必须改后端代码 + 重启服务才能在 Lab 里跑。又因为 `_resolve_fixture_path` 只在 `data/samples/{fixture_id}/` 下找 `normalized.mp4` / `source.mp4`，开发者每次想跑新样例都要先重命名为 normalized.mp4 + 同目录下不能有其他 normalized 文件。
+
+**后果**：
+- 子能力调试体感差，新样例 onboarding 流程繁琐。
+- "想拿任意 mp4 试一下子能力"是 Lab 页本应承担的核心场景，目前却被这个写死阻塞。
+
+**初步判断**：
+已确认。改造方向：dropdown 改为列出 `data/samples/` 下所有目录（运行时扫描而不是 REGISTRY 写死）+ 旁边一个 "上传新样例" 按钮触发浏览器 file dialog → 调现有 `POST /samples` ingest 流程 → 完成后自动 select。
+
+**关联**：
+-> backend/app/api/lab.py（`REGISTRY` 的 fixtures 字段去硬编码）
+-> backend/app/api/samples.py（复用现有 ingest 流程）
+-> frontend/src/pages/SubcapabilityLab.tsx（dropdown 改运行时拉取 + 上传按钮）
+-> frontend/src/api/lab.ts（list_samples 接口）
+-> decisions/010-phase1a-subcap-rework.md
+

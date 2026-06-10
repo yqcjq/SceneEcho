@@ -140,8 +140,7 @@
 - `context.py`             一次抽取的共享上下文对象，把分镜、采样帧、LLM 客户端缓存起来，避免子识别器重复跑 PySceneDetect / ffmpeg。
 - `frame_sampler.py`       用 ffmpeg 按 1fps + 切点附近 ±0.2s + 每镜头首中末帧抽 JPEG。
 - `scenes.py`              用 PySceneDetect 切分镜头，给每个 scene 输出代表帧供工作台预览。
-- `captions.py`            调用 VLM 在采样帧上识别字幕的位置、字号、颜色、描边、动画类型，跨场景去重合并。
-- `captions_anim.py`       用 OpenCV 帧差和光流精修字幕入场动效（逐字弹入 / 整句滑入 / 淡入 / 打字机）。
+- `captions.py`            调用 VLM 在采样帧上识别字幕的位置、字号、颜色、描边、阴影、布局，跨场景去重合并；动画类型由 `understand/vision.py` 的 caption_function 子能力承担（decisions/011 删 captions_anim）。
 - `stickers.py`            VLM 网格采样识别贴纸的位置、语义类别，再用 Canny + 帧差细修边界框。
 - `motion.py`              VLM 粗判每个分镜的镜头缩放方向（推进 / 拉远 / 稳定），非稳定的再用光流估出关键帧曲线。
 - `transitions.py`         VLM 看相邻 scene 边界前后三帧，分类转场类型（硬切 / 叠化 / 滑动 等）。
@@ -156,7 +155,7 @@
 视觉识别之外的两条理解通路。`extract/` 关心"画面里有什么"，这里关心"声音说了什么、字幕在干什么"，输出供后续口播匹配与字幕功能识别使用。
 
 - `asr.py`                 WhisperX large-v3 中文转写 + 词级时间戳 + 强制对齐，按 0.3s 停顿合并出语句单元；模型缺失时降级为按时长均匀切块，并打降级事件。
-- `vision.py`              字幕功能分类器：拿 `extract/captions.py` 已识别的字幕条目，调一次 VLM 判断功能（强调 / 标题 / 旁白 / 普通…）。
+- `vision.py`              字幕功能 + 动画分类器：拿 `extract/captions.py` 已识别的字幕条目，调一次 VLM 综合判断功能（标题 / 强调 / 卖点 / CTA / regular）+ 动画类型（逐字弹入 / 整句滑入 / 淡入 / 打字机）+ stagger 估算；输出 `Phase1ACaptionFunctionEvent` 写入 `Phase1AReport.caption_functions`。
 
 ### backend/app/llm/  大模型调用层
 

@@ -74,7 +74,7 @@ const TemplateListView: React.FC = () => {
           KB 为空。回到样例页上传一段 5–20s 样例并点「提取模板」即可看到结果。
         </div>
       ) : (
-        <ul className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
+        <ul className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {items.map((t) => (
             <li
               key={t.id}

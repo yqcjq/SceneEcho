@@ -178,10 +178,11 @@ def update_caption_placeholder(
 ) -> bool:
     """Manually override a slot caption's placeholder_text (PLAN 1538).
 
-    Writes directly to ``slot.style.caption.placeholder_text`` — the
-    canonical home of the field since the 1B IR change. The renderer's
-    template_preview mode and the Phase 2 caption-fill LLM both read
-    from this exact path.
+    decisions/010 落地后字幕样式存放在模板级 ``caption_style_palette``，
+    Slot 通过 ``style.caption_palette_idx`` 引用。本函数解引用 idx 取出对应
+    palette 元素后更新其 ``placeholder_text``——所有引用同一 palette idx 的
+    Slot 一起获益。renderer 的 template_preview 模式与 Phase 2 caption-fill
+    LLM 都从 palette 元素读这个字段。
     """
     init_db()
     with _conn() as con:
@@ -197,9 +198,10 @@ def update_caption_placeholder(
         if slot_idx < 0 or slot_idx >= len(ir.skeleton):
             return False
         slot = ir.skeleton[slot_idx]
-        if slot.style.caption is None:
+        idx = slot.style.caption_palette_idx
+        if idx is None or not (0 <= idx < len(ir.caption_style_palette)):
             return False
-        slot.style.caption = slot.style.caption.model_copy(
+        ir.caption_style_palette[idx] = ir.caption_style_palette[idx].model_copy(
             update={"placeholder_text": list(placeholder_text)}
         )
         con.execute(

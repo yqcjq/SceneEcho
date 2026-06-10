@@ -16,7 +16,7 @@ def _sample_ir(template_id: str = "tpl_test_1") -> TemplateIR:
                 role="开头",
                 duration={"min": 1.4, "nominal": 2.0, "max": 3.0},
                 material_req="人物口播",
-                style=StyleRule(caption=CaptionStyle(size=64)),
+                style=StyleRule(caption_palette_idx=0),
             ),
             Slot(
                 role="主体",
@@ -25,6 +25,7 @@ def _sample_ir(template_id: str = "tpl_test_1") -> TemplateIR:
                 style=StyleRule(),
             ),
         ],
+        caption_style_palette=[CaptionStyle(size=64)],
         tags=Tags(function="强调推销", scene="纯口播", position="中间", notes="测试"),
         degraded={"audio": "Demucs unavailable"},
     )
@@ -90,7 +91,11 @@ def test_update_caption_placeholder_writes_into_caption_style(temp_data_root):
     ok = kb_store.update_caption_placeholder("tpl_ph", 0, ["立即抢购", "限时优惠"])
     assert ok is True
     fetched = kb_store.get_template("tpl_ph")
-    assert fetched["ir"]["skeleton"][0]["style"]["caption"][
+    # decisions/010: placeholder lives on the palette element referenced by
+    # Slot.style.caption_palette_idx, not inline on the slot.
+    idx = fetched["ir"]["skeleton"][0]["style"]["caption_palette_idx"]
+    assert idx == 0
+    assert fetched["ir"]["caption_style_palette"][idx][
         "placeholder_text"
     ] == ["立即抢购", "限时优惠"]
 
@@ -98,7 +103,7 @@ def test_update_caption_placeholder_writes_into_caption_style(temp_data_root):
 def test_update_caption_placeholder_rejects_no_caption_slot(temp_data_root):
     kb_store.init_db()
     kb_store.save_template(_sample_ir("tpl_no_cap"))
-    # Slot index 1 has no caption per _sample_ir.
+    # Slot index 1 has no caption per _sample_ir (caption_palette_idx is None).
     ok = kb_store.update_caption_placeholder("tpl_no_cap", 1, ["x"])
     assert ok is False
 

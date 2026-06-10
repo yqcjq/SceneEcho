@@ -486,20 +486,34 @@ def _walk_segments(state: dict, target: dict) -> list[tuple[int, int]]:
 
 # Allowed CaptionStyle subset accepted via Patch.value — anything else is
 # dropped so a malicious / hallucinated payload can't introduce extra
-# pydantic-Unknown fields.
+# pydantic-Unknown fields. Synced with ``CaptionStyle`` in template.py;
+# adding a new visual field there means adding it here too.
 _ALLOWED_CAPTION_FIELDS: frozenset[str] = frozenset(
     {
+        # typography
         "font_family",
         "size",
         "color",
         "stroke_color",
         "stroke_width",
+        "shadow_color",
+        "shadow_offset",
+        "shadow_blur",
+        "background_color",
+        "padding",
+        "text_align",
+        "letter_spacing",
+        "line_height",
+        # layout
         "position",
+        "bbox_norm",
         "layout",
         "max_chars_per_line",
+        # behavioral
         "anim_in",
         "anim_emphasis",
         "emphasis_words",
+        # placeholder + semantic
         "placeholder_text",
         "length_constraint",
         "semantic_purpose",

@@ -1,9 +1,26 @@
-"""1B · Skeleton inference from Phase1AReport → TemplateIR.skeleton[].
+"""1B · Skeleton inference from Phase1AReport → TemplateIR.skeleton[] +
+caption_style_palette.
 
 Reads the identified scenes / captions / stickers / zoom / masks / transitions
 already accumulated in ``Phase1AReport`` and projects them into the
 "reusable style recipe" view of TemplateIR — a list of ``Slot`` objects with
-role / duration range / material_req / per-slot ``StyleRule``.
+role / duration range / material_req / per-slot ``StyleRule``, plus a model-
+level ``caption_style_palette`` referenced by every Slot via
+``style.caption_palette_idx``.
+
+decisions/010 changes:
+- Slots no longer carry an inline ``CaptionStyle``; they carry an integer
+  ``caption_palette_idx`` into ``TemplateIR.caption_style_palette``. The
+  palette is built here (1B) by clustering ``Phase1ACaptionEvent.style``
+  values across the whole sample. P1 uses a coarse signature
+  (``_palette_key``) — same font / size / color / layout / semantic_purpose
+  collapse into one palette entry; finer cosine clustering is a P2 follow-up.
+
+- ``Slot.caption_function`` is filled by majority vote over
+  ``Phase1AReport.caption_functions`` entries whose ``caption_idx``-pointed
+  CaptionEvent overlaps this Slot's time range — captions_anim has been
+  removed (decisions/011), caption_function carries the function classification
+  including animation type.
 
 Design (PLAN 1510):
 - 3 roles by position threshold (D5: skeleton "discovered" not "preset"):
@@ -12,7 +29,8 @@ Design (PLAN 1510):
     everything else              → 主体
   Scenes that share a role merge into one Slot whose duration spans them.
 - Per-slot ``StyleRule`` aggregates:
-    caption: the dominant caption whose [start,end] overlaps the slot
+    caption_palette_idx: index of the dominant caption (by confidence) in
+        the model-level palette
     visual.zoom_keyframes: stitched zoom_curves of scenes in the slot
     visual.mask: first mask kind detected inside the slot
     visual.color_lut: dominant_lut_id from Phase1AReport.color (global)
@@ -27,8 +45,9 @@ Design (PLAN 1510):
     no caption, has zoom/sticker/mask → B-roll/包装
     neither                      → 待定
 - Slot duration band (PLAN 1505): {min = span * 0.7, nominal = span, max = span * 1.5}
-- One VisionEvent per Slot inference so the workbench right pane lights
-  up the TemplateIR.skeleton[N] field as each slot is built.
+- One VisionEvent per Slot inference + one per palette assembly so the
+  workbench right pane lights up the TemplateIR.skeleton[N] field +
+  caption_style_palette as each slot / palette entry is built.
 """
 
 from __future__ import annotations
@@ -36,7 +55,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.event_bus import get_event_bus
-from app.ir.phase1a_report import Phase1AReport
+from app.ir.phase1a_report import (
+    Phase1ACaptionEvent,
+    Phase1ACaptionFunctionEvent,
+    Phase1AReport,
+)
 from app.ir.template import (
     CaptionStyle,
     Slot,
@@ -98,7 +121,7 @@ def _group_scenes(report: Phase1AReport, total_duration: float) -> list[_Segment
     return segs
 
 
-def _captions_in(seg: _Segment, report: Phase1AReport) -> list:
+def _captions_in(seg: _Segment, report: Phase1AReport) -> list[Phase1ACaptionEvent]:
     """Caption entries overlapping the segment's time range."""
     return [c for c in report.captions if c.end > seg.start and c.start < seg.end]
 
@@ -163,7 +186,12 @@ def _zoom_keyframes_for(seg: _Segment, report: Phase1AReport) -> list[ZoomKeyfra
         for kf in kfs:
             t = sc_rel_start + kf.relative_time * (sc_span / slot_span)
             out.append(
-                ZoomKeyframe(relative_time=round(max(0.0, min(1.0, t)), 4), scale=kf.scale)
+                ZoomKeyframe(
+                    relative_time=round(max(0.0, min(1.0, t)), 4),
+                    scale=kf.scale,
+                    dx=kf.dx,
+                    dy=kf.dy,
+                )
             )
     return out
 
@@ -202,32 +230,140 @@ def _infer_material_req(captions: list, stickers: list, has_zoom: bool, has_mask
     return "待定"
 
 
-def _dominant_caption_style(captions: list) -> CaptionStyle | None:
-    """Pick the highest-confidence caption + copy placeholder fields onto its style.
+# ----- caption palette clustering ---------------------------------------------
 
-    Phase 1A's ``Phase1ACaptionEvent`` carries ``placeholder_text`` /
-    ``length_constraint`` / ``semantic_purpose`` as siblings of ``style``;
-    1B's renderer (template_preview mode) and Phase 2's caption-fill LLM
-    both need them. Copying them onto ``CaptionStyle`` makes the slot
-    self-contained — no Phase1AReport lookup needed at apply time.
+
+def _palette_key(style: CaptionStyle) -> tuple:
+    """Coarse signature for clustering captions into one palette entry.
+
+    Same font / size / color / stroke / layout / semantic_purpose collapse
+    into one palette element. This is the P1 simple version — finer cosine
+    clustering on shadow / background / padding (the new visual fields) is
+    a P2 follow-up. Keeping it simple now means the palette stays ≤ 5
+    entries on typical口播 fixtures, which is what the model-level dedup
+    contract demands.
     """
-    if not captions:
-        return None
-    best = max(captions, key=lambda c: (c.confidence, -c.start))
-    base = best.style.model_copy(
-        update={
-            "placeholder_text": list(best.placeholder_text or []),
-            "length_constraint": dict(best.length_constraint or {}),
-            "semantic_purpose": best.semantic_purpose or "regular",
-        }
+    return (
+        style.font_family,
+        int(style.size),
+        style.color,
+        style.stroke_color,
+        int(style.stroke_width),
+        style.layout,
+        int(style.max_chars_per_line),
+        style.semantic_purpose,
     )
-    return base
+
+
+def _build_palette(
+    captions: list[Phase1ACaptionEvent],
+) -> tuple[list[CaptionStyle], list[int]]:
+    """Cluster caption styles into a palette; return (palette, caption_to_idx).
+
+    The returned ``caption_to_idx[k]`` is the palette index for
+    ``captions[k]``. Palette element ``i`` adopts the highest-confidence
+    raw style amongst its cluster (so visual fields like shadow / padding
+    that are still uncertain in some captions get the most reliable values).
+    """
+    palette: list[CaptionStyle] = []
+    key_to_idx: dict[tuple, int] = {}
+    cap_to_idx: list[int] = []
+    # Cluster bookkeeping for "highest-confidence wins" within a cluster.
+    cluster_best_conf: list[float] = []
+    for cap in captions:
+        key = _palette_key(cap.style)
+        if key in key_to_idx:
+            idx = key_to_idx[key]
+            cap_to_idx.append(idx)
+            if cap.confidence > cluster_best_conf[idx]:
+                # Adopt the more-confident raw style + carry placeholder
+                # fields onto the canonical palette entry.
+                palette[idx] = cap.style.model_copy(
+                    update={
+                        "placeholder_text": list(cap.placeholder_text or []),
+                        "length_constraint": dict(cap.length_constraint or {}),
+                        "semantic_purpose": cap.semantic_purpose or "regular",
+                    }
+                )
+                cluster_best_conf[idx] = cap.confidence
+            continue
+        idx = len(palette)
+        key_to_idx[key] = idx
+        palette.append(
+            cap.style.model_copy(
+                update={
+                    "placeholder_text": list(cap.placeholder_text or []),
+                    "length_constraint": dict(cap.length_constraint or {}),
+                    "semantic_purpose": cap.semantic_purpose or "regular",
+                }
+            )
+        )
+        cluster_best_conf.append(cap.confidence)
+        cap_to_idx.append(idx)
+    return palette, cap_to_idx
+
+
+def _dominant_caption_palette_idx(
+    seg_captions: list[Phase1ACaptionEvent],
+    cap_to_idx: list[int],
+    captions_all: list[Phase1ACaptionEvent],
+) -> int | None:
+    """Pick the palette idx of the highest-confidence caption in this slot.
+
+    ``seg_captions`` is the subset of ``captions_all`` whose time range
+    overlaps the slot. We resolve them back to their original index in
+    ``captions_all`` (via identity) so we can read the palette idx from
+    the global ``cap_to_idx`` map. Returns None when the slot has no
+    captions.
+    """
+    if not seg_captions:
+        return None
+    # Identity map: the same Phase1ACaptionEvent objects appear in both
+    # lists — Python list.index by identity / equality is fine since
+    # captions_all is the de-facto source of truth.
+    best = max(seg_captions, key=lambda c: (c.confidence, -c.start))
+    try:
+        global_idx = captions_all.index(best)
+    except ValueError:
+        return None
+    if 0 <= global_idx < len(cap_to_idx):
+        return cap_to_idx[global_idx]
+    return None
+
+
+def _vote_caption_function(
+    seg_captions: list[Phase1ACaptionEvent],
+    captions_all: list[Phase1ACaptionEvent],
+    fn_events: list[Phase1ACaptionFunctionEvent],
+) -> str:
+    """Majority vote ``Slot.caption_function`` from caption_functions overlapping this slot.
+
+    For each caption in this slot, look up its Phase1ACaptionFunctionEvent
+    by ``caption_idx``; tally the ``function`` strings; return the most
+    common (defaults to "regular" when the slot has no functions tied to it).
+    """
+    if not seg_captions or not fn_events:
+        return "regular"
+    fn_by_caption: dict[int, str] = {ev.caption_idx: ev.function for ev in fn_events}
+    tally: dict[str, int] = {}
+    for cap in seg_captions:
+        try:
+            global_idx = captions_all.index(cap)
+        except ValueError:
+            continue
+        fn = fn_by_caption.get(global_idx)
+        if fn:
+            tally[fn] = tally.get(fn, 0) + 1
+    if not tally:
+        return "regular"
+    return max(tally.items(), key=lambda kv: kv[1])[0]
 
 
 def _build_slot(
     seg: _Segment,
     report: Phase1AReport,
     *,
+    cap_to_idx: list[int],
     prev_seg_last_scene: int | None,
     next_seg_first_scene: int | None,
 ) -> Slot:
@@ -240,9 +376,9 @@ def _build_slot(
     # scale=1.0 keyframe at t=0).
     has_real_zoom = any(abs(kf.scale - 1.0) > 0.02 for kf in zoom)
 
-    span = max(0.04, seg.end - seg.start)
+    palette_idx = _dominant_caption_palette_idx(captions, cap_to_idx, report.captions)
     style = StyleRule(
-        caption=_dominant_caption_style(captions),
+        caption_palette_idx=palette_idx,
         visual=VisualStyle(
             zoom_keyframes=zoom,
             mask=mask_kind,
@@ -256,15 +392,11 @@ def _build_slot(
         else None,
     )
 
-    # Caption function: pick the dominant caption's function classification if
-    # any; "regular" otherwise (1B leaves the per-caption function tagging in
-    # Phase 1A's classify_caption_function; here we just surface the slot-level
-    # summary).
-    caption_function = "regular"
-    if captions:
-        dominant = max(captions, key=lambda c: (c.confidence, -c.start))
-        caption_function = dominant.function or "regular"
+    caption_function = _vote_caption_function(
+        captions, report.captions, report.caption_functions
+    )
 
+    span = max(0.04, seg.end - seg.start)
     return Slot(
         role=seg.role,
         duration={
@@ -284,26 +416,61 @@ async def build_skeleton(
     *,
     task_id: str,
     parent_event_id: str | None = None,
-) -> tuple[list[Slot], list[VisionEvent]]:
-    """Project Phase1AReport → list[Slot] + per-slot VisionEvents.
+) -> tuple[list[Slot], list[CaptionStyle], list[VisionEvent]]:
+    """Project Phase1AReport → list[Slot] + caption_style_palette + per-slot VisionEvents.
 
-    Empty reports / zero-duration videos return ([], []) — the pipeline
+    Empty reports / zero-duration videos return ([], [], []) — the pipeline
     layer treats this as a degraded skeleton and proceeds with an empty
     TemplateIR shell so downstream tagging / sanity check still run.
+
+    The palette is built first (one event per palette entry, op="append"),
+    then slots reference into it. Palette can be empty even when slots
+    exist (no captions detected); palette idx None on every slot in that
+    case.
     """
     bus = get_event_bus()
+    palette, cap_to_idx = _build_palette(report.captions)
+
+    # Emit one event per palette entry so the workbench right-pane shows
+    # the palette assembling. Mirrors how stickers / scenes append.
+    palette_events: list[VisionEvent] = []
+    for i, entry in enumerate(palette):
+        ev = VisionEvent(
+            task_id=task_id,
+            source="system",
+            stage=STAGE,
+            semantic_label=(
+                f"字幕样式调色板 #{i} · {entry.semantic_purpose} · "
+                f"{entry.font_family} {entry.size}px · {entry.color}"
+            ),
+            reasoning=(
+                f"按 (font / size / color / stroke / layout / semantic_purpose) 签名聚类，"
+                f"采纳簇内最高置信度字幕的视觉字段。簇键 = {_palette_key(entry)}"
+            ),
+            confidence=0.9,
+            ir_target=IRTarget(
+                ir_type="TemplateIR", path="caption_style_palette", op="append"
+            ),
+            ir_value=entry.model_dump(mode="json"),
+            parent_event_id=parent_event_id,
+            duration_ms=0,
+        )
+        await bus.publish(task_id, ev)
+        palette_events.append(ev)
+
     segments = _group_scenes(report, total_duration)
     if not segments:
-        return [], []
+        return [], palette, palette_events
 
     slots: list[Slot] = []
-    events: list[VisionEvent] = []
+    events: list[VisionEvent] = list(palette_events)
     for i, seg in enumerate(segments):
         prev_last = segments[i - 1].scene_indices[-1] if i > 0 else None
         next_first = segments[i + 1].scene_indices[0] if i + 1 < len(segments) else None
         slot = _build_slot(
             seg,
             report,
+            cap_to_idx=cap_to_idx,
             prev_seg_last_scene=prev_last,
             next_seg_first_scene=next_first,
         )
@@ -317,9 +484,10 @@ async def build_skeleton(
                 f"{seg.start:.1f}–{seg.end:.1f}s"
             ),
             reasoning=(
-                f"位置阈值发现：start_ratio={(seg.start / total_duration):.2f} → {seg.role}；"
+                f"位置阈值发现：start_ratio={(seg.start / total_duration):.2f} → {slot.role}；"
                 f"覆盖 scenes {seg.scene_indices}；"
-                f"字幕 {len(_captions_in(seg, report))} 条 / 贴纸 {len(_stickers_in(seg, report))} 枚 / "
+                f"字幕 {len(_captions_in(seg, report))} 条 (palette_idx={slot.style.caption_palette_idx}) / "
+                f"贴纸 {len(_stickers_in(seg, report))} 枚 / "
                 f"缩放关键帧 {len(slot.style.visual.zoom_keyframes)} 个 / "
                 f"mask={slot.style.visual.mask}。"
             ),
@@ -333,7 +501,7 @@ async def build_skeleton(
         )
         await bus.publish(task_id, ev)
         events.append(ev)
-    return slots, events
+    return slots, palette, events
 
 
 __all__ = ["STAGE", "build_skeleton"]

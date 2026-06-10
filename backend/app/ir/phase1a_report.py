@@ -7,7 +7,16 @@ PLAN.md 1349-1492 行约束 1A "本阶段不产出 TemplateIR，只产出可独�
 
 Phase1AReport 是 1A 自己的"识别报告" IR：每个 1A 子能力的 VisionEvent 都把 ir_target
 指向这棵树，工作台右栏在 1A.* stage 任务下渲染 Phase1AReport（而不是 TemplateIR）。
-1B 集成阶段 skeleton.py 读 Phase1AReport → 映射到 TemplateIR.skeleton[N].style.{...}。
+1B 集成阶段 skeleton.py 读 Phase1AReport → 映射到 TemplateIR.skeleton[N].style.{...} +
+聚类成 TemplateIR.caption_style_palette。
+
+decisions/010 + decisions/011 落地后：
+- Phase1ACaptionEvent 不再持有动画/raw 字段（``verified_anim_in`` / ``stagger_ms`` /
+  ``color_hex_raw`` / ``anim_in_type_raw`` / ``layout_raw`` 等字段已删除）；动画语义改由
+  ``Phase1ACaptionFunctionEvent`` 承担。captions_anim 子能力整体删除。
+- Phase1AReport 加 ``caption_style_palette`` 与 ``caption_functions`` 两个新分支：palette
+  存 1A 阶段已聚类的字幕视觉样式（1B 直接搬到 ``TemplateIR.caption_style_palette``），
+  caption_functions 保留每条字幕的功能 + 动画类型记录（per-caption 时序信息）。
 """
 
 from __future__ import annotations
@@ -28,16 +37,20 @@ class Phase1AScene(BaseModel):
 
 
 class Phase1ACaptionEvent(BaseModel):
-    """画面字幕识别中间产物（VLM 主路径 + CV 动画细节 + 功能分类填充）。
+    """画面字幕识别中间产物（VLM 主路径）。
 
     本字段仅描述**画面里烧入的视觉字幕**（visual caption / burnt-in subtitle），
     不处理语音转写——音频字幕由后续 ASR 阶段产出。``placeholder_text`` 是
     描述性占位短语（如「4-6 字 CTA 强调短语」），不抄字幕原文。
 
-    1B 集成时拆 ``style`` 写入对应 ``Slot.style.caption``，并由 Caption 列表
-    （ProjectIR）按 start/end 渲染。``verified_anim_in`` / ``stagger_ms``
-    由 ``captions_anim`` 后续 verify 填上；``function`` 由 caption_function
-    classify 填上；``reasoning`` 是 VLM 给出的中文解释（≤200 字）。
+    1B 集成时：捕获到的视觉样式会被聚类成 ``TemplateIR.caption_style_palette``
+    元素；每个 Phase1ACaptionEvent 通过 ``palette_idx`` 字段引用所属 palette
+    元素（聚类前 None；聚类后填充）。每个 Slot 通过 dominant Phase1ACaptionEvent
+    的 palette_idx 反查对应 ``CaptionStyle``。
+
+    动画类型不在本结构中——它由 ``Phase1ACaptionFunctionEvent`` 承担，per-caption
+    一对一关联（through ``caption_idx``）。captions_anim 子能力已被 decisions/011
+    删除，``verified_anim_in`` / ``stagger_ms`` 等字段不再存在。
     """
 
     style: CaptionStyle
@@ -49,16 +62,33 @@ class Phase1ACaptionEvent(BaseModel):
     bbox_norm_0_999: tuple[int, int, int, int] = (0, 0, 0, 0)
     frames_appeared: list[float] = Field(default_factory=list)
     confidence: float = 0.0
-    # VLM 给的中文解释 + 原始字段（用于工作台右栏审计）
+    # VLM 给的中文解释（≤200 字），用作工作台右栏审计
     reasoning: str = ""
-    color_hex_raw: str | None = None
-    anim_in_type_raw: str | None = None
-    layout_raw: str | None = None
-    # captions_anim 填上
-    verified_anim_in: str | None = None
-    stagger_ms: int | None = None
-    # classify_caption_function 填上
-    function: str | None = None  # 标题/强调/卖点/CTA/regular/过渡
+    # 聚类后填上：指向 ``Phase1AReport.caption_style_palette`` / ``TemplateIR
+    # .caption_style_palette`` 的索引。None = 尚未聚类或属"未匹配的"独立样式。
+    palette_idx: int | None = None
+
+
+class Phase1ACaptionFunctionEvent(BaseModel):
+    """字幕功能 + 动画类型（per-caption 关联到 ``Phase1AReport.captions[caption_idx]``）。
+
+    decisions/011 落地后：caption_function 子能力承担"字幕扮演什么功能 + 用什么动画类型"
+    二维语义。captions_anim 子能力已删除，原由其负责的 ``verified_anim_in`` / ``stagger_ms``
+    现由 caption_function VLM 估算（精度从 ±30ms 退到 ±100-200ms，已知代价 1）。
+    """
+
+    caption_idx: int  # ref into ``Phase1AReport.captions``
+    function: Literal[
+        "标题", "强调", "卖点", "CTA", "regular", "过渡引语"
+    ] = "regular"
+    anim_in_type: Literal[
+        "逐字弹入", "整句滑入", "淡入", "打字机", "unknown"
+    ] = "unknown"
+    anim_emphasis: str | None = None  # 关键词高亮 / 抖动 / 放大 / None
+    stagger_ms_estimate: int | None = None  # VLM 估算的逐字 stagger 间隔（ms）
+    role_in_template: str | None = None  # "开头主标题" / "卖点反复强化" / "结尾 CTA" 等
+    confidence: float = 0.0
+    reasoning: str = ""
 
 
 class Phase1AStickerDetection(BaseModel):
@@ -99,16 +129,23 @@ class Phase1AReport(BaseModel):
 
     工作台右栏在 ``stage.startswith("1A.")`` 任务下渲染这棵树（取代假装写入
     TemplateIR）。键设计原则：
-    - 列表型（scenes / captions / stickers）支持 ``ir_target.op="append"``
-      逐条增量写入，方便事件流驱动的命中字段闪烁。
+    - 列表型（scenes / captions / stickers / caption_style_palette / caption_functions）
+      支持 ``ir_target.op="append"`` 逐条增量写入，方便事件流驱动的命中字段闪烁。
     - 字典型（zoom_directions / transitions / masks / zoom_curves）以
       ``str(scene_idx)`` 作 key（JSON 友好），lodash 路径形如
       ``zoom_directions.0`` / ``masks.2`` 直接命中。
     - 单值型（color / audio）整对象写。
+
+    1B 集成时 ``caption_style_palette`` 直接搬到 ``TemplateIR.caption_style_palette``，
+    1A.captions 阶段的事件流也写到这里，让工作台可在 1A 阶段就看到 palette 拼装过程。
     """
 
     scenes: list[Phase1AScene] = Field(default_factory=list)
     captions: list[Phase1ACaptionEvent] = Field(default_factory=list)
+    # 1A 阶段已聚类的字幕视觉样式 palette。captions[i].palette_idx 引用本列表。
+    caption_style_palette: list[CaptionStyle] = Field(default_factory=list)
+    # per-caption 功能 + 动画分类。caption_functions[k].caption_idx 关联回 captions。
+    caption_functions: list[Phase1ACaptionFunctionEvent] = Field(default_factory=list)
     stickers: list[Phase1AStickerDetection] = Field(default_factory=list)
     zoom_directions: dict[str, str] = Field(default_factory=dict)
     zoom_curves: dict[str, list[ZoomKeyframe]] = Field(default_factory=dict)
