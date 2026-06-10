@@ -1,3 +1,83 @@
+## [2026-06-10-6] feat(extract): wire CV text-band pre-scan + 13-class zoom + b_roll subcap [ISS-019/020/021/023]
+
+### 改动
+
+decisions/010 P2 落地：让 1A 子能力的真实识别效果跟上 P1 的 IR 形态升级。本期只动 backend extract 层 + prompt + 一个 IR 字段（`Phase1AReport.b_roll_segments`）+ 一处 1B skeleton 投影分支，不动 apply / renderer / frontend；P3 之后的链路在后续阶段推进。
+
+1. **CV 文本带预扫 + VLM ROI 二次判定（ISS-019 召回部分）**：`extract/captions.py` 加 `_detect_text_band_candidates(frame, cv2)`（Canny + 横向形态学 dilate 30×5 找高对比度长矩形）+ `_collect_window_rois(window, data_root)`（每窗口跨帧 IoU > 0.7 dedup）+ `_dedup_rois`。`_call_window` 把 ROI 候选嵌入 user prompt 让 VLM 逐一复核「ROI 是字幕吗 + 是字幕则给样式」。CV 阈值偏 false-positive — 漏 ROI 由 VLM 自由识别，多余 ROI 由 VLM 退回不写入 captions。OpenCV 缺包 / imread 失败 → 空 ROI list 退回纯 VLM 路径，召回不会比 P1 差。
+2. **bbox 契约修复（ISS-019 bbox 部分）**：`1a_captions.md` 删 `size_norm_0_999` 字段（与 `position_norm_0_999` 双格式让 VLM 把 [x_left,y_top,w,h] 误读为 [cx,cy,w,h]）；prompt 加 1080×1920 示例 + 显式说明「左上角坐标 + 字符高度 ≠ bbox 高度」。`_CaptionRaw` 删 `size_norm_0_999` 字段；`_bbox_from_pos_size` 改名 `_bbox_from_position` + sanity check（w<50 / h<25 / 越界拒绝 → draft 丢弃）；`_to_caption_style` 给 `font_size_px_estimate` 加兜底 `max(estimate, bbox_h × 1.08 × 0.6)` 防 VLM 把 bbox 整高写成字号导致字符高度偏小。
+3. **几何蒙版砍 CV 矩形/分屏（ISS-020）**：`extract/masks.py` 删 `_detect_rectangle` / `_detect_line_split` 函数及调用 + `_RECTANGLE_MIN_AREA_FRAC` / `_LINE_MIN_LENGTH_FRAC` 常量；CV 主路径只保留 `HoughCircles`，矩形 / 分屏 / 不规则形状统一走 VLM 兜底。`1a_masks.md` 加显式排除项（字幕 / 标题条 / 水印 / logo / UI / letterbox 不算几何蒙版）+ confidence < 0.6 倾向 false。fallback user prompt 复述排除项强化语义。
+4. **缩放方向 13 类 + ZoomKeyframe.dx/dy（ISS-021）**：`1a_zoom_direction.md` 从 4 类升 13 类（推/拉/稳/抖 + 8 平移：左/右/上/下/左上/右上/左下/右下移）+ 13 类语义 + 镜头内主导原则示例。`motion.py::_ZoomDirection` 仍 str（不强制 Literal 让 VLM 错答时 client 不挂）+ `ZOOM_DIRECTIONS_13` frozenset 校验 + 非 13 类 fallback "稳定" + log 警告。`estimate_zoom_curve` 改用首帧 keypoint tracking（每帧从 first_gray LK 光流追踪到当前帧，scale + dx/dy 都相对首帧累积，不累积漂移），dx/dy 写入 ZoomKeyframe（已有字段）。位移钳到 [-0.5, 0.5] 防光流跟丢造成的虚位移。
+5. **新增 b_roll 子能力（ISS-023）**：新建 `extract/b_roll.py` + `1a_b_roll.md`；每个 scene 取中间帧给 VLM 分类 4 类（人物主导 / 全屏 B-roll / 画中画 / 侧栏）+ 可选 ROI bbox。`Phase1AReport.b_roll_segments: list[BRollSegment]` 字段新增；entity event 带 `op="append"` + media_ts_range = scene 起止 + frame_url。`pipeline._run_phase1a` 在 fan-out 加 b_roll 任务（与 captions/stickers/zoom/transitions/masks/color/audio 并发）；`SUBCAP_TO_IR_PATH` 加 `b_roll_segments → skeleton.*.material_req` 映射用于 degraded 提示。`api/lab.py` REGISTRY 加 b_roll 条目 + `_run_b_roll` runner 让 SubcapabilityLab 可独立调试。
+6. **skeleton material_req 加 AI生成画面 分支**：`skeleton.py` 新增 `_b_roll_in(seg, report)` 取 segment 内重叠的 BRollSegment；`_infer_material_req` 加 `b_rolls` 参数，优先级最高——任一非「人物主导」段 → `AI生成画面`（覆盖 captions/stickers/zoom/mask 信号）。Phase 5 真接入 generate_broll 时直接消费这个标记，与 D10「AIGC 用户主动触发」不冲突（仅打标签，不触发 AI 调用）。
+7. **顺手修 P1 引入的 cached_frames NameError**：`pipeline._run_phase1a` 在 caption_function 循环引用了未定义的 `cached_frames` 变量——`_safe` 兜底 catch 了 NameError 让 caption_function 全标 degraded 而非 crash。改为循环前初始化 `cached_frames = frames_res.value or []`，恢复 caption_function 真实路径。
+8. **CI 守卫 + 测试**：`scripts/check_event_emission.py` 的 `TRACKED_NAME_PATTERNS` 加 `detect_b_roll`（D13 一致性，新 AI 客户端方法被 CI 守卫捕获）；`test_subcap_shapes.py` 加 b_roll 形态测试（fallback 默认 人物主导 + ir_target 路径正确）+ Phase1AReport round-trip 加 BRollSegment 字段；`test_skeleton.py` 加 b_roll 覆盖 material_req（全屏 B-roll → AI生成画面 / 人物主导 → 沿 captions 判 人物口播）。
+
+### 涉及文件
+
+- backend/app/extract/captions.py：CV 文本带预扫 + bbox 契约 + font_size 兜底 + 删 size_norm_0_999
+- backend/app/extract/masks.py：删 CV 矩形/分屏检测器 + 仅 HoughCircles + 提示排除项
+- backend/app/extract/motion.py：13 类 fallback + 首帧 keypoint tracking + dx/dy 写入 ZoomKeyframe
+- backend/app/extract/b_roll.py：新增——VLM per-scene 画面构成识别
+- backend/app/extract/pipeline.py：fan-out 加 b_roll、SUBCAP_TO_IR_PATH 加映射、cached_frames bug 修
+- backend/app/extract/skeleton.py：_b_roll_in helper + _infer_material_req 加 AI生成画面 分支
+- backend/app/ir/phase1a_report.py：BRollSegment 模型 + Phase1AReport.b_roll_segments 字段
+- backend/app/api/lab.py：REGISTRY 加 b_roll + _run_b_roll runner
+- backend/app/llm/prompts/1a_captions.md：删 size_norm_0_999 + 加示例 + ROI 提示 + font_size 是字符高度
+- backend/app/llm/prompts/1a_masks.md：加排除项 + confidence < 0.6 倾向 false
+- backend/app/llm/prompts/1a_zoom_direction.md：13 类定义 + 示例 + 缩放/平移互斥
+- backend/app/llm/prompts/1a_b_roll.md：新增——4 类画面构成 + bbox 填写规则
+- scripts/check_event_emission.py：TRACKED_NAME_PATTERNS 加 detect_b_roll
+- backend/tests/integration/test_subcap_shapes.py：b_roll 形态测试 + round-trip 字段
+- backend/tests/unit/test_skeleton.py：b_roll material_req 覆盖
+- docs/001ARCHITECTURE.md：D17（Phase1AReport 字段加 b_roll_segments）+ D20（masks 主路径只剩 HoughCircles）
+- docs/002STRUCTURE.md：captions/motion/masks 描述更新 + 新增 b_roll.py + phase1a_report 描述加画面构成
+
+### 关联
+
+-> ISS-019
+-> ISS-020
+-> ISS-021
+-> ISS-023
+-> decisions/010-phase1a-subcap-rework.md
+
+---
+
+## [2026-06-10-5] feat(editor): restore step-2 recommendations + step-3 apply workbench link on project reload [ISS-025/026]
+
+### 改动
+
+让 Editor 重进项目时从后端真理源恢复模板推荐 + apply 工作台入口，让 AI 决策可观测性在导航后存活。
+仅是新增一个反查端点 + 修改 Editor.tsx 的加载 useEffect，不增加任何持久化字段、不缓存到 project.json。
+遵循 D36「events.jsonl 是真理源」与 Phase 2.5 PatchHistoryList 的"扫事件流派生 UI"模式。
+二核中发现 useEffect 缺 cleanup 导致项目快速切换串台（ISS-026），同期一并修复。
+
+1. **后端新增 `GET /projects/{id}/recommendations`**：扫 `tasks_store.list_by_resource("project", pid)` 取最新 `kind="recommend_templates"` 任务，`event_bus.replay(task_id)` 读事件流，过滤 `stage="2.recommend"` 且 `ir_value` 为字符串的实体事件（区分 chat_vision 调用级事件 ir_value=dict / fallback 事件 ir_value=None），按 template_id 反查 KB 拼装 name/thumbnail/tags，返回与 POST 端点一致的 shape。无任务返回 `{task_id: null, recommendations: []}`。
+2. **前端 API**：`frontend/src/api/index.ts` 新增 `getRecommendations(projectId) -> RecommendationsHistoryResponse`。
+3. **Editor.tsx 恢复并行三路 + 抗 race**：`useEffect [projectId]` 改成 `Promise.allSettled([getProject, getRecommendations, listProjectTasks])`：
+   - `getProject` 恢复 project + preview + applyDone + chosenTemplate (从 `project.ir.sections[0].template_id`)
+   - `getRecommendations` 恢复 recs + recsTaskId（recsTaskId 在 task 存在时无条件恢复，让失败任务也能跳工作台调试）
+   - `listProjectTasks` 找 `kind="apply_short"` 最新任务，恢复 applyTaskId
+   - cleanup `let cancelled = false` flag：每个 await 边界后 `if (cancelled) return` 短路 setState，杜绝快速切项目时旧响应覆盖新状态（ISS-026）。
+   各路独立失败不影响其他路；fresh project 三路全空，UI 退化为初始视图，与原行为一致。
+4. **测试覆盖**：`test_projects_api.py` 五条用例 — 项目不存在 / 无推荐任务 / 实体事件正确重组 / 调用级 / fallback 事件正确过滤 / 多次推荐取最新一次（含 `time.sleep(0.02)` 让 Windows 下 created_at 严格区分）。
+
+### 涉及文件
+
+- backend/app/api/projects.py：新增 `get_recommendations` 端点
+- frontend/src/api/index.ts：新增 `getRecommendations` 客户端 + `RecommendationsHistoryResponse` 类型
+- frontend/src/pages/Editor.tsx：useEffect 改 Promise.allSettled 并行三路 + cancelled flag cleanup；新增 chosenTemplate / applyTaskId / recsTaskId 恢复
+- backend/tests/unit/test_projects_api.py：新增（覆盖端点的 5 条边界）
+- docs/001ARCHITECTURE.md：链路 F 末尾补 step-2 / step-3 状态恢复路径
+- docs/002STRUCTURE.md：projects.py 行下补 `GET /projects/{id}/recommendations` 用途
+
+### 关联
+
+-> ISS-025
+-> ISS-026
+
+---
+
 ## [2026-06-10-4] refactor(ir): hoist caption styles into model-level palette + drop captions_anim subcap [ISS-022]
 
 ### 改动

@@ -86,6 +86,8 @@ SUBCAP_TO_IR_PATH: dict[str, str] = {
     "duration": "global_style.duration_sec",
     # Per-caption function classification folds under caption_functions.
     "captions.function": "caption_functions",
+    # B-roll detection (decisions/010 决策 6) feeds Slot.material_req in 1B.
+    "b_roll_segments": "skeleton.*.material_req",
 }
 
 
@@ -199,6 +201,7 @@ async def _run_phase1a(
     only after their parents resolve.
     """
     from app.extract.audio import extract_bgm
+    from app.extract.b_roll import detect_b_roll
     from app.extract.captions import detect_captions
     from app.extract.color import classify_color_lut
     from app.extract.masks import detect_masks
@@ -235,6 +238,7 @@ async def _run_phase1a(
         masks_res,
         color_res,
         audio_res,
+        broll_res,
     ) = await asyncio.gather(
         _safe("captions", "captions", detect_captions(ctx), task_id=task_id, degraded=degraded),
         _safe("stickers", "stickers", detect_stickers(ctx), task_id=task_id, degraded=degraded),
@@ -255,6 +259,13 @@ async def _run_phase1a(
         _safe("masks", "masks", detect_masks(ctx), task_id=task_id, degraded=degraded),
         _safe("color_lut", "color", classify_color_lut(ctx), task_id=task_id, degraded=degraded),
         _safe("audio", "audio", extract_bgm(ctx), task_id=task_id, degraded=degraded),
+        _safe(
+            "b_roll",
+            "b_roll_segments",
+            detect_b_roll(ctx),
+            task_id=task_id,
+            degraded=degraded,
+        ),
     )
 
     captions = cap_res.value[0] if cap_res.ok and cap_res.value else []
@@ -264,6 +275,7 @@ async def _run_phase1a(
     masks = masks_res.value[0] if masks_res.ok and masks_res.value else {}
     color = color_res.value[0] if color_res.ok and color_res.value else None
     audio = audio_res.value[0] if audio_res.ok and audio_res.value else None
+    b_roll_segments = broll_res.value[0] if broll_res.ok and broll_res.value else []
 
     # Dependent: zoom curve only for non-stable scenes (PLAN 1518).
     zoom_curve_tasks: list[Awaitable[Any]] = []
@@ -295,6 +307,7 @@ async def _run_phase1a(
     # 列表写入 Phase1AReport.caption_functions（不再写 captions[idx].function）。
     from app.understand.vision import classify_caption_function
 
+    cached_frames = frames_res.value or []
     fn_tasks = []
     for idx, cap in enumerate(captions):
         anchor = next(
@@ -342,6 +355,7 @@ async def _run_phase1a(
         masks={str(k): v for k, v in masks.items()},
         color=to_color_report(color) if color is not None else None,
         audio=audio,
+        b_roll_segments=b_roll_segments,
     )
 
 

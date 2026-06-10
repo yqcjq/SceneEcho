@@ -28,6 +28,7 @@ TRACKED_NAME_PATTERNS = (
     "detect_captions",
     "detect_stickers",
     "detect_masks",
+    "detect_b_roll",
     "judge_zoom_direction",
     "estimate_zoom_curve",
     "verify_caption_anim",

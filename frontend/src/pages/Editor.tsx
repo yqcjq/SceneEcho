@@ -6,6 +6,8 @@ import {
   type EditResponse,
   getPreviewProps,
   getProject,
+  getRecommendations,
+  listProjectTasks,
   PreviewProps,
   ProjectResponse,
   recommendTemplates,
@@ -94,22 +96,68 @@ export const Editor: React.FC = () => {
 
   useEffect(() => {
     if (!projectId) return;
+    // Cancel-on-unmount flag (ISS-026): when the user clicks ProjectHistoryStrip
+    // rapidly, multiple effect runs can have in-flight HTTP responses; the
+    // older one resolving last would clobber the newer project's state with
+    // stale data. We check ``cancelled`` after every await boundary so a
+    // teardown cuts off all four state writes — both the parallel triple
+    // and the inner getPreviewProps await.
+    let cancelled = false;
     void (async () => {
-      try {
-        const p = await getProject(projectId);
+      // Restore prior step-2/step-3 UI state from the backend's persisted
+      // truth sources (D36): project.json + tasks table + events.jsonl.
+      // The three reads are independent so we run them in parallel and
+      // tolerate any subset being missing — a fresh project simply renders
+      // empty cards as if none were touched yet.
+      const [projectRes, recsRes, tasksRes] = await Promise.allSettled([
+        getProject(projectId),
+        getRecommendations(projectId),
+        listProjectTasks(projectId),
+      ]);
+      if (cancelled) return;
+
+      if (projectRes.status === "fulfilled") {
+        const p = projectRes.value;
         setProject(p);
         if (p.ir) {
           setApplyDone(true);
+          // Pull the chosen template id straight from the persisted
+          // ProjectIR — apply_short locked it into sections[0].template_id,
+          // so the step-2 card can highlight which recommendation got picked.
+          const chosen = (p.ir as { sections?: Array<{ template_id?: string }> })
+            ?.sections?.[0]?.template_id;
+          if (chosen) setChosenTemplate(chosen);
           try {
-            setPreview(await getPreviewProps(projectId));
+            const next = await getPreviewProps(projectId);
+            if (cancelled) return;
+            setPreview(next);
           } catch {
-            /* ignore — apply not run yet */
+            /* preview-props 404s when apply ran but degraded — keep going */
           }
         }
-      } catch {
-        /* project not found yet */
+      }
+
+      if (recsRes.status === "fulfilled") {
+        const r = recsRes.value;
+        // Recover the workbench link whenever a recommend task exists, even
+        // if it produced zero entity events (failed mid-flight) — the user
+        // still needs an entry into /workbench/{task_id} to debug. Cards
+        // only render when there's something to show.
+        if (r.task_id) setRecsTaskId(r.task_id);
+        if (r.recommendations.length > 0) setRecs(r.recommendations);
+      }
+
+      if (tasksRes.status === "fulfilled") {
+        // list_by_resource returns DESC by created_at, so .find picks the
+        // latest apply_short — the one that produced the current
+        // project.json. Step-3's workbench link recovers from this id.
+        const apply = tasksRes.value.tasks.find((t) => t.kind === "apply_short");
+        if (apply) setApplyTaskId(apply.task_id);
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [projectId]);
 
   const onUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {

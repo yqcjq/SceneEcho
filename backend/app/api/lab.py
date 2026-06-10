@@ -119,6 +119,12 @@ async def _run_caption_function(ctx: Phase1AContext) -> None:
         )
 
 
+async def _run_b_roll(ctx: Phase1AContext) -> None:
+    from app.extract.b_roll import detect_b_roll
+
+    await detect_b_roll(ctx)
+
+
 # ---------------------------------------------------------------------------
 # Registry — single source of truth for available subcaps.
 # ---------------------------------------------------------------------------
@@ -195,6 +201,14 @@ REGISTRY: dict[str, SubcapDef] = {
         fixtures=("sample_basic_15s", "sample_with_sticker_12s"),
         baseline_key="subcap.caption_function",
         runner=_run_caption_function,
+    ),
+    "b_roll": SubcapDef(
+        name="b_roll",
+        label="画面构成 / B-roll 识别 (VLM)",
+        stage="1A.b_roll",
+        fixtures=("sample_basic_15s",),
+        baseline_key="subcap.b_roll",
+        runner=_run_b_roll,
     ),
 }
 

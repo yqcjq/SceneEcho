@@ -271,6 +271,68 @@ async def recommend_templates_endpoint(
     }
 
 
+@router.get("/projects/{project_id}/recommendations")
+def get_recommendations(project_id: str) -> dict:
+    """Replay the most recent recommend_templates task's results.
+
+    Reads from ``tasks`` + events.jsonl rather than caching in project.json —
+    events.jsonl is the single source of truth (D36). The Editor's "step 2"
+    card calls this on project reload to restore the recommendation list
+    after the user navigates away and comes back; the recommend POST itself
+    stays unchanged.
+
+    Returns ``{task_id: null, recommendations: []}`` when no
+    recommend_templates task has run yet, so the Editor can quietly show
+    the "fresh start" state without an HTTP error to handle.
+    """
+    from app.kb import store as kb_store
+
+    settings = get_settings()
+    if not (settings.data_root / "projects" / project_id).exists():
+        raise HTTPException(404, f"project {project_id} not found")
+
+    rows = tasks_store.list_by_resource("project", project_id)
+    rec_tasks = [r for r in rows if r["kind"] == "recommend_templates"]
+    if not rec_tasks:
+        return {"task_id": None, "recommendations": []}
+    task_id = rec_tasks[0]["id"]
+
+    # Each recommendation was emitted as one VisionEvent stage="2.recommend"
+    # with ir_value=template_id (string). The chat_vision call event itself
+    # also carries stage="2.recommend" but ir_value is the structured
+    # _RecommendResult dump (dict) — filter on str so we only get entity
+    # rows. Fallback warnings use stage="2.recommend.fallback" and are
+    # already excluded by the stage equality check.
+    events = get_event_bus().replay(task_id)
+    catalog: dict[str, dict] = {}
+    out: list[dict] = []
+    for ev in events:
+        if ev.stage != "2.recommend":
+            continue
+        if not isinstance(ev.ir_value, str) or not ev.ir_value:
+            continue
+        template_id = ev.ir_value
+        if template_id not in catalog:
+            row = kb_store.get_template(template_id) or {}
+            catalog[template_id] = row
+        row = catalog[template_id]
+        out.append(
+            {
+                "template_id": template_id,
+                "score": float(ev.confidence or 0.0),
+                "reason": ev.reasoning or "",
+                "name": row.get("name"),
+                "thumbnail_path": row.get("thumbnail_path"),
+                "tags": row.get("tags"),
+            }
+        )
+    return {
+        "task_id": task_id,
+        "workbench_url": f"/workbench/{task_id}",
+        "recommendations": out,
+    }
+
+
 class _ApplyBody(BaseModel):
     template_id: str
     allow_aigc_broll: bool = False

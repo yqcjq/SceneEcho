@@ -1,24 +1,27 @@
-"""1A-V7 · Geometric mask detection (CV primary + VLM fallback).
+"""1A-V7 · Geometric mask detection (CV circle + VLM main path).
 
-二核反馈：单帧 VLM 在 mask 上不稳定，scene 中点恰好没蒙版就漏报；CV 算法
-（HoughCircles / Canny 矩形 / HoughLinesP）在几何形状清晰时确定性强、
-不需要截帧给 VLM。
+二核 ISS-020 改造：移除 ``_detect_rectangle`` / ``_detect_line_split`` —
+口播视频里几乎不出现真矩形 / 分屏蒙版，但字幕带 / 标题条 / 水印 / logo 在
+Canny + Hough 检测器面前形态高度相似，三个原 CV 检测器加起来贡献的几乎
+全是误报（9 个字幕首现位置全部被当作几何 mask 标到 MediaTimeline 上）。
+保留 ``_detect_circle``：圆形蒙版（头像框 / vignette）形态足够独特，
+HoughCircles 不会被字幕带触发。
 
-策略：
-1. CV 主路径：scene 内首/中/末三帧分别跑三种几何检测器，多数决判定有无 +
-   类型 + 参数。
-2. VLM 兜底：CV 全部判 has_mask=False（或置信度低）时，再调一次 VLM 看
-   多帧合一组的网格图，避免 CV 漏检半透明 / 自然纹理边缘的情况。
+策略变化：
+1. CV 主路径只跑 ``_detect_circle`` 的多帧投票（圆形蒙版的判定能力 CV 强于 VLM）。
+2. 圆形以外的几何蒙版（矩形画框、分屏、不规则）一律走 VLM 兜底——VLM 看
+   多帧合一组的网格图，prompt 显式要求排除字幕 / 标题条 / 水印 / UI 元素。
+3. CV 检不到圆且 VLM 判 has_mask=false → 该 scene 无几何蒙版。
 
-每个 scene 的最终判定写入 ``Phase1AReport.masks[<scene_idx>]``，事件
-``frame_url`` 指向最强证据帧（CV 检出的那一帧 / VLM 用的中间帧）方便工作台
-左栏 bbox 可视化。
+decisions/010 已知代价 3：删 CV 矩形/分屏后真实矩形/分屏蒙版完全靠 VLM；
+项目定位为口播视频，矩形 / 线分屏蒙版极少出现，VLM 单帧识别精度不构成
+demo 阶段约束。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path  # noqa: F401  (kept for type hints in helpers)
 
 from app.config import get_settings
 from app.event_bus import get_event_bus
@@ -34,16 +37,14 @@ from app.logging import get_logger
 STAGE = "1A.masks"
 log = get_logger(__name__)
 
-# CV detector confidence thresholds — tuned to bias toward false-negative
+# Circle detector confidence threshold — tuned to bias toward false-negative
 # (let VLM fallback catch missed cases) rather than false-positive.
 _CIRCLE_HOUGH_PARAM2 = 35
-_RECTANGLE_MIN_AREA_FRAC = 0.10  # rectangle must cover ≥10% of frame
-_LINE_MIN_LENGTH_FRAC = 0.60     # split line must span ≥60% of frame
 
 
 @dataclass
 class _CVCandidate:
-    kind: str  # "circle" | "rectangle" | "line_split"
+    kind: str  # "circle" only after ISS-020 cleanup
     params: dict
     bbox_norm: tuple[int, int, int, int] | None
     confidence: float
@@ -55,7 +56,7 @@ async def detect_masks(
     *,
     parent_event_id: str | None = None,
 ) -> tuple[dict[int, Phase1AMaskParams], list[VisionEvent]]:
-    """Per-scene: CV multi-frame vote → fallback VLM if all CV votes are no-mask.
+    """Per-scene: CV circle vote → VLM fallback for non-circle masks.
 
     Returns ``{scene_idx: Phase1AMaskParams}`` and the emitted events. Each
     scene contributes at most one IR-write event (CV-decided or VLM-decided),
@@ -90,8 +91,8 @@ async def detect_masks(
             await bus.publish(ctx.task_id, ir_ev)
             events.append(ir_ev)
             continue
-        # CV says no-mask (or all probes inconclusive) — let VLM look at the
-        # same three frames as a grid before we record a final no-mask.
+        # CV says no-circle (or all probes inconclusive) — fall back to VLM
+        # for non-circle geometries (rectangle / line_split / nothing).
         vlm_result, vlm_evs = await _vlm_fallback(ctx, sc, anchors, parent_event_id)
         events.extend(vlm_evs)
         if vlm_result is not None:
@@ -100,14 +101,14 @@ async def detect_masks(
 
 
 # ---------------------------------------------------------------------------
-# CV path
+# CV path — circle only after ISS-020
 # ---------------------------------------------------------------------------
 
 
 async def _cv_vote(
     ctx: Phase1AContext, scene: Scene, anchors: list[FrameSample]
 ) -> tuple[Phase1AMaskParams | None, list[VisionEvent]]:
-    """Run three detectors on each anchor frame; majority-vote the result.
+    """Run circle detector on each anchor frame; majority-vote.
 
     Returns (None, []) when OpenCV isn't installed. Each per-frame probe
     that finds something emits a ``severity="info"`` event with the
@@ -136,17 +137,12 @@ async def _cv_vote(
             for cand in _detect_circle(gray, cv2, np, W, H):
                 cand.frame = anchor
                 candidates.append(cand)
-            for cand in _detect_rectangle(gray, cv2, np, W, H):
-                cand.frame = anchor
-                candidates.append(cand)
-            for cand in _detect_line_split(gray, cv2, np, W, H):
-                cand.frame = anchor
-                candidates.append(cand)
     finally:
         cap.release()
 
     # Emit one info event per CV candidate (not too noisy: at most 3 frames
-    # × 3 detectors = 9 per scene, typically far fewer).
+    # per scene, typically far fewer; circle detector returns at most 1
+    # per frame after the radius / minDist filters).
     for c in candidates:
         events.append(
             VisionEvent(
@@ -212,97 +208,6 @@ def _detect_circle(gray, cv2, np, W: int, H: int) -> list[_CVCandidate]:
     return out
 
 
-def _detect_rectangle(gray, cv2, np, W: int, H: int) -> list[_CVCandidate]:
-    """Largest rectangular contour above a min-area threshold."""
-    edges = cv2.Canny(gray, 80, 160)
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    out = []
-    frame_area = W * H
-    for c in contours:
-        approx = cv2.approxPolyDP(c, 0.02 * cv2.arcLength(c, True), True)
-        if len(approx) != 4:
-            continue
-        x, y, w, h = cv2.boundingRect(approx)
-        area = w * h
-        if area < frame_area * _RECTANGLE_MIN_AREA_FRAC:
-            continue
-        if area > frame_area * 0.95:
-            # full-frame rectangle is the canvas border, not a mask
-            continue
-        # Aspect ratio check: skip extremely thin slivers (likely text bars).
-        if min(w, h) < min(W, H) * 0.15:
-            continue
-        out.append(
-            _CVCandidate(
-                kind="rectangle",
-                params={
-                    "x": int(x / W * 1000),
-                    "y": int(y / H * 1000),
-                    "w": int(w / W * 1000),
-                    "h": int(h / H * 1000),
-                },
-                bbox_norm=(
-                    int(x / W * 1000),
-                    int(y / H * 1000),
-                    int(w / W * 1000),
-                    int(h / H * 1000),
-                ),
-                confidence=0.80,
-                frame=None,  # type: ignore[arg-type]
-            )
-        )
-    return sorted(out, key=lambda c: -(c.params["w"] * c.params["h"]))[:1]
-
-
-def _detect_line_split(gray, cv2, np, W: int, H: int) -> list[_CVCandidate]:
-    """HoughLinesP — split-screen lines spanning most of the frame."""
-    edges = cv2.Canny(gray, 80, 160)
-    min_len = int(min(W, H) * _LINE_MIN_LENGTH_FRAC)
-    lines = cv2.HoughLinesP(
-        edges,
-        rho=1,
-        theta=3.14159 / 180,
-        threshold=120,
-        minLineLength=min_len,
-        maxLineGap=20,
-    )
-    if lines is None:
-        return []
-    out = []
-    for ln in lines[:5]:
-        x1, y1, x2, y2 = ln[0]
-        dx = abs(x2 - x1)
-        dy = abs(y2 - y1)
-        # Only accept near-horizontal or near-vertical splits.
-        if dx > 0 and dy / dx > 0.15 and dx / max(dy, 1) > 0.15:
-            continue
-        side = (
-            "top"
-            if dx > dy and (y1 + y2) / 2 < H / 2
-            else "bottom"
-            if dx > dy
-            else "left"
-            if (x1 + x2) / 2 < W / 2
-            else "right"
-        )
-        out.append(
-            _CVCandidate(
-                kind="line_split",
-                params={
-                    "x1": int(x1 / W * 1000),
-                    "y1": int(y1 / H * 1000),
-                    "x2": int(x2 / W * 1000),
-                    "y2": int(y2 / H * 1000),
-                    "side_kept": side,
-                },
-                bbox_norm=None,
-                confidence=0.70,
-                frame=None,  # type: ignore[arg-type]
-            )
-        )
-    return out[:1]
-
-
 def _majority_vote(
     candidates: list[_CVCandidate], n_frames: int
 ) -> Phase1AMaskParams | None:
@@ -326,7 +231,7 @@ def _majority_vote(
 
 
 # ---------------------------------------------------------------------------
-# VLM fallback
+# VLM fallback — primary path for rectangle / line_split / unknown
 # ---------------------------------------------------------------------------
 
 
@@ -336,7 +241,7 @@ async def _vlm_fallback(
     anchors: list[FrameSample],
     parent_event_id: str | None,
 ) -> tuple[Phase1AMaskParams | None, list[VisionEvent]]:
-    """Last resort — VLM looks at first/mid/last frames as a 3-frame grid."""
+    """VLM looks at first/mid/last frames as a 3-frame grid for non-circle masks."""
     settings = get_settings()
     cl = ctx.client(STAGE)
     refs = [FrameRef(ts=f.ts, url=f.rel_path, scene_idx=f.scene_idx) for f in anchors]
@@ -346,7 +251,9 @@ async def _vlm_fallback(
             "role": "user",
             "content": (
                 f"Scene {scene.idx}（{scene.start_sec:.2f}s–{scene.end_sec:.2f}s）的"
-                f"首/中/末三帧已附上。CV 三帧多数决判定无几何蒙版，请你复核。"
+                f"首/中/末三帧已附上。CV 圆形检测未命中，请你判断是否存在"
+                "矩形 / 线分屏等其他形状的几何蒙版。"
+                "再次强调：字幕 / 标题条 / 水印 / logo / UI 元素**不算几何蒙版**。"
             ),
         },
     ]

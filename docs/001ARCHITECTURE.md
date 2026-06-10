@@ -277,6 +277,17 @@ python -m app.cli ingest-sample /local/path.mp4
              <Audio src=bgmUrl if bgm_track />
         → 写 projects/{pid}/outputs/render_{ts}.mp4
 浏览器 TaskProgress 看到 completed → 渲染 mp4 下载链接
+浏览器从 ProjectHistoryStrip 重进 /editor/{pid}（或 URL 直接打开）
+  → useEffect [projectId] 并行 Promise.allSettled:
+     - getProject(pid) → project.json → applyDone + chosenTemplate（取 sections[0].template_id）
+     - getRecommendations(pid) → tasks_store.list_by_resource("project", pid) 取最新
+       kind="recommend_templates" → event_bus.replay 过滤 stage="2.recommend"
+       且 ir_value 为字符串 → 按 template_id 反查 kb_store.get_template 拼 name/thumbnail
+       → 恢复 step-2 卡片
+     - listProjectTasks(pid) → tasks 表取最新 kind="apply_short" → 恢复 step-3
+       「apply 全链路 #...」工作台链接
+  ← Editor 渲染：step-2 卡片高亮 chosenTemplate；step-3 显示 apply 全链路 #...；
+     PatchHistoryList 顶部「打开工作台看 apply 全链路 →」一并恢复
 ```
 
 **链路 G：Phase 2.5 NL 编辑 / 参数面板编辑 → ProjectIR Patch → 自动重渲染**
@@ -369,10 +380,10 @@ python -m app.cli ingest-sample /local/path.mp4
 - **D14 dual-check 并发 + 跳过 fallback**：`chat_vision_dual` 通过 `asyncio.gather` 并发调主备模型；任一侧返回 `severity=warning` 事件（fallback）时跳过结构对比，避免「真结果 vs 默认 schema」误报为 cross-check 异议。
 - **D15 子能力统一上下文签名 + STAGE 常量**：`extract/*` 与 `understand/*` 子能力函数签名为 `async def detect_X(ctx: Phase1AContext, *, parent_event_id=None) -> tuple[Result, list[VisionEvent]]`；`captions_anim` / `caption_function` 多一个 `caption_idx` 形参、`stickers.refine_sticker_bbox` 多一个 `sticker_idx` 形参索引到 `Phase1AReport`。stage 在模块顶部硬编码常量。重 ML 依赖在 `[extract]` extras 内 lazy import，缺包返默认形状 + `severity="warning"` VisionEvent。
 - **D16 Phase 1A CI 守卫**：`scripts/check_stage_naming.py` AST 检查 VisionEvent / chat_vision / chat_text / chat_vision_dual / `STAGE` 常量字面量；`check_event_emission.py` 检查 AI 客户端方法体调用 `event_bus.publish` 或 chat_vision 系列；`check_parent_event_id.py` 检查名字以 `_refine` / `_phase2` / `_classify` 结尾或以 `refine_` / `phase2_` / `classify_` 开头的函数体内任一调用传 `parent_event_id=` kwarg。三脚本跳 site-packages，CI python job 在单测后串行执行。
-- **D17 Phase 1A 识别报告 IR**：1A 子能力 VisionEvent 写入 `Phase1AReport`（`backend/app/ir/phase1a_report.py`），不写 `TemplateIR`。`IRTarget.ir_type` Literal 取 `{TemplateIR, ProjectIR, TranscriptLedger, Phase1AReport}` 之一。Phase1AReport 字段 = `scenes[]` / `captions[]` / `caption_style_palette[]` / `caption_functions[]` / `stickers[]` / `zoom_directions{}` / `zoom_curves{}` / `transitions{}` / `masks{}` / `color` / `audio`。列表型字段以 `op="append"` 增量写入；字典型字段以 `str(scene_idx)` 作 key、路径形如 `zoom_directions.0`；单值型字段整对象写或带 `field` 子字段写。1B `skeleton.py` 读 `Phase1AReport` 映射到 `TemplateIR.skeleton[N].style.{...}` + `TemplateIR.caption_style_palette[]`。工作台右栏头部按最近事件 `ir_target.ir_type` 动态显示 IR 类型。
+- **D17 Phase 1A 识别报告 IR**：1A 子能力 VisionEvent 写入 `Phase1AReport`（`backend/app/ir/phase1a_report.py`），不写 `TemplateIR`。`IRTarget.ir_type` Literal 取 `{TemplateIR, ProjectIR, TranscriptLedger, Phase1AReport}` 之一。Phase1AReport 字段 = `scenes[]` / `captions[]` / `caption_style_palette[]` / `caption_functions[]` / `stickers[]` / `zoom_directions{}` / `zoom_curves{}` / `transitions{}` / `masks{}` / `color` / `audio` / `b_roll_segments[]`。列表型字段以 `op="append"` 增量写入；字典型字段以 `str(scene_idx)` 作 key、路径形如 `zoom_directions.0`；单值型字段整对象写或带 `field` 子字段写。1B `skeleton.py` 读 `Phase1AReport` 映射到 `TemplateIR.skeleton[N].style.{...}` + `TemplateIR.caption_style_palette[]`，并据 `b_roll_segments` 把含非「人物主导」段的 Slot.material_req 标为 `AI生成画面`。工作台右栏头部按最近事件 `ir_target.ir_type` 动态显示 IR 类型。
 - **D18 Phase 1A 共享上下文**：`backend/app/extract/context.py` 暴露 `Phase1AContext(sample_id, normalized_path, task_id)`，`await ctx.scenes()` / `await ctx.frames()` / `ctx.client(stage)` 三个 lazy 入口在首次调用时计算并缓存。lab runner、1B pipeline、集成测试都以 `ctx` 为入参；多子能力同 fixture 时 `detect_scenes` / `sample_frames` 只执行一次。
 - **D19 Phase 1A 实体事件可视化字段**：每个子能力的实体级 VisionEvent（每条字幕、每枚贴纸、每个 mask 检出）必须填 `frame_url`（指向 entity 首次出现的采样帧 `/data/<rel>`）+ `bbox_norm`（0-999 → 0-1 归一化），工作台左栏 `WorkbenchVisionPane` + `BboxOverlay` 在两个字段同时存在时才渲染帧底图 + 框。`Phase1ACaptionEvent` / `Phase1AStickerDetection` 同时携带 `reasoning` 字段，右栏 IR 展开可见 VLM 中文解释（decisions/010 落地后 raw 审计字段如 `color_hex_raw / anim_in_type_raw / layout_raw` 已删除——视觉信息直接收口在 `style: CaptionStyle`，行为信息收口在 `Phase1ACaptionFunctionEvent`）。
-- **D20 几何 mask CV 主路径**：`extract/masks.py::detect_masks` 在每个 scene 首/中/末三帧分别跑 `HoughCircles` / Canny 矩形 / `HoughLinesP` 三类几何检测器，多数决（同 kind 至少 ceil(n_frames/2) 票）确认 `has_mask`；CV 全 false 时调一次 VLM 看三帧网格兜底。CV 候选与最终判定事件都带 frame_url + bbox。
+- **D20 几何 mask CV 主路径**：`extract/masks.py::detect_masks` 在每个 scene 首/中/末三帧只跑 `HoughCircles` 圆形检测器，多数决（同 kind 至少 ceil(n_frames/2) 票）确认 `has_mask`；CV 全 false 时调一次 VLM 看三帧网格，由 VLM 判断矩形 / 分屏等其他形状（VLM prompt 显式排除字幕 / 标题条 / 水印 / UI / letterbox 等非蒙版元素）。决策详见 decisions/010 决策 4：原 `Canny 矩形` / `HoughLinesP` 两类 CV 检测器在口播视频里几乎全是字幕带 / 标题条边缘的误报，已删除。CV 候选与最终判定事件都带 frame_url + bbox。
 - **D21 1B pipeline 单点降级**：`extract/pipeline.py::_safe(label, field_key, coro)` 包裹每个子能力调用；任一抛异常 → `TemplateIR.degraded[_ir_path_for(field_key)] = str(e)` + 发 `severity="warning"` 事件 + 不阻塞下游。pipeline 自身永不 raise（顶层 `try/except` 仅防御非 `_safe` 路径的 programmer error）；最坏情况是一个 degraded 字段全标的 TemplateIR 仍可入 KB。`_ir_path_for` 翻译规则见 D25。
 - **D22 模板 = KB 主键 + events 路径回链**：`kb.sqlite` 的 `templates` 表只存 `ir_json + tags + thumbnail + last_extract_task_id`，**绝不复制 events.jsonl**。事件流通过 `tasks.events_jsonl_path`（按 `last_extract_task_id` 反查）就地读取，工作台「回放」一键打开 `/workbench/{last_extract_task_id}`。
 - **D23 Renderer Caption 双模式**：`compositions/Caption.tsx` 由调用方传 `renderMode: "template_preview" | "project_output"` props 区分；前者渲染 `placeholder_text[0]` 作为示例字幕（TemplateLibrary 详情 / 0.5 dev_workbench 预览），后者渲染 ProjectIR 的 `Caption.text`（Phase 2+ 用户素材产物）。组件内**绝不**根据 `text` 是否为空自动切换模式——隐式 fallback 在用户合法传空字符串时会无声跑错。

@@ -151,6 +151,33 @@ async def test_masks_writes_into_phase1a_report(task_with_events, no_credentials
             assert ev.ir_target.path.startswith("masks.")
 
 
+@pytest.mark.asyncio
+async def test_b_roll_writes_into_phase1a_report_per_scene(
+    task_with_events, no_credentials
+):
+    """detect_b_roll runs one VLM call per scene and appends a
+    BRollSegment to Phase1AReport.b_roll_segments. Default fallback kind
+    is 人物主导 (no AIGC trigger), matching the prompt's safe-default rule.
+    """
+    from app.extract.b_roll import detect_b_roll
+
+    task_id, _ = task_with_events
+    ctx = _seeded_ctx(task_id, n_scenes=2)
+    segments, events = await detect_b_roll(ctx)
+    assert events, "expected at least one event"
+    # Entity events with an ir_target must append to b_roll_segments.
+    for ev in events:
+        if ev.ir_target is not None:
+            assert ev.ir_target.ir_type == "Phase1AReport"
+            assert ev.ir_target.path == "b_roll_segments"
+            assert ev.ir_target.op == "append"
+    # Every produced segment defaults to 人物主导 in fallback mode (口播
+    # video safe default — won't accidentally trigger Phase 5 AIGC).
+    for seg in segments:
+        assert seg.kind == "人物主导"
+        assert seg.bbox_norm_0_999 is None
+
+
 # ---------- single-target subcaps: color_lut / audio ----------
 
 
@@ -223,6 +250,7 @@ def test_phase1a_report_schema_round_trips_typical_payloads():
     """The structures we emit must validate against the IR schema, otherwise
     1B's skeleton.py won't be able to read them back."""
     from app.ir.phase1a_report import (
+        BRollSegment,
         Phase1ACaptionEvent,
         Phase1ACaptionFunctionEvent,
         Phase1AColorReport,
@@ -292,6 +320,17 @@ def test_phase1a_report_schema_round_trips_typical_payloads():
             histogram={"hue_mean": 25.0, "sat_mean": 120.0, "val_mean": 180.0},
         ),
         audio=AudioStyle(has_bgm=True, bpm=120.0, mood_tag="欢快"),
+        b_roll_segments=[
+            BRollSegment(
+                scene_idx=0,
+                kind="画中画",
+                start=0.0,
+                end=2.0,
+                bbox_norm_0_999=(700, 100, 250, 250),
+                confidence=0.82,
+                reasoning="右上角小窗 PIP",
+            )
+        ],
     )
     js = report.model_dump_json()
     again = Phase1AReport.model_validate_json(js)
@@ -301,3 +340,6 @@ def test_phase1a_report_schema_round_trips_typical_payloads():
     assert again.caption_functions[0].caption_idx == 0
     assert again.caption_functions[0].function == "regular"
     assert again.zoom_directions["0"] == "推进"
+    # B-roll round-trip preserves kind / bbox tuple.
+    assert again.b_roll_segments[0].kind == "画中画"
+    assert again.b_roll_segments[0].bbox_norm_0_999 == (700, 100, 250, 250)

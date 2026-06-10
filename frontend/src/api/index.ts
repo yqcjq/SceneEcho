@@ -129,6 +129,24 @@ export async function recommendTemplates(
   return data;
 }
 
+export interface RecommendationsHistoryResponse {
+  task_id: string | null;
+  workbench_url?: string;
+  recommendations: RecommendItem[];
+}
+
+/** Replay the most recent recommend_templates task's results — used by the
+ * Editor on reload to restore step-2 cards. Returns ``task_id: null`` when
+ * the project has no recommendation task yet. */
+export async function getRecommendations(
+  projectId: string,
+): Promise<RecommendationsHistoryResponse> {
+  const { data } = await api.get<RecommendationsHistoryResponse>(
+    `/projects/${projectId}/recommendations`,
+  );
+  return data;
+}
+
 export async function applyTemplate(
   projectId: string,
   templateId: string,

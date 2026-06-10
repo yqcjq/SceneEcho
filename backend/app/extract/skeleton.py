@@ -56,6 +56,7 @@ from dataclasses import dataclass
 
 from app.event_bus import get_event_bus
 from app.ir.phase1a_report import (
+    BRollSegment,
     Phase1ACaptionEvent,
     Phase1ACaptionFunctionEvent,
     Phase1AReport,
@@ -221,8 +222,31 @@ def _transition_for_boundary(prev_scene_idx: int | None, report: Phase1AReport) 
     return report.transitions.get(str(prev_scene_idx))
 
 
-def _infer_material_req(captions: list, stickers: list, has_zoom: bool, has_mask: bool) -> str:
-    """PLAN 1510 mapping — caption presence is the strong signal."""
+def _b_roll_in(seg: _Segment, report: Phase1AReport) -> list[BRollSegment]:
+    """BRollSegment entries whose scene_idx falls inside this segment."""
+    indices = set(seg.scene_indices)
+    return [b for b in report.b_roll_segments if b.scene_idx in indices]
+
+
+def _infer_material_req(
+    captions: list,
+    stickers: list,
+    has_zoom: bool,
+    has_mask: bool,
+    b_rolls: list[BRollSegment],
+) -> str:
+    """PLAN 1510 + decisions/010 决策 6 mapping.
+
+    Priority order (most specific wins):
+    1. Any non-人物主导 BRollSegment in this slot → ``AI生成画面``
+       (covers 全屏 B-roll / 画中画 / 侧栏). Phase 5 generate_broll later
+       reads ``Phase1AReport.b_roll_segments`` to know which slots to fill.
+    2. Captions present → ``人物口播``.
+    3. Visual extras (sticker / zoom / mask) without captions → ``B-roll/包装``.
+    4. Nothing distinctive → ``待定``.
+    """
+    if any(b.kind != "人物主导" for b in b_rolls):
+        return "AI生成画面"
     if captions:
         return "人物口播"
     if stickers or has_zoom or has_mask:
@@ -372,6 +396,7 @@ def _build_slot(
     stickers = _stickers_in(seg, report)
     zoom = _zoom_keyframes_for(seg, report)
     mask_kind, mask_params = _dominant_mask(seg, report)
+    b_rolls = _b_roll_in(seg, report)
     # Has-zoom signal: any non-trivial curve (anything other than a single
     # scale=1.0 keyframe at t=0).
     has_real_zoom = any(abs(kf.scale - 1.0) > 0.02 for kf in zoom)
@@ -404,7 +429,9 @@ def _build_slot(
             "nominal": round(span, 3),
             "max": round(span * 1.5, 3),
         },
-        material_req=_infer_material_req(captions, stickers, has_real_zoom, mask_kind is not None),
+        material_req=_infer_material_req(
+            captions, stickers, has_real_zoom, mask_kind is not None, b_rolls
+        ),
         style=style,
         caption_function=caption_function,
     )

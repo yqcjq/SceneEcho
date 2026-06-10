@@ -124,6 +124,28 @@ class Phase1AColorReport(BaseModel):
     histogram: dict[str, float] | None = None
 
 
+class BRollSegment(BaseModel):
+    """画面构成识别结果（per-scene）。
+
+    decisions/010 决策 6（ISS-023）落地后引入。VLM 看每个 scene 的中间帧
+    分类成四类（人物主导 / 全屏 B-roll / 画中画 / 侧栏）+ 可选 ROI bbox。
+    Phase 5 ``generate_broll`` 真接入时直接消费 ``Phase1AReport.b_roll_segments``
+    判断哪段时间该启用 AI 补画面，本期 1A 仅落识别字段、不触发任何
+    AIGC 调用，与 D10「AIGC 用户主动触发」不冲突。
+
+    1B ``skeleton.py::_infer_material_req`` 在 Slot 内有任一非 ``人物主导``
+    BRollSegment 时把 material_req 标为 ``AI生成画面``。
+    """
+
+    scene_idx: int
+    kind: Literal["人物主导", "全屏 B-roll", "画中画", "侧栏"] = "人物主导"
+    start: float = 0.0
+    end: float = 0.0
+    bbox_norm_0_999: tuple[int, int, int, int] | None = None
+    confidence: float = 0.0
+    reasoning: str = ""
+
+
 class Phase1AReport(BaseModel):
     """1A 单次抽取的全部识别结果聚合。
 
@@ -153,3 +175,7 @@ class Phase1AReport(BaseModel):
     masks: dict[str, Phase1AMaskParams] = Field(default_factory=dict)
     color: Phase1AColorReport | None = None
     audio: AudioStyle | None = None
+    # decisions/010 决策 6（ISS-023）：每 scene 一条 BRollSegment 记录画面
+    # 构成类型（人物主导 / 全屏 B-roll / 画中画 / 侧栏），1B skeleton 据此
+    # 把含非「人物主导」段的 Slot 标 material_req=AI生成画面。
+    b_roll_segments: list[BRollSegment] = Field(default_factory=list)

@@ -750,10 +750,11 @@ PLAN.md 1759-1870 声明阶段 2.6：把工作台从「事件列表 + 回放器�
 
 ## [ISS-019] Phase 1A 字幕样式/位置识别 bbox 偏斜 + 召回率低于真实字幕数
 
-**状态**：[讨论中]
+**状态**：[已解决]
 **优先级**：[P1 严重]
 **类型**：[功能异常]
 **发现日期**：2026-06-10
+**解决日期**：2026-06-10
 
 **现象**：
 SubcapabilityLab 跑 9.4s × 9 字幕的口播样例，`1A.captions` 子能力只识别出 4 条字幕；几何蒙版（`1A.masks`）的 VLM 兜底反而把 9 个字幕首现位置全部当矩形 mask 标记出来——侧面证明字幕在画面里都"长得像可被识别的矩形带"，但 captions 子能力的 VLM grid 识别在小字号 / 短停留上漏了一半以上。同时识别到的字幕 bbox 普遍偏中下、只框 6 个字里的 2 个——视觉上像 bbox 整体被估小且位置略向中下偏移。
@@ -774,15 +775,20 @@ SubcapabilityLab 跑 9.4s × 9 字幕的口播样例，`1A.captions` 子能力�
 -> backend/app/llm/prompts/1a_captions.md（contract 歧义）
 -> backend/app/ir/template.py（CaptionStyle 字段扩充触点）
 -> decisions/010-phase1a-subcap-rework.md
+-> 004CHANGELOG.md [2026-06-10-6]
+
+**解决方案**：
+prompt 删 `size_norm_0_999` 字段，仅保留 `position_norm_0_999=[x_left, y_top, w, h]` + 1080×1920 示例 + 显式说明「字符高度 ≠ bbox 高度」。代码 `_CaptionRaw` 删字段；`_bbox_from_pos_size` 改名 `_bbox_from_position` + sanity check（w<50 / h<25 / 越界拒绝 → draft 丢弃）；`_to_caption_style` 给 `font_size_px_estimate` 加兜底 `max(estimate, bbox_h × 1.08 × 0.6)`。召回部分加 CV 文本带预扫：每帧 Canny + 横向形态学 dilate 30×5 找高对比度长矩形作候选 ROI，跨帧 IoU > 0.7 dedup，注入 user prompt 让 VLM 逐一复核「是字幕吗 + 是字幕则给样式」；OpenCV 缺包时退回纯 VLM 路径。
 
 ---
 
 ## [ISS-020] 几何蒙版子能力误把字幕带认成矩形蒙版
 
-**状态**：[讨论中]
+**状态**：[已解决]
 **优先级**：[P1 严重]
 **类型**：[功能异常]
 **发现日期**：2026-06-10
+**解决日期**：2026-06-10
 
 **现象**：
 SubcapabilityLab 跑同一 9.4s 样例的 `1A.masks` 子能力，每个字幕首现位置都被当成蒙版事件标到 MediaTimeline 上。9 个字幕全命中，但样例里实际**没有几何蒙版**——这些事件全是误报。
@@ -802,15 +808,20 @@ SubcapabilityLab 跑同一 9.4s 样例的 `1A.masks` 子能力，每个字幕首
 -> backend/app/llm/prompts/1a_masks.md（缺排除项）
 -> backend/app/ir/phase1a_report.py（Phase1AMaskParams.kind 枚举可能要收窄）
 -> decisions/010-phase1a-subcap-rework.md
+-> 004CHANGELOG.md [2026-06-10-6]
+
+**解决方案**：
+`extract/masks.py` 删 `_detect_rectangle` / `_detect_line_split` 函数及调用 + 相关常量；CV 主路径只保留 `HoughCircles`，矩形 / 分屏 / 不规则形状统一走 VLM 兜底。`1a_masks.md` 加显式排除项块（字幕 / 标题条 / 水印 / logo / UI / letterbox 不算几何蒙版）+ confidence < 0.6 倾向 false。VLM fallback user prompt 复述排除项强化语义。
 
 ---
 
 ## [ISS-021] 缩放方向子能力缺平移 8 方向识别能力
 
-**状态**：[讨论中]
+**状态**：[已解决]
 **优先级**：[P2 一般]
 **类型**：[功能异常]
 **发现日期**：2026-06-10
+**解决日期**：2026-06-10
 
 **现象**：
 当前 `_ZoomDirection.direction` 枚举仅 `{推进, 拉远, 稳定, 抖动}` 四类，覆盖不到口播视频里同样常见的"画面整体平移"——向左 / 向右 / 向上 / 向下 / 左上 / 右上 / 左下 / 右下 八个方向的镜头平移类型，体感上系统对平移几乎没有识别能力。
@@ -826,6 +837,10 @@ SubcapabilityLab 跑同一 9.4s 样例的 `1A.masks` 子能力，每个字幕首
 -> backend/app/ir/template.py（VisualStyle 的 zoom_keyframes 是否需要新字段表达 pan）
 -> backend/app/llm/prompts/1a_zoom_direction.md
 -> decisions/010-phase1a-subcap-rework.md
+-> 004CHANGELOG.md [2026-06-10-6]
+
+**解决方案**：
+`1a_zoom_direction.md` 从 4 类升 13 类（推/拉/稳/抖 + 8 平移：左/右/上/下/左上/右上/左下/右下移）+ 13 类语义 + 缩放/平移互斥原则示例。`motion.py` 加 `ZOOM_DIRECTIONS_13` frozenset 校验 + 非 13 类 fallback "稳定" + log 警告。`estimate_zoom_curve` 改用首帧 keypoint tracking（每帧从 first_gray LK 光流追踪到当前帧，scale + dx/dy 都相对首帧累积），dx/dy 钳到 [-0.5, 0.5] 防光流跟丢虚位移；写入 ZoomKeyframe 已有 dx / dy 字段（P1 已加）。pipeline 触发 zoom_curve 的"非稳定 scene"判定保持不变（13 类里 12 类都触发曲线计算）。
 
 ---
 
@@ -869,10 +884,11 @@ SubcapabilityLab 跑同一 9.4s 样例的 `1A.masks` 子能力，每个字幕首
 
 ## [ISS-023] Phase 1A 缺「额外画面 / B-roll 场景」子能力
 
-**状态**：[讨论中]
+**状态**：[已解决]
 **优先级**：[P2 一般]
 **类型**：[技术债]
 **发现日期**：2026-06-10
+**解决日期**：2026-06-10
 
 **现象**：
 当前 1A 子能力清单里没有"画面里是否还有人物以外的额外画面（图片 / B-roll / 画中画 / 侧栏）"这一识别能力。但口播视频实际拍摄场景中，作者讲到具体内容时常会插入 AI 生图或 B-roll 视频，让画面不至于单调。Phase 5 已在 PLAN 里规划了 generate_broll，但提取阶段没有任何子能力告诉模板"原样例的哪段时间用了 B-roll、占画面多大比例"——下游 Phase 5 也就没有可消费的字段。
@@ -891,6 +907,10 @@ SubcapabilityLab 跑同一 9.4s 样例的 `1A.masks` 子能力，每个字幕首
 -> backend/app/ir/phase1a_report.py（Phase1AReport.b_roll_segments）
 -> backend/app/extract/skeleton.py（Slot.material_req 新增 "AI生成画面" 分支）
 -> decisions/010-phase1a-subcap-rework.md
+-> 004CHANGELOG.md [2026-06-10-6]
+
+**解决方案**：
+新增 `extract/b_roll.py` + `1a_b_roll.md` prompt，VLM 看每个 scene 中间帧分类 4 类 + 可选 ROI bbox。`Phase1AReport.b_roll_segments: list[BRollSegment]` 字段新增；entity event 带 `op="append"` + media_ts_range = scene 起止 + frame_url。`pipeline._run_phase1a` fan-out 加 b_roll 任务（与 captions/stickers/zoom/transitions/masks/color/audio 并发），SUBCAP_TO_IR_PATH 加 `b_roll_segments → skeleton.*.material_req` 映射。`api/lab.py` REGISTRY 加 b_roll 条目让 SubcapabilityLab 可独立调试。`skeleton.py::_infer_material_req` 加 `b_rolls` 参数 + 优先级最高分支：任一非「人物主导」段 → `AI生成画面`（覆盖 captions/stickers/zoom/mask 信号）；保持 D10「AIGC 用户主动触发」——仅打标签，不触发任何 AI 调用。Phase 5 真接入 generate_broll 时直接消费此字段。
 
 ---
 
@@ -918,3 +938,76 @@ SubcapabilityLab 跑同一 9.4s 样例的 `1A.masks` 子能力，每个字幕首
 -> frontend/src/api/lab.ts（list_samples 接口）
 -> decisions/010-phase1a-subcap-rework.md
 
+---
+
+## [ISS-025] Editor 重进项目时丢失模板推荐 + apply 工作台入口
+
+**状态**：[已解决]
+**优先级**：[P1 严重]
+**类型**：[功能异常]
+**发现日期**：2026-06-10
+**解决日期**：2026-06-10
+
+**现象**：
+`frontend/src/pages/Editor.tsx` 的状态全部存在 React useState 中，`useEffect [paramProjectId]` 在 URL 切换时把 `recs` / `recsTaskId` / `chosenTemplate` / `applyTaskId` 全部重置为 `null`，重进项目（点 ProjectHistoryStrip 历史项目卡片）只重新拉了 `getProject` 与 `getPreviewProps`，没有从后端真理源恢复以上四个状态。导致：
+1. 第二步「模板推荐」卡片消失，用户无法回看上次推荐的 top-3 + reason；只能再点「调 VLM 推荐 top-3」重新跑一次（再付一次 VLM 调用）。
+2. 第三步「apply pipeline」卡片的 `apply 全链路 #...` 链接消失，第四步 PatchHistoryList 的 `打开工作台看 apply 全链路 →` 链接同步消失，**用户无法回看 AI apply 那一刻做了什么决策**。
+
+**后果**：
+- 推荐结果的可观测性回退到"必须重跑才能看见"；与 Phase 2.5 编辑历史可在 PatchHistoryList 持续回看的设计不对称。
+- AI 透明工作台对 apply 决策的"白盒"叙事在重进项目后立即变成"黑盒"（只能看 IR 结果，看不到产生 IR 的过程）。
+- 用户原话："如果再看历史任务的第三步 AI apply 的话，是没法进入当时的这个工作栏的。"
+
+**初步判断**：
+已确认。第一性原理：UI 状态应该从后端事实源派生，而不是只活在前端 useState。后端早已持久化全部所需信息——
+- `recommend_templates` 端点为每条推荐发了一条 `stage="2.recommend"` VisionEvent，`ir_value=template_id` + `confidence=score` + `reasoning=reason`；事件流写到 `projects/{id}/pipeline/events_{task_id}.jsonl`。
+- `apply_short` 任务记录在 `tasks` 表，`kind="apply_short"` + `resource_kind=project` + `resource_id={pid}`。
+
+把 UI 状态恢复成"对事实源的派生视图"即可，不需要新增任何持久化字段。这与 D36（events.jsonl 是 Patch 真理源）+ Phase 2.5 PatchHistoryList 的设计同构。
+
+**关联**：
+-> backend/app/api/projects.py（新增 `GET /projects/{id}/recommendations` 反查事件流端点）
+-> frontend/src/api/index.ts（新增 `getRecommendations` 客户端）
+-> frontend/src/pages/Editor.tsx（`useEffect [projectId]` 并行恢复 project + recs + applyTaskId + chosenTemplate）
+-> backend/tests/unit/test_projects_api.py（新增端点单元测试）
+-> 004CHANGELOG.md [2026-06-10-5]
+
+**解决方案**：
+后端新增 `GET /projects/{project_id}/recommendations`：扫 `tasks_store.list_by_resource("project", pid)` 找最新 `kind="recommend_templates"` 任务 → `event_bus.replay(task_id)` 读全部历史事件 → 过滤 `stage == "2.recommend"` 且 `ir_value` 是字符串（区分实体事件 vs chat_vision 调用级事件 / fallback 事件，调用级 ir_value 是 dict、fallback 是 None）→ 按 `ir_value (template_id)` 反查 `kb_store.get_template` 取 name / thumbnail_path / tags → 重组返回与 `recommend-templates` POST 端点一致的 shape。无任务时返回 `{task_id: null, recommendations: []}` 让 UI 静默 fallback 到「fresh start」视图。
+前端 Editor.tsx 把单 read 的 useEffect 改成 `Promise.allSettled` 并行三路：`getProject` / `getRecommendations` / `listProjectTasks`。`chosenTemplate` 从 `project.ir.sections[0].template_id` 恢复（apply_short 锁定的事实），`applyTaskId` 从 `tasks.find(kind="apply_short")` 恢复（最新一次 apply）。每路独立失败不影响其他路——空响应自然不更新对应 state。recsTaskId 在 task 存在时无条件恢复（即使 recommendations 为空），让用户能跳到工作台调试失败的推荐任务。
+不引入任何新存储字段、不缓存到 `project.json`，遵循 D36「events.jsonl 是真理源」原则；新增端点的形态与 `GET /projects/{id}/history` (PatchHistoryList) 完全同构，扩展性一致。
+
+---
+
+## [ISS-026] Editor 加载 useEffect 缺 cleanup，快速切换项目时旧响应覆盖新状态
+
+**状态**：[已解决]
+**优先级**：[P2 一般]
+**类型**：[功能异常]
+**发现日期**：2026-06-10
+**解决日期**：2026-06-10
+
+**现象**：
+ISS-025 的二次核查发现：`frontend/src/pages/Editor.tsx::useEffect [projectId]` 起了一个不可取消的 IIFE 拉取 `getProject` / `getRecommendations` / `listProjectTasks` 三路并行 + 内层 `getPreviewProps`。函数没有 cleanup return，当用户在 ProjectHistoryStrip 上快速点击多个项目时：
+- 第一次 effect 触发：start fetch A
+- 第二次 effect 触发（projectId 变了）：start fetch B
+- B 先返回 → setState 到 B
+- A 后返回 → setState 到 A，**覆盖 B**
+
+用户看到的现象是"刚点的项目数据闪现一下又跳回旧项目"。
+
+**后果**：
+- Editor 显示的 project / preview / recs / applyTaskId 不再保证对应当前 URL projectId，与 React 「state 是 URL 派生」的心智模型冲突。
+- 切换越频繁、慢的请求越容易夺到最后一个 setState 的话语权。手动刷新页面即可恢复，但用户感知是"项目串台"。
+
+**初步判断**：
+已确认。原代码就有这个问题（与 ISS-025 改动无关）；ISS-025 把单 read 改并行三路 + 内层 getPreviewProps 后，**race window 变得更宽**（更多 await 边界，更多机会让旧响应在新 effect 启动后才到达）。第一性原理：所有跨 await 边界的 setState 都必须能被 unmount / 依赖变化 cleanup 取消，否则 state 不再是 props 的派生。
+
+修复方向：useEffect 局部 `let cancelled = false` flag + `return () => { cancelled = true }` cleanup；每个 await 后立即 `if (cancelled) return`。比 AbortController 轻量（不需要改 axios 调用层），与 React 18+ 的 React 文档推荐模式一致。
+
+**关联**：
+-> frontend/src/pages/Editor.tsx（useEffect [projectId] 加 cancelled flag + cleanup）
+-> 004CHANGELOG.md [2026-06-10-5]
+
+**解决方案**：
+useEffect [projectId] 改为闭包内声明 `let cancelled = false`，return cleanup 函数将其置 true。在 `Promise.allSettled` 与内层 `getPreviewProps` 两个 await 边界之后立刻 `if (cancelled) return` 短路所有 setState。后续同步 setState 块（recs / applyTaskId）不需要再检查——它们没有跨 await，运行时已经到达此函数则 cleanup 已经无法触发。改动只局限在这一个 useEffect 内，不影响其他模块；不引入 AbortController（轴 API 不接受 signal，强行接入会污染 axios 客户端）。

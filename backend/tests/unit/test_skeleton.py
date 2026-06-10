@@ -170,3 +170,58 @@ async def test_build_skeleton_consecutive_same_role_merges(task_with_events):
     assert slots[0].role == "主体"
     # Zoom keyframes from both scenes are stitched.
     assert len(slots[0].style.visual.zoom_keyframes) >= 2
+
+
+@pytest.mark.asyncio
+async def test_build_skeleton_b_roll_overrides_material_req_to_aigc(
+    task_with_events,
+):
+    """decisions/010 决策 6 / ISS-023: BRollSegment 中存在非「人物主导」段时
+    Slot.material_req → AI生成画面。优先级高于字幕检测信号——含字幕的
+    slot 仍被标记为 AI 补画面，因为 b_roll 子能力的判断更直接对应"画面
+    构成"维度。"""
+    task_id, _ = task_with_events
+    from app.ir.phase1a_report import BRollSegment
+
+    report = Phase1AReport(
+        scenes=[Phase1AScene(idx=0, start_sec=4.0, end_sec=6.0)],
+        captions=[
+            Phase1ACaptionEvent(
+                style=CaptionStyle(),
+                start=4.5,
+                end=5.5,
+                bbox_norm_0_999=(100, 800, 800, 100),
+                frames_appeared=[5.0],
+                confidence=0.9,
+            )
+        ],
+        b_roll_segments=[
+            BRollSegment(
+                scene_idx=0,
+                kind="全屏 B-roll",
+                start=4.0,
+                end=6.0,
+                confidence=0.85,
+            )
+        ],
+    )
+    slots, _palette, _ = await build_skeleton(report, 10.0, task_id=task_id)
+    assert len(slots) == 1
+    assert slots[0].material_req == "AI生成画面"
+
+    # 人物主导 不覆盖：仍按 captions 判 人物口播
+    report2 = report.model_copy(
+        update={
+            "b_roll_segments": [
+                BRollSegment(
+                    scene_idx=0,
+                    kind="人物主导",
+                    start=4.0,
+                    end=6.0,
+                    confidence=0.9,
+                )
+            ]
+        }
+    )
+    slots2, _, _ = await build_skeleton(report2, 10.0, task_id=task_id)
+    assert slots2[0].material_req == "人物口播"
