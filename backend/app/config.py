@@ -42,6 +42,28 @@ class Settings(BaseSettings):
     asr_device: Literal["cpu", "cuda"] = Field(default="cpu", alias="ASR_DEVICE")
     asr_compute_type: str = Field(default="int8", alias="ASR_COMPUTE_TYPE")
 
+    # ASR provider (Phase 2 后端切换). "glm" = GLM-ASR-2512 via PPIO gateway
+    # for high-precision Chinese transcription, then WhisperX wav2vec2 forced
+    # alignment for word-level timestamps; "whisperx" = original WhisperX
+    # transcribe+align path, kept as fallback for offline dev / no-network.
+    # GLM 路径在凭证缺失或调用失败时自动降级到 whisperx,所以默认 glm 安全。
+    asr_provider: Literal["glm", "whisperx"] = Field(default="glm", alias="ASR_PROVIDER")
+    asr_base_url: str = Field(
+        default="https://api.ppio.com/v3/glm-asr", alias="ASR_BASE_URL"
+    )
+    # Reserved — PPIO endpoint embeds the model in the URL, but switching to
+    # 智谱 BigModel 原生 (open.bigmodel.cn/api/paas/v4/audio/transcriptions)
+    # or another GLM-ASR variant needs this field.
+    model_asr: str = Field(default="glm-asr-2512", alias="MODEL_ASR")
+
+    # Unit segmentation thresholds (used by _words_to_units after alignment).
+    # 用户 8s 口播 100 字一条字幕的退化根因是 _UNIT_GAP_SEC=0.3 太宽 —— 流畅
+    # 中文口播词间停顿基本 < 0.3s,所有词被合并成一个 Unit。0.15 + 12 字硬上限
+    # + 4 字软下限是经验值,实际需要再调可由 .env 覆盖。
+    unit_gap_sec: float = Field(default=0.15, alias="UNIT_GAP_SEC")
+    unit_max_chars: int = Field(default=12, alias="UNIT_MAX_CHARS")
+    unit_min_chars: int = Field(default=4, alias="UNIT_MIN_CHARS")
+
     # HuggingFace cache lives under DATA_ROOT so weights co-locate with the
     # rest of the system's heavy assets (kb.sqlite / system/bgm_pool /
     # system/models — see 001ARCHITECTURE §4). Default is a DATA_ROOT-relative

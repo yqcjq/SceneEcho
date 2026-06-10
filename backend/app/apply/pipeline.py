@@ -206,20 +206,51 @@ async def apply_short(
     tasks_store.update_task(task_id, stage="2.asr", progress=0.10)
 
     # --------- Stage 2: ASR ----------
-    asr_res = await _safe(
-        "asr",
-        "asr",
-        transcribe(normalized, task_id=task_id),
-        task_id=task_id,
-        degraded=degraded,
-    )
-    ledger: TranscriptLedger
-    if asr_res.ok and asr_res.value:
-        ledger, _ = asr_res.value
-    else:
-        # Build an empty ledger so downstream stages don't NoneRef. They
-        # will short-circuit / emit their own warning events.
-        ledger = TranscriptLedger(units=[], language="zh", media_path=user_material_rel)
+    # Prefer the cached ledger written by recommend_templates_endpoint — the
+    # user's flow is recommend → apply on the same project with the same
+    # normalized.mp4, so re-running ASR (especially the GLM provider with a
+    # ~2s round trip) is pure waste. Falls through to live transcribe() when
+    # the cache is absent or fails to parse.
+    ledger: TranscriptLedger | None = None
+    transcript_path = project_dir / "transcript.json"
+    if transcript_path.exists():
+        try:
+            cached = TranscriptLedger.model_validate_json(
+                transcript_path.read_text(encoding="utf-8")
+            )
+            if cached.units:
+                ledger = cached
+                avg_lp = sum(u.avg_logprob for u in cached.units) / len(cached.units)
+                await bus.publish(
+                    task_id,
+                    VisionEvent(
+                        task_id=task_id,
+                        source="system",
+                        stage=f"{STAGE}.asr_reuse",
+                        semantic_label=f"复用推荐阶段 ledger · {len(cached.units)} 个 Unit",
+                        reasoning=(
+                            f"projects/{project_id}/transcript.json 存在且非空,跳过 ASR 重跑;"
+                            f" avg_logprob={avg_lp:.2f},language={cached.language}。"
+                        ),
+                        confidence=1.0,
+                        ir_target=IRTarget(ir_type="ProjectIR", path="sections.0.segments"),
+                    ),
+                )
+        except Exception as e:  # noqa: BLE001
+            log.warning("apply.transcript_reuse_failed", error=str(e))
+
+    if ledger is None:
+        asr_res = await _safe(
+            "asr",
+            "asr",
+            transcribe(normalized, task_id=task_id),
+            task_id=task_id,
+            degraded=degraded,
+        )
+        if asr_res.ok and asr_res.value:
+            ledger, _ = asr_res.value
+        else:
+            ledger = TranscriptLedger(units=[], language="zh", media_path=user_material_rel)
     tasks_store.update_task(task_id, stage="2.map", progress=0.35)
 
     # --------- Stage 3: mapping ----------

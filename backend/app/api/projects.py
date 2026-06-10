@@ -205,6 +205,18 @@ async def recommend_templates_endpoint(
     # warning event. So no outer try/except here.
     ledger, _ = await transcribe(normalized, task_id=task_id)
 
+    # Persist for apply_short to reuse — the user's flow is recommend →
+    # apply on the same project, both reading the same normalized.mp4. Skipping
+    # the second ASR call cuts apply latency by ~one-WhisperX-load (3-5s on
+    # WhisperX small / 1-2s on GLM). Stale guard isn't needed: the file is
+    # 1:1 with project_id, and re-uploading creates a new project_id.
+    try:
+        (project_dir / "transcript.json").write_text(
+            ledger.model_dump_json(indent=2), encoding="utf-8"
+        )
+    except OSError as e:
+        log.warning("recommend.transcript_persist_failed", error=str(e))
+
     # Sample a few frames for the VLM — re-use the extract pipeline's
     # frame sampler so we get first / mid / last.
     sample_frames: list[tuple[float, str]] = []
