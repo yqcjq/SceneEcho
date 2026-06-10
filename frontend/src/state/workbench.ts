@@ -35,6 +35,15 @@ export type WorkbenchView = "list" | "gantt" | "media_timeline";
 interface WorkbenchState {
   taskId: string | null;
   events: VisionEvent[];
+  /**
+   * Forward index: event_id -> VisionEvent. Same provenance as ``childIndex``
+   * (both are derived from the events array). Lets every "look up an event by
+   * id" consumer (causal chain anchors, vision pane, gantt parent edges,
+   * future filters) read in O(1) instead of scanning ``events`` linearly.
+   * Without this, mid-pane card rendering on a long run is O(N²) — N cards
+   * × N-scan-per-card on every event arrival.
+   */
+  eventsById: Map<string, VisionEvent>;
   /** Reverse index: parent_event_id -> child event_ids. Rebuilt on every append. */
   childIndex: Map<string, string[]>;
   /** O(1) dedup by event_id — SSE + history fetch can both deliver the same id. */
@@ -152,6 +161,7 @@ const preloadFrame = (url: string | null | undefined): void => {
 export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
   taskId: null,
   events: [],
+  eventsById: new Map(),
   childIndex: new Map(),
   eventIds: new Set<string>(),
   irSnapshot: {},
@@ -176,9 +186,12 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
     preloadFrame(event.frame_url);
     const nextIds = new Set(state.eventIds);
     nextIds.add(event.event_id);
+    const nextById = new Map(state.eventsById);
+    nextById.set(event.event_id, event);
     set({
       events: [...state.events, event],
       eventIds: nextIds,
+      eventsById: nextById,
       irSnapshot: writeIr(state.irSnapshot, event),
       childIndex: indexChild(state.childIndex, event),
       // Tail the newest event only while the user hasn't taken manual control.
@@ -210,6 +223,7 @@ export const useWorkbenchStore = create<WorkbenchState>((set, get) => ({
       taskId,
       events: [],
       eventIds: new Set<string>(),
+      eventsById: new Map(),
       irSnapshot: {},
       childIndex: new Map(),
       selectedEventId: null,

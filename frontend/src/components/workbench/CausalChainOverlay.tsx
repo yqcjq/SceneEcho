@@ -47,21 +47,23 @@ export interface ChainAnchorInfo {
  * (one step down) for an event. Returns short, lossy labels suitable
  * for inline anchor pills — "stage · semantic_label" trimmed to 80 chars.
  *
- * Lookup is O(1) on parent (linear-scan over events; small N) and uses
- * the store's ``childIndex`` for children. The childIndex is rebuilt
- * incrementally on every appendEvent (workbench.ts), so this stays
- * cheap even for long runs.
+ * Both lookups are O(1): parent reads the store's ``eventsById`` map and
+ * children read ``childIndex``. Both indices are derived from ``events``
+ * and rebuilt incrementally on every ``appendEvent`` (workbench.ts). The
+ * mid-pane renders a row per event; without the forward index, every
+ * resolve was O(N) and each list re-render was O(N²) over the whole
+ * run — the long-video case (500+ events) noticeably stuttered.
  */
 export function useChainResolver(): (
   event: VisionEvent,
 ) => ChainAnchorInfo {
-  const events = useWorkbenchStore((s) => s.events);
+  const eventsById = useWorkbenchStore((s) => s.eventsById);
   const childIndex = useWorkbenchStore((s) => s.childIndex);
 
   return React.useCallback(
     (event: VisionEvent): ChainAnchorInfo => {
       const parent = event.parent_event_id
-        ? events.find((e) => e.event_id === event.parent_event_id)
+        ? eventsById.get(event.parent_event_id) ?? null
         : null;
       const childIds = childIndex.get(event.event_id) ?? [];
       // Resolve at most 5 children to keep the inline pill compact.
@@ -69,7 +71,7 @@ export function useChainResolver(): (
       // which moves selection into the chain proper.
       const children = childIds
         .slice(0, 5)
-        .map((id) => events.find((e) => e.event_id === id))
+        .map((id) => eventsById.get(id))
         .filter((e): e is VisionEvent => e !== undefined)
         .map((e) => ({
           id: e.event_id,
@@ -82,21 +84,22 @@ export function useChainResolver(): (
         children,
       };
     },
-    [events, childIndex],
+    [eventsById, childIndex],
   );
 }
 
 /**
  * Resolve the full ancestor + descendant set of ``hoveredChainRoot`` so
  * downstream views can compare ``event_id ∈ chain`` in O(1). The set
- * memoises on hoveredChainRoot + childIndex so the recompute happens at
- * most once per hover transition.
+ * memoises on the store-provided ``eventsById`` + ``childIndex`` indices
+ * plus ``rootId``; ancestor walk reads ``eventsById`` directly instead of
+ * reconstructing a temporary by-id map per hover.
  */
 export function useChainHighlight(): {
   highlightSet: Set<string>;
   rootId: string | null;
 } {
-  const events = useWorkbenchStore((s) => s.events);
+  const eventsById = useWorkbenchStore((s) => s.eventsById);
   const childIndex = useWorkbenchStore((s) => s.childIndex);
   const rootId = useWorkbenchStore((s) => s.hoveredChainRoot);
 
@@ -104,11 +107,10 @@ export function useChainHighlight(): {
     if (!rootId) return new Set<string>();
     const set = new Set<string>([rootId]);
     // Walk up: follow parent_event_id links until null or self-loop.
-    const byId = new Map(events.map((e) => [e.event_id, e]));
-    let cursor = byId.get(rootId)?.parent_event_id ?? null;
+    let cursor = eventsById.get(rootId)?.parent_event_id ?? null;
     while (cursor && !set.has(cursor)) {
       set.add(cursor);
-      cursor = byId.get(cursor)?.parent_event_id ?? null;
+      cursor = eventsById.get(cursor)?.parent_event_id ?? null;
     }
     // Walk down: BFS over childIndex.
     const queue: string[] = [rootId];
@@ -122,7 +124,7 @@ export function useChainHighlight(): {
       }
     }
     return set;
-  }, [events, childIndex, rootId]);
+  }, [eventsById, childIndex, rootId]);
 
   return { highlightSet, rootId };
 }

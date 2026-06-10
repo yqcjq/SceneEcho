@@ -703,3 +703,46 @@ PLAN.md 1759-1870 声明阶段 2.6：把工作台从「事件列表 + 回放器�
 **解决方案**：
 按 PLAN 完整落地阶段 2.6：`VisionEvent` 加 `media_ts` / `media_ts_range` 双时间轴字段，`_build_event` 在调用客户端层按 frames 数自动填（1 frame → media_ts，>1 frames → range），实体事件 / 跨段事件由发射方显式填值；`_build_event` 顺手把 ir_value 始终写入解决 ReplayClient 复原难题。新增 `replay_client.py` 用 schema 验证从 events.jsonl 还原 chat_vision 调用（FIFO popleft + ValidationError → skip 实体事件 + ir_value=None+warning → 走 fallback 路径），完全不调网络。新增 `record_golden.py` typer CLI + `tests/integration/test_golden_runs.py` parametrize round-trip + `tests/fixtures/golden_runs/README.md`（录制 / 人工 review / 何时重录规范）；CI 加 `golden-runs` 与 `media_ts` 两步守卫。前端加 visx 五个模块化包；新增 `lib/aggregateEvents.ts` 提供 `buildGantt` / `buildMediaTimeline` 纯函数，配 `useMemo` 增量计算（同日二次核查后从 PLAN 提议的 backend 端点切回客户端聚合，避免 live 期间 N 次重复请求 + `_RESOURCE_DIRS` 跨 router 重复）；新增 `WorkbenchGantt.tsx`（visx ResponsiveContainer + scaleLinear / scaleBand + zoom + 因果链贝塞尔 dashed path + 外层 overflow-y-auto 纵向滚动；bar 时间口径 `start = (timestamp - duration_ms) - origin`、与 perf_counter 一致）/ `WorkbenchMediaTimeline.tsx`（顶部 `<video>` + 双向 sync 播放头 + ±0.5s 邻域高亮 + scrub rect 放 SVG 子节点首位避免吞 marker click + 因果链 dashed path）；`CausalChainOverlay.tsx` 用 `useChainResolver` / `useChainHighlight` / `ChainAnchorPill` 三件套实现"中栏 inline anchor + 跨视图 hover sync"——这是相对 PLAN SVG overlay 方案的第一性原理替代（决策详见 009 文档）；`Workbench.tsx` 顶栏加 3 选 1 segmented control + URL `?view=` 双向同步 + 切换不重 fetch + videoUrl 透传给媒体时间线。决策 / 已知代价 / Followup 详见 `decisions/009-phase2-6-replay-and-dual-axis.md`。
 
+
+---
+
+## [ISS-018] Phase 2.6 二核：工作台 by-id 事件索引缺失 + 聚合器字段拷贝重复
+
+**状态**：[已解决]
+**优先级**：[P1 严重]
+**类型**：[技术债]
+**发现日期**：2026-06-10
+**解决日期**：2026-06-10
+
+**现象**：
+对 ISS-017（[2026-06-10-2]）落地的 Phase 2.6 工作台双时间轴 + 因果链做隔次二核，发现两处第一性原理可清理项，违反 D40 单一真理源原则（"派生数据形状的纯函数应在数据自然汇聚处算一次"）：
+
+1. **工作台 store 缺失"按 event_id 查事件"派生索引**：`workbench.ts` 已经维护 `childIndex: Map<parentId, eventId[]>`（reverse 索引），但没有对称的 `eventsById: Map<event_id, VisionEvent>`（forward 索引）。三处消费方各自重新发明轮子：
+   - `CausalChainOverlay.useChainResolver`（第 64 / 72 行）每次卡片渲染做 `(1 + 5)` 次 `events.find` = O(N) per call；中栏 N 张卡片渲染 → O(N²)；500 事件下每帧 1.5M ops。
+   - `CausalChainOverlay.useChainHighlight`（第 107 行）每次 hover 触发 `useMemo` 重算时临时构造 `byId Map`（O(N) 重建）。
+   - `WorkbenchVisionPane.findEvent`（第 15 行）每次组件重渲染做 `events.find`，SSE 涌入期反复触发。
+   
+   `useChainResolver` 的 docstring 本身写着 "Lookup is O(1) on parent" 但代码是 `events.find`——文档与实现不符是同根冗余的副作用。
+
+2. **`aggregateEvents.ts` 中 `buildGantt` 与 `buildMediaTimeline` 共用 17 行 VisionEvent → GanttEvent 字段拷贝代码**（第 119-137 行 vs 第 182-200 行）：两个聚合器对同一份输入做"同结构、不同 start/end"的派生，但字段映射各写一份；未来 IR 加字段需改两处，违反 DRY。
+
+**后果**：
+- 1 在长视频 Phase 3 任务（500+ 事件）下中栏渲染 / 列表更新会肉眼可见卡顿；短视频任务（< 50 事件）虽不卡但仍是 N² 工作量浪费；docstring 与实现不符让"性能上 O(1)"的承诺成空话。
+- 2 让"VisionEvent → 视图侧形状"的映射有两份真理源，后续 IR 字段变化（如未来加 `model_ts_origin` / `cost_breakdown` 等）需要修两处；属于经典"在第一版里偷懒"的产物，二核就是用来偿还这笔债的。
+
+**初步判断**：
+已确认。第一性原理：
+- "按 event_id 查事件"是工作台所有视图（chain 锚点 / 视觉栏 / 甘特图父子边 / 未来过滤器）的共同诉求，应该作为派生 state 在数据自然汇聚处（store）一次性算出，与已有的 `childIndex` 对称形成 forward / reverse 一对索引。
+- 两个聚合器的字段映射是同一个语义函数（VisionEvent → 视图侧 GanttEvent shape），应抽出 `toGanttEvent(ev, start_ms, end_ms)` 纯函数，让两者都走同一份。
+
+**关联**：
+-> frontend/src/state/workbench.ts（eventsById 派生 state + appendEvent / reset 同步）
+-> frontend/src/components/workbench/CausalChainOverlay.tsx（useChainResolver / useChainHighlight 改 O(1)）
+-> frontend/src/components/workbench/WorkbenchVisionPane.tsx（findEvent helper 删除，改 O(1)）
+-> frontend/src/lib/aggregateEvents.ts（toGanttEvent helper + buildMediaTimeline 字段映射重复消除）
+-> docs/001ARCHITECTURE.md（D42 末尾补一句 eventsById 索引事实陈述）
+-> 004CHANGELOG.md [2026-06-10-3]
+
+**解决方案**：
+工作台 store 加 `eventsById: Map<event_id, VisionEvent>` 派生索引（与 `childIndex` 同源、`appendEvent` 时 O(1) 增量更新、`reset` 时清空）；`CausalChainOverlay` 的两个 hook 与 `WorkbenchVisionPane` 选中事件 lookup 改为读 store `eventsById` 而非 `events.find` / 临时 byId Map；`aggregateEvents.ts` 抽 `toGanttEvent(ev, start_ms, end_ms)` helper，`buildGantt` 传 origin-relative ms、`buildMediaTimeline` 传 0/0（X 轴是视频秒，不是壁钟），消除 17 行字段映射重复；ARCHITECTURE D42 末尾补一句关于 `eventsById` / `childIndex` forward+reverse 双索引的事实陈述。修改前后对外行为不变——`buildGantt` / `buildMediaTimeline` 返回结构相同（aggregateEvents.test.ts 测试通过）、`useChainResolver` / `useChainHighlight` 输出语义相同；改动是纯内部 O(N²) → O(N) 性能 + DRY 清理。
+

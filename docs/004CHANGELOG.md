@@ -1,3 +1,32 @@
+## [2026-06-10-3] refactor(workbench): hoist by-id event index to store + dedup gantt/media-timeline mapping [ISS-018]
+
+### 改动
+
+Phase 2.6 二核（同日）：核查实现层发现两处第一性原理可清理项，工作台 store 缺失"按 event_id 查事件"的派生索引导致每个消费方各自 `events.find`，违反 D40 单一真理源；甘特图与媒体时间线两个聚合器之间存在 ~17 行 VisionEvent → GanttEvent 字段拷贝重复。
+
+1. **store 加 `eventsById: Map<event_id, VisionEvent>` 派生索引**（与现有 `childIndex` 同源，都是 events 派生）：`appendEvent` 时 O(1) 增量更新，`reset` 时清空。让所有"按 id 查事件"的消费方读同一份索引。原方案下中栏每张卡片做 (1+5) 次 `events.find` = O(N) per call，N 张卡片渲染 → O(N²)；500 事件 / Phase 3 长视频任务每帧 1.5M ops，肉眼可见卡顿。
+2. **`CausalChainOverlay.useChainResolver` / `useChainHighlight` 改读 `eventsById`**：去掉 `events.find` 与 `useChainHighlight` 内每次 hover 临时构造的 `byId Map`。
+3. **`WorkbenchVisionPane` 选中事件 lookup 改 O(1)**：删除 `findEvent` helper，直接 `eventsById.get(selectedId)`，`null` 时 fallback 到最新事件保留原语义。
+4. **`aggregateEvents.ts` 抽 `toGanttEvent(ev, start_ms, end_ms)` helper**：`buildGantt` 与 `buildMediaTimeline` 共用同一个 VisionEvent → GanttEvent 字段映射，未来 IR 加字段只需改一处。`buildMediaTimeline` 的 17 行重复字段拷贝删除。
+
+- frontend/src/state/workbench.ts: 接口加 `eventsById` 派生 state（docstring 写明与 `childIndex` 同源 + 解决的 N² 性能问题）；`appendEvent` 增量写入；`reset` 清空
+- frontend/src/components/workbench/CausalChainOverlay.tsx: `useChainResolver` 用 `eventsById.get` 替代 `events.find`；`useChainHighlight` 直接消费 store `eventsById` 替代每次重建的临时 byId Map；docstring 同步更新（O(1) 而非"linear-scan over events; small N"的虚假声明）
+- frontend/src/components/workbench/WorkbenchVisionPane.tsx: 删除 `findEvent` helper；选中事件 lookup 走 `eventsById.get(selectedId) ?? null`，null 时 fallback 到 events[length-1]
+- frontend/src/lib/aggregateEvents.ts: 新增 `toGanttEvent(ev, start_ms, end_ms): GanttEvent` 纯函数；`buildGantt` 调用时传 origin-relative ms，`buildMediaTimeline` 调用时传 0/0（X 轴是视频秒，不是壁钟）
+
+### 涉及文件
+
+- frontend/src/state/workbench.ts：eventsById 派生 state + appendEvent / reset 同步
+- frontend/src/components/workbench/CausalChainOverlay.tsx：useChainResolver / useChainHighlight 改 O(1)
+- frontend/src/components/workbench/WorkbenchVisionPane.tsx：findEvent 改 O(1)
+- frontend/src/lib/aggregateEvents.ts：toGanttEvent helper + buildMediaTimeline 字段重复消除
+
+### 关联
+
+-> ISS-018
+
+---
+
 ## [2026-06-10-2] feat(phase2-6): wire wall-clock gantt + media-timeline + causal chain + ReplayClient regression [ISS-017]
 
 ### 改动

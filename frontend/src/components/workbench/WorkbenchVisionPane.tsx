@@ -10,11 +10,6 @@ import { EventBadge } from "./EventBadge.js";
 const DEFAULT_FRAME_W = 1080;
 const DEFAULT_FRAME_H = 1920;
 
-function findEvent(events: VisionEvent[], id: string | null): VisionEvent | null {
-  if (!id) return events[events.length - 1] ?? null;
-  return events.find((e) => e.event_id === id) ?? null;
-}
-
 export interface WorkbenchVisionPaneProps {
   /** /data/* URL of the task's normalized.mp4. ``null`` hides the video toggle. */
   videoUrl: string | null;
@@ -24,11 +19,18 @@ export const WorkbenchVisionPane: React.FC<WorkbenchVisionPaneProps> = ({
   videoUrl,
 }) => {
   const events = useWorkbenchStore((s) => s.events);
+  const eventsById = useWorkbenchStore((s) => s.eventsById);
   const selectedId = useWorkbenchStore((s) => s.selectedEventId);
   const mode = useWorkbenchStore((s) => s.visionPaneMode);
   const setMode = useWorkbenchStore((s) => s.setVisionPaneMode);
   const autoFollow = useWorkbenchStore((s) => s.autoFollow);
-  const event = findEvent(events, selectedId);
+  // Selected event lookup is O(1) via ``eventsById``; falls back to the
+  // most recent event when nothing is pinned. Without the forward index
+  // this used to scan ``events`` linearly on every render.
+  const event: VisionEvent | null =
+    selectedId === null
+      ? events[events.length - 1] ?? null
+      : eventsById.get(selectedId) ?? null;
 
   // Natural dimensions of the currently-displayed frame. We read them from
   // <img onLoad> so bbox coordinates (which the VLM emits in 0–999 normalized
