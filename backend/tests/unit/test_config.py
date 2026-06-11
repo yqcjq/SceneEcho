@@ -35,6 +35,30 @@ def test_settings_asr_model_env_override(monkeypatch):
     assert s.asr_compute_type == "int8"
 
 
+def test_settings_exposes_aigc_broll_defaults():
+    """AIGC B-roll fields default to "disabled" (empty provider, 6s ceiling)."""
+    s = Settings()
+    assert s.aigc_broll_provider == ""
+    assert s.aigc_broll_api_key is None
+    assert s.aigc_broll_max_duration_sec == 6.0
+
+
+def test_settings_aigc_broll_env_override(monkeypatch):
+    monkeypatch.setenv("AIGC_BROLL_PROVIDER", "ppio")
+    monkeypatch.setenv("AIGC_BROLL_API_KEY", "sk-aigc-xyz")
+    s = Settings()
+    assert s.aigc_broll_provider == "ppio"
+    assert s.aigc_broll_api_key == "sk-aigc-xyz"
+
+
+def test_settings_aigc_max_duration_parses_float(monkeypatch):
+    """AIGC_BROLL_MAX_DURATION_SEC arrives as an env string; parsed to float."""
+    monkeypatch.setenv("AIGC_BROLL_MAX_DURATION_SEC", "4.5")
+    s = Settings()
+    assert isinstance(s.aigc_broll_max_duration_sec, float)
+    assert s.aigc_broll_max_duration_sec == 4.5
+
+
 def test_apply_hf_env_points_into_data_root(tmp_path, monkeypatch):
     """HF_HOME / HUGGINGFACE_HUB_CACHE land under DATA_ROOT/.cache/huggingface.
 

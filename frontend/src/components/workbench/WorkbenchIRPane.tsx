@@ -1,6 +1,6 @@
 import React from "react";
 import get from "lodash/get.js";
-import { Tree } from "react-arborist";
+import { Tree, type TreeApi } from "react-arborist";
 import { useWorkbenchStore } from "../../state/workbench.js";
 
 interface IrNode {
@@ -103,6 +103,9 @@ export const WorkbenchIRPane: React.FC = () => {
   // up; the previous "early-return placeholder" branch hid the ref behind
   // a conditional, leaving the observer permanently unwired and the Tree
   // stuck at its default width.
+  const treeRef = React.useRef<TreeApi<IrNode> | null>(null);
+  const [irAllCollapsed, setIrAllCollapsed] = React.useState(false);
+
   const containerRef = React.useRef<HTMLDivElement | null>(null);
   const [size, setSize] = React.useState<{ w: number; h: number }>({
     w: 360,
@@ -128,9 +131,28 @@ export const WorkbenchIRPane: React.FC = () => {
   return (
     <div className="flex h-full flex-col">
       <div className="border-b border-border px-4 py-3">
-        <h2 className="font-serif text-lg text-primary">
-          AI 写入 IR · <span className="font-mono text-sm text-secondary">{irTypeLabel}</span>
-        </h2>
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="font-serif text-lg text-primary">
+            AI 写入 IR · <span className="font-mono text-sm text-secondary">{irTypeLabel}</span>
+          </h2>
+          {root.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => {
+                if (irAllCollapsed) {
+                  treeRef.current?.openAll();
+                  setIrAllCollapsed(false);
+                } else {
+                  treeRef.current?.closeAll();
+                  setIrAllCollapsed(true);
+                }
+              }}
+              className="shrink-0 rounded-sm border border-border bg-subtle px-2 py-0.5 font-mono text-[11px] text-secondary hover:text-primary"
+            >
+              {irAllCollapsed ? "展开全部" : "折叠全部"}
+            </button>
+          ) : null}
+        </div>
         <p className="text-tertiary text-xs">点击展开/收起节点；点击叶子值查看全文；最近写入字段 800ms 高亮</p>
       </div>
       <div ref={containerRef} className="flex-1 overflow-hidden">
@@ -140,6 +162,7 @@ export const WorkbenchIRPane: React.FC = () => {
           </div>
         ) : (
           <Tree<IrNode>
+            ref={treeRef}
             data={root}
             openByDefault
             rowHeight={26}

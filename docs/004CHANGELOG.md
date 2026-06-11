@@ -1,3 +1,81 @@
+## [2026-06-11-1] feat(phase5-broll): wire aigc provider + apply/fill aigc_broll strategy + editor opt-in switch [ISS-028]
+
+### 改动
+
+decisions/013 锁定的 Phase 5 B-roll 子集落地——AIGC 生成层从 11 行占位升级为真正的 provider 抽象，`apply/fill.py` 接通新 `aigc_broll` 策略，Editor 项目级勾选驱动整条链路。功能默认关闭 (`AIGC_BROLL_PROVIDER=""`) ，缺凭据时全链路降级到 reuse；勾选 + 配 key + 配 model 后才调真第三方 API。
+
+后端选用**文本生图 + ffmpeg 把静图循环成 mp4** 的路径，而非异步 video gen——视频侧的运动由模板 `zoom_keyframes` 在渲染时附加，生成 API 只产出静态画面。这样消费端契约（`aigc_broll_path` → mp4，renderer `<OffthreadVideo>` + preflight 都不变）对生成层后端透明，今后接 Flux / SD3.5 / Kolors / DALL-E / 智谱 CogView 任何 OpenAI-compat 图像 API 都只动 provider 一文件。
+
+1. **Provider 抽象**：`backend/app/agent/aigc.py` 全量重写为真实模块——`AIGCProviderError` 基类 + 四子类（MissingCredentials / QuotaExceeded / APIError / ContentRejected）；`generate_broll(prompt, duration_sec, style_hint, project_id, *, task_id, parent_event_id)` 与 `generate_sticker_image` 同 hash 缓存层（`_cache_key` 用 sha256 over `(prompt, sorted style_hint, round(duration,2))` ，命中 `data/aigc/{broll,stickers}/{hash}.{mp4,png}` 直接返回路径）；缓存未命中走 `_get_broll_provider(name)` 工厂动态 import `aigc_providers/{name}.py` 调 `provider.generate_image(prompt, style_keywords)` 拿图像字节 → `_retry` 复用 `llm.client._is_retryable` + `_RETRY_DELAYS` 重试 5xx / 网络错误（4xx / 429 / 内容审查直接抛子类）→ broll 路径用新增的 `render.ffmpeg.image_to_video` 把静图循环成 duration 秒的 mp4 落到缓存（sticker 路径直接写 png）；事件统一在 aigc.py 这层调 `bus.publish(VisionEvent(stage="5.aigc.broll", media_ts_range=(0,duration), ...))` ——provider 不发事件、不反向 import apply/api。
+2. **Provider 实现**：`backend/app/agent/aigc_providers/` 子包（`__init__.py` + `ppio.py`）。PPIO 实现 `generate_image` 单方法（OpenAI-compatible `/v1/images/generations` 模式：body `{model, prompt, n, size, response_format=b64_json}` → 解 `data[0].b64_json` 或 `data[0].url` 兜底），对齐 GLM-ASR 的 PPIO bearer + httpx 范式；HTTP 状态码 → typed exception 映射（401/403→Missing，429→Quota，400 含审核关键字→ContentRejected，5xx 透传 httpx 让重试层判定，其余 4xx→APIError）；config 加 `AIGC_BROLL_BASE_URL` + `AIGC_BROLL_MODEL` 让 endpoint 与具体模型 id 可配置（PPIO 支持 Flux / SD 3.5 / Kolors 等多种图像模型，用户按账户选择）。
+3. **ffmpeg helper**：`backend/app/render/ffmpeg.py` 新增 `image_to_video(src_image, dst_path, *, duration_sec, width, height, fps)`，用 `-loop 1 -t {duration} -tune stillimage` 把 PNG/JPG 循环成 H.264 mp4；保留 `force_original_aspect_ratio=decrease + pad` 与 `normalize` 一致的 letterbox 形状，避免用户素材与 AIGC 段视觉割裂。生成的 mp4 是**静止**的——运动留给渲染端 ZoomLayer，避免 ffmpeg 的 zoompan 与模板 zoom_keyframes 双重叠加。
+4. **apply/fill 接通新策略**：`backend/app/apply/gaps.py::_strategy_for` 加 `AI生成画面 → ("模板期望 AI 补画面（B-roll）", "aigc_broll")` 分支（gaps.py 不知 allow_aigc_broll，只标 intent）。`apply/fill.py::fill_gaps` 加 `project_id` 形参 + 删除原 short-circuit log + 主循环加 `aigc_broll` 优先级最高分支：勾选 → 走 `_fill_aigc_broll`（`_synthesize_broll_prompt` 调 `chat_text(stage="2.fill.aigc_broll")` 用新 prompt `5_aigc_broll.md` 把 ASR ±2 Unit 上下文 + template.tags scene/function 翻成英文 ≤ 80 词 image prompt + 风格关键词，LLM 缺 creds 自动落地确定性 fallback prompt → 调 `generate_broll` 写 `PlacedSegment.aigc_broll_path` + `use_aigc_broll=True`，`src_timerange=(0,duration), speed=duration/nominal` 保 output_span = nominal 让 timeline 与 mapping 预留对齐），catch `AIGCProviderError` 降级 `_reuse_segment_for` + `FillOutcome.degraded_msg` 带子类名；未勾选 → 直接 reuse，无 LLM / 无 generate_broll 调用 (D10)。
+5. **Pipeline 拼装**：`backend/app/apply/pipeline.py` 透传 `project_id` 进 `fill_gaps`；`STAGE_TO_IR_PATH` 加 `"5.aigc.broll": "sections.0.segments"`；fill 收集每个 outcome.degraded_msg → 等 `all_segments = sorted(...)` 后用对象身份反查 final segment index 写 `degraded[f"sections.0.segments.{idx}.aigc_broll"]` ，UI banner 可直接跳到出错的 PlacedSegment。
+6. **API 成本汇总**：`backend/app/api/projects.py::get_project` 加 `aigc_cost_summary: {broll_calls, broll_cache_hits, broll_failures, total_seconds_spent}` 字段，从最近 `apply_short` 任务 events.jsonl 聚合（`5.aigc.broll` 事件 reasoning 中的 `cache_hit=True/False` 字面 + duration_ms + ProjectIR.degraded 中 `*.aigc_broll` 键计数），无 AIGC 活动返 `null`。镜像 `get_recommendations` 的"反查 events"模式（D36 真理源），不引入新存储字段。`preview-props` 段补 `use_aigc_broll` / `aigc_broll_path` 让前端 CSS 预览能切源。
+7. **Renderer**：`renderer/src/render.ts` 预扫 IR 段建 `aigcBrollUrls: Record<path, publicDataUrl>` 一次性塞 inputProps（URL 编码集中在 render.ts 一处）。`renderer/src/compositions/Project.tsx` 段渲染时 `seg.aigc_broll_path && aigcBrollUrls[...]` → `<OffthreadVideo src={aigcUrl} muted={use_aigc_broll}>`，否则回 userMaterialUrl；AIGC 段静音避免与口播 overlap。`renderer/src/preflight.ts` 加 `aigc_broll` category 校验文件存在，与 user_material / bgm_track / sticker.generated_image 一视同仁。
+8. **Frontend**：`frontend/src/api/index.ts` `ProjectResponse` 加 `aigc_cost_summary?: AigcCostSummary | null`；`PreviewProps` segment 补 `use_aigc_broll` / `aigc_broll_path`。`frontend/src/components/RemotionPlayer.tsx` 活动段 `aigc_broll_path` 非空 → `<video src={dataUrl(...)} muted>` 切到 AIGC 资源（按段动态切源）。`frontend/src/pages/Editor.tsx` step-2 模板推荐卡片下方加「允许 AI 补画面」checkbox + 风险披露段（"调第三方 / 时延与成本不可预测 / 仅个人 demo / 遵守审查与版权"），`onApply` 透传 `allowAigcBroll` 给 `applyTemplate`；项目切换时重置为 false（D10 — 不跨项目残留）；step-3 apply 完成后展示成本面板（已调 / 命中 / 失败 / 累计秒）。
+9. **Config + .env**：`backend/app/config.py` `Settings` 加 5 个字段（`aigc_broll_provider: str = ""` / `aigc_broll_api_key: str | None = None` / `aigc_broll_base_url: str = "https://api.ppio.com/openai/v1/images/generations"` / `aigc_broll_model: str = ""` / `aigc_broll_max_duration_sec: float = 6.0`）。`.env` + `.env.example` 加 AIGC 段注释 + 默认值，包含填什么 model id 的指引。
+10. **CI 守卫 + 测试**：`scripts/check_event_emission.py` `TRACKED_NAME_PATTERNS` 加 `generate_broll` / `generate_sticker_image` ，强制两函数体含 `bus.publish` 调用（D13 静态守卫）。`backend/tests/unit/test_aigc.py` 新增——_cache_key 稳定性 / 缺 provider 抛 / 缓存命中跳 provider 跳 ffmpeg / duration clamp / provider error 透传 / sticker happy path 共 6 测试，统一 monkeypatch `image_to_video` 避免 ffmpeg subprocess。`backend/tests/unit/test_apply.py` 扩三测试覆盖 fill_gaps 三态：allow=False 不调 generate_broll / allow=True 缺 creds 降级 reuse + degraded_msg / allow=True mock provider + stub ffmpeg → segment 带 aigc_broll_path。`backend/tests/unit/test_config.py` 扩 3 测试覆盖 AIGC 字段默认 / env 覆盖 / max_duration 浮点 parse。`backend/tests/integration/test_apply_phase2.py` 加 e2e 测试：apply_short + 双 slot（voice + AI生成画面）+ mock generate_image + stub image_to_video → 验证 segment.aigc_broll_path 写入 + 5.aigc.broll 事件 + media_ts_range。
+
+### 涉及文件
+
+- `backend/app/agent/aigc.py`：占位 → 实模块（typed exceptions + hash 缓存 + 工厂动态 import + generate_broll [image+ffmpeg→mp4] / generate_sticker_image [image] + 重试复用 _is_retryable）
+- `backend/app/agent/__init__.py`：移除占位 async def，docstring 指向 aigc.py
+- `backend/app/agent/aigc_providers/__init__.py`：新增——子包 docstring + 设计契约
+- `backend/app/agent/aigc_providers/ppio.py`：新增——PPIO 图像生成 provider（OpenAI-compat /images/generations，单方法 `generate_image` + b64_json/url 兜底 + typed errors 映射）
+- `backend/app/render/ffmpeg.py`：新增 `image_to_video` helper——把静图循环成 H.264 mp4，与 normalize 同 letterbox
+- `backend/app/llm/prompts/5_aigc_broll.md`：新增——image prompt 合成 system prompt（明示运动由渲染端 zoom_keyframes 附加，prompt 不应描述运镜）
+- `backend/app/apply/gaps.py`：`_strategy_for` 加 `AI生成画面 → aigc_broll`
+- `backend/app/apply/fill.py`：`_BrollPromptResult` + `FillOutcome.degraded_msg` + `_synthesize_broll_prompt` + `_fill_aigc_broll` + `fill_gaps` 加 `project_id` + 删 short-circuit + aigc_broll 分支 + 事件用 outcome.strategy
+- `backend/app/apply/pipeline.py`：`STAGE_TO_IR_PATH` += 5.aigc.broll；`fill_gaps` 透传 project_id；按 final 段索引写 `ProjectIR.degraded`
+- `backend/app/api/projects.py`：`_aigc_cost_summary` helper + `get_project` 返回新增 `aigc_cost_summary` 字段；`preview-props` 段补 use_aigc_broll/aigc_broll_path
+- `backend/app/config.py`：`Settings` 加 5 个 AIGC 字段（含 `aigc_broll_model`）
+- `.env` + `.env.example`：AIGC 段注释 + 默认值（base_url 指向 PPIO 图像端点）
+- `scripts/check_event_emission.py`：`TRACKED_NAME_PATTERNS` += `generate_broll` / `generate_sticker_image`
+- `renderer/src/render.ts`：build aigcBrollUrls map 塞 inputProps
+- `renderer/src/compositions/Project.tsx`：`ProjectIRProps.aigcBrollUrls` + 段视频 src 切换 + AIGC 段静音
+- `renderer/src/preflight.ts`：`aigc_broll` category 资源校验
+- `frontend/src/api/index.ts`：`AigcCostSummary` 类型 + `ProjectResponse.aigc_cost_summary` + `PreviewProps` 段加 use_aigc_broll/aigc_broll_path
+- `frontend/src/components/RemotionPlayer.tsx`：`PreviewSegment` 加 AIGC 字段 + 视频 src 按活动段切换
+- `frontend/src/pages/Editor.tsx`：`allowAigcBroll` 状态 + checkbox + 风险披露 + 透传到 applyTemplate + step-3 成本面板
+- `backend/tests/unit/test_aigc.py`：新增——provider-agnostic 6 测试
+- `backend/tests/unit/test_apply.py`：扩——fill_gaps aigc 三态 3 测试
+- `backend/tests/unit/test_config.py`：扩——AIGC 字段 3 测试
+- `backend/tests/integration/test_apply_phase2.py`：扩——apply_short + AIGC e2e 1 测试
+- `docs/003ISSUES.md`：ISS-028 [讨论中] → [已解决] + 解决日期/方案
+- `docs/001ARCHITECTURE.md`：链路 F + 调用方向约束 + §4 存储分类同步
+- `docs/002STRUCTURE.md`：agent/aigc.py 移除 🚧 占位 + aigc_providers/ 新条目 + 5_aigc_broll.md 新条目
+
+### 关联
+
+-> ISS-028
+-> decisions/013-phase5-broll-fill-without-lab-detection.md
+
+---
+
+## [2026-06-10-9] docs(decisions): record Phase 5 B-roll skip-ahead scope and reject lab-subcap proposal [ISS-028]
+
+### 改动
+- 新增 `docs/decisions/013-phase5-broll-fill-without-lab-detection.md`:跨 Phase 3/4 提前实施 Phase 5 B-roll 生成最小子集的范围决策;明确否定四个备选方案——A（在 Lab 加用户素材单调度检测子能力,语义错位 + 重复 b_roll）/ B（严格按依赖链先做 3/4/7,demo 节奏推荐 ≠ 物理依赖）/ C（一次性完整 Phase 5 含封面 + 多 provider,工作量超本期范围）/ D（自动决定 slot 启用 AIGC,违反 D10 用户主动触发硬约束）;本期范围收窄到 `agent/aigc.py` provider 抽象 + `apply/fill.py` aigc_broll 策略 + Editor 项目级勾选;6 项已知代价全部带 Followup 标注（短素材演示价值 / API 延迟成本 / 跨阶段回头补设计冲突 / D10 段级退化项目级 / sticker 接入但不触发 / prompt 注入防御推迟）。
+- 新增 `docs/future-plans/005-aigc-cover-generation.md`:封面生成推迟登记,触发条件与实施依赖说明;沿用 `agent/aigc.py` 共享 provider 抽象层,落地时只需补 `generate_cover` 签名 + ProjectIR 顶层封面字段。
+- 新增 `docs/future-plans/006-aigc-broll-provider-selection.md`:多 provider 选型推迟登记;含 Runway / Sora / Kling / 即梦 / SD-Video 五条候选维度对比表（中文友好度 / 延迟 / 时长上限 / 风格控制 / 商业授权 / 单价），触发条件含调用成功率 / 单条延迟 P99 / 风格覆盖度三个量化指标。
+- `docs/003ISSUES.md` 末尾追加 ISS-028 [讨论中]:Phase 5 B-roll 跨级实施的实施 issue,关联 decisions/013 + future-plans/005-006;含 13 处 backend / renderer / frontend 改动点的 文件级关联清单。
+- `docs/003ISSUES.md` 追加 ISS-029 [暂缓]:Phase 3 长视频分步审核闭环跟进占位 issue,前置依赖 ISS-028;暂缓原因含 ISS-028 落地后再评估 long_pipeline Step 07 与 fill.py 接入的设计冲突。
+- `docs/003ISSUES.md` 追加 ISS-030 [暂缓]:AIGC 段级勾选升级占位 issue,前置依赖 ISS-028;暂缓原因含项目级开关实际试用前难以评估段级是否真高频被需要。
+
+按 `docs/000README.md` 规范"只写当前事实"——本次仅记录决策与计划,实施代码留给 ISS-028 后续 PR;`001ARCHITECTURE.md` 与 `002STRUCTURE.md` 不动（agent/aigc.py 仍为占位 / apply/fill.py 仍 ignore allow_aigc_broll，事实未变）,等 ISS-028 实施完成时按工作流补 ARCHITECTURE 链路 + STRUCTURE 文件描述。
+
+### 涉及文件
+- docs/decisions/013-phase5-broll-fill-without-lab-detection.md:新增——决策原文 + 否定四方案 + 6 项 Followup 标注的已知代价 + 6 项不在本期范围
+- docs/future-plans/005-aigc-cover-generation.md:新增——封面生成推迟规划
+- docs/future-plans/006-aigc-broll-provider-selection.md:新增——多 provider 选型推迟规划 + 五候选对比表
+- docs/003ISSUES.md:追加 ISS-028 / ISS-029 / ISS-030 三条
+
+### 关联
+-> ISS-028
+-> decisions/013-phase5-broll-fill-without-lab-detection.md
+
+---
 
 ## [2026-06-10-8] feat(asr): swap WhisperX for PPIO GLM-ASR + wav2vec2 align with smart Unit splitting and recommend→apply ledger reuse [ISS-027]
 

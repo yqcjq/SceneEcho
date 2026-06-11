@@ -54,13 +54,27 @@ export async function renderProjectIR(
     ? publicDataUrl(projectIR.bgm_track)
     : null;
 
-  log.info({ meta, userMaterialAbs, userMaterialUrl, bgmUrl }, "render_start");
+  // Phase 5 (ISS-028): pre-resolve every AIGC B-roll path to its /data URL
+  // here so the composition doesn't re-implement the URL encoding. Only
+  // segments with aigc_broll_path set are mapped — non-AIGC segments fall
+  // back to userMaterialUrl in Project.tsx.
+  const aigcBrollUrls: Record<string, string> = {};
+  for (const sec of projectIR.sections ?? []) {
+    for (const seg of sec.segments ?? []) {
+      const p = seg.aigc_broll_path;
+      if (typeof p === "string" && p && !aigcBrollUrls[p]) {
+        aigcBrollUrls[p] = publicDataUrl(p);
+      }
+    }
+  }
+
+  log.info({ meta, userMaterialAbs, userMaterialUrl, bgmUrl, aigcCount: Object.keys(aigcBrollUrls).length }, "render_start");
   await reportProgress(taskId, 0.1, "bundling");
 
   const bundleUrl = await getBundleUrl();
   await reportProgress(taskId, 0.3, "selecting");
 
-  const inputProps = { projectIR, userMaterialUrl, bgmUrl };
+  const inputProps = { projectIR, userMaterialUrl, bgmUrl, aigcBrollUrls };
   // calculateMetadata in Root.tsx handles width/height/fps/duration.
   const composition = await selectComposition({
     serveUrl: bundleUrl,

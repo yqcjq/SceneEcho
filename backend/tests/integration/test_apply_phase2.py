@@ -611,3 +611,123 @@ async def test_apply_pipeline_runs_bgm_mix_when_bgm_selected(
     # bgm_track now points at the ducked file.
     assert ir.bgm_track is not None
     assert ir.bgm_track.endswith("bgm_ducked.aac")
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 (ISS-028) · apply_short with allow_aigc_broll=True end-to-end
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_apply_pipeline_writes_aigc_broll_path_when_opted_in(
+    task_with_events, no_credentials, monkeypatch
+):
+    """allow_aigc_broll=True + mocked provider → ProjectIR has a segment with
+    aigc_broll_path set and ProjectIR.degraded has no aigc entry. The cost
+    summary derived from events.jsonl reflects the call counts.
+    """
+    from app.agent import aigc as aigc_mod
+    from app.apply import pipeline as ap_pipeline
+    from app.config import get_settings
+    from app.event_bus import get_event_bus
+    from app.ir.project import ProjectIR
+    from app.ir.template import Slot, StyleRule
+    from app.kb import store as kb_store
+
+    task_id, _ = task_with_events
+    settings = get_settings()
+
+    project_id = "prj_aigc_e2e"
+    project_dir = settings.data_root / "projects" / project_id
+    project_dir.mkdir(parents=True, exist_ok=True)
+    (project_dir / "normalized.mp4").write_bytes(b"\x00")
+
+    # Two slots: one voice (so mapping has something to bind), one AI生成画面
+    # (so detect_gaps emits an aigc_broll gap).
+    template = _make_template(
+        slots=[
+            Slot(
+                role="开头",
+                duration={"min": 1.0, "nominal": 2.0, "max": 3.0},
+                material_req="人物口播",
+                style=StyleRule(caption_palette_idx=0),
+            ),
+            Slot(
+                role="主体",
+                duration={"min": 1.0, "nominal": 3.0, "max": 4.5},
+                material_req="AI生成画面",
+                style=StyleRule(),
+            ),
+        ],
+    )
+    template.id = "tpl_aigc_e2e"
+    kb_store.save_template(template, last_extract_task_id=task_id)
+
+    # AIGC env on; LLM stays cleared (no_credentials) so prompt synth deterministic-fallbacks.
+    monkeypatch.setenv("AIGC_BROLL_PROVIDER", "ppio")
+    monkeypatch.setenv("AIGC_BROLL_API_KEY", "fake")
+    monkeypatch.setenv("AIGC_BROLL_MODEL", "test/fake-image-model")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    image_calls: list[tuple[str, list[str]]] = []
+
+    class _Fake:
+        async def generate_image(self, prompt, *, style_keywords):
+            image_calls.append((prompt, list(style_keywords)))
+            return b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+    monkeypatch.setattr(aigc_mod, "_get_broll_provider", lambda _name: _Fake())
+
+    # Stub ffmpeg so the integration test doesn't shell out a real subprocess
+    # for the still-image-to-mp4 conversion. The renderer is out of scope here.
+    ffmpeg_calls: list[float] = []
+
+    def _fake_image_to_video(src_image, dst_path, *, duration_sec, **_kw):
+        ffmpeg_calls.append(duration_sec)
+        Path(dst_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst_path).write_bytes(b"FAKE_MP4")
+        return Path(dst_path)
+
+    monkeypatch.setattr(aigc_mod, "image_to_video", _fake_image_to_video)
+
+    monkeypatch.setattr(
+        ap_pipeline.ffx, "get_media_info", lambda *_a, **_k: {"format": {"duration": 2.0}}
+    )
+
+    async def _fake_transcribe(*_a, **_kw):
+        from app.ir.ledger import TranscriptLedger, Unit
+
+        ledger = TranscriptLedger(
+            units=[Unit(id=0, text="一段口播开场白", start=0.0, end=2.0, avg_logprob=-0.2)],
+            language="zh",
+            media_path=f"projects/{project_id}/normalized.mp4",
+        )
+        return ledger, []
+
+    monkeypatch.setattr(ap_pipeline, "transcribe", _fake_transcribe)
+
+    ir = await ap_pipeline.apply_short(
+        project_id, "tpl_aigc_e2e", task_id=task_id, allow_aigc_broll=True
+    )
+    assert isinstance(ir, ProjectIR)
+    assert ir.allow_aigc_broll is True
+    # Provider image gen + ffmpeg conversion each ran exactly once for the AIGC slot.
+    assert len(image_calls) == 1
+    assert len(ffmpeg_calls) == 1
+    # One segment must be the AIGC segment with the cached path set.
+    aigc_segs = [s for s in ir.sections[0].segments if s.use_aigc_broll]
+    assert len(aigc_segs) == 1
+    seg = aigc_segs[0]
+    assert seg.aigc_broll_path is not None
+    assert seg.aigc_broll_path.startswith("aigc/broll/")
+    assert (settings.data_root / seg.aigc_broll_path).exists()
+    # Successful path → no degraded entries on the AIGC slot.
+    assert not any(k.endswith(".aigc_broll") for k in ir.degraded)
+
+    # The 5.aigc.broll event made it onto the bus.
+    bus = get_event_bus()
+    aigc_events = [e for e in bus.replay(task_id) if e.stage == "5.aigc.broll"]
+    assert len(aigc_events) == 1
+    assert aigc_events[0].media_ts_range == (0.0, min(3.0, settings.aigc_broll_max_duration_sec))
+
+    get_settings.cache_clear()  # type: ignore[attr-defined]

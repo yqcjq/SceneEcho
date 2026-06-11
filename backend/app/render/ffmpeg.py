@@ -162,6 +162,65 @@ def extract_thumbnail(src_path: str | Path, dst_path: str | Path, at: float = 0.
     return dst
 
 
+def image_to_video(
+    src_image: str | Path,
+    dst_path: str | Path,
+    *,
+    duration_sec: float,
+    width: int = 1080,
+    height: int = 1920,
+    fps: int = 30,
+) -> Path:
+    """Loop a still image into an H.264 mp4 of ``duration_sec`` seconds.
+
+    Phase 5 (ISS-028) AIGC backend uses an image-generation API rather than
+    a video-generation one, so ``agent/aigc.py`` produces a PNG/JPG and
+    converts it here to mp4 — keeping the ``aigc_broll_path`` consumer
+    contract (renderer's OffthreadVideo + preflight) unchanged.
+
+    The slot's existing zoom_keyframes provide motion at render time
+    (renderer's ZoomLayer), so this conversion intentionally outputs a
+    *static* loop — adding a Ken Burns / zoompan filter here would compose
+    with the slot's zoom and double-animate.
+
+    Letterbox via ``force_original_aspect_ratio=decrease + pad`` mirrors
+    :func:`normalize` for visual consistency between user material and
+    AIGC segments. ``-tune stillimage`` keeps the encoder cheap.
+    """
+    dst = Path(dst_path)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    vf = (
+        f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+        f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"fps={fps}"
+    )
+    cmd = [
+        ffmpeg_bin(),
+        "-y",
+        "-loop",
+        "1",
+        "-framerate",
+        str(fps),
+        "-i",
+        str(src_image),
+        "-t",
+        f"{max(0.04, float(duration_sec)):.3f}",
+        "-vf",
+        vf,
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-tune",
+        "stillimage",
+        "-movflags",
+        "+faststart",
+        str(dst),
+    ]
+    subprocess.run(cmd, capture_output=True, text=True, check=True)
+    return dst
+
+
 def extract_audio(src_path: str | Path, dst_path: str | Path) -> Path:
     """Extract the audio track of a media file as 44.1k stereo WAV.
 

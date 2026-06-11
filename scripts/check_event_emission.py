@@ -35,6 +35,8 @@ TRACKED_NAME_PATTERNS = (
     "classify_transitions",
     "classify_color_lut",
     "classify_caption_function",
+    "generate_broll",
+    "generate_sticker_image",
 )
 
 EXEMPT_FILES = (

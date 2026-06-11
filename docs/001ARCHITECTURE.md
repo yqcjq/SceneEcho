@@ -77,7 +77,7 @@ IR（pydantic 模型）位于 `backend/app/ir/`，作为「人 / AI / 渲染器�
 - `extract/*` 子能力模块只 import `app/{ir,event_bus,llm,extract,logging,config,render}`；不反向依赖 `api/` 或 `understand/`，调度 / 编排在 `api/lab.py`（dev）以及 `extract/pipeline.py`（1B 完整 DAG）里。
 - `kb/*` 只 import `app/{ir,event_bus,llm,extract,frame_sampler,config,logging}`；`api/templates.py` 调 `kb.store`，`extract/pipeline.py` 调 `kb.store` 落库。`kb` 不反向依赖 `api/`。
 - `apply/*` 只 import `app/{ir,event_bus,llm,kb,understand,render,config,logging,tasks_store}`；不反向依赖 `api/` 或 `extract/`。编排在 `apply/pipeline.py`，HTTP 入口在 `api/projects.py`。Phase 2 ★MVP 闭环全部走这条链。
-- `agent/*` 只 import `app/{ir,event_bus,llm,tasks_store,config,logging,kb}`；不反向依赖 `api/` / `apply/` / `extract/`。`agent/nl_edit.py` 是 Phase 2.5 Patch 调度核心，被 `api/edit.py` 调用。`render/throttle.py` 由 `api/edit.py` 与 `api/projects.py` 直接 import 用于 BackgroundTask（不属于 agent/，因为渲染节流是 render 模块自身的能力扩展，不是 LLM 决策）。
+- `agent/*` 只 import `app/{ir,event_bus,llm,tasks_store,config,logging,kb,render}`；不反向依赖 `api/` / `apply/` / `extract/`。`agent/nl_edit.py` 是 Phase 2.5 Patch 调度核心，被 `api/edit.py` 调用。`agent/aigc.py` 是 Phase 5 AIGC 生成层调度核心（hash 缓存 + 事件 + provider 工厂 + ffmpeg 把 provider 的图像字节循环成 mp4），被 `apply/fill.py` 调用——它对 `app/render/ffmpeg.py::image_to_video` 的依赖是单向的工具复用（与 `apply/` / `api/` 复用 `render/ffmpeg.py` 同性质）；`agent/aigc_providers/{name}.py` 子包是纯 HTTP 适配层，只 import `httpx` + `app/{config,logging}` + `agent/aigc.py` 的 typed exceptions（lazy import 避免循环），**绝不调 event_bus.publish**——事件统一在 `agent/aigc.py` 上层发，确保 D13 守卫只校验一处。`render/throttle.py` 由 `api/edit.py` 与 `api/projects.py` 直接 import 用于 BackgroundTask（不属于 agent/，因为渲染节流是 render 模块自身的能力扩展，不是 LLM 决策）。
 - `understand/vision.py` 是语义层，依赖 `extract/captions.py` 的 `CaptionEvent` dataclass + `llm/client.py` 的 `chat_vision`；caption_function 之类的"phase2 分类"由调用方在拿到 `extract` 输出后再调，并通过 `parent_event_id` 把事件挂到对应的 caption 实体事件下。
 - 重 ML 依赖（PySceneDetect / opencv-python-headless / librosa / Demucs / torch）放在 `pip install -e ".[extract]"` 可选 extras；每个 `extract/*` 模块在用前 `try: import ... except ImportError`，缺包时返回 fallback 形状 + 发 `severity="warning"` VisionEvent，不阻塞 pipeline。
 
@@ -90,7 +90,8 @@ IR（pydantic 模型）位于 `backend/app/ir/`，作为「人 / AI / 渲染器�
 | 任务态（progress / stage / result + resource_kind/id + events_jsonl_path） | `DATA_ROOT/kb.sqlite` 的 `tasks` 表 | WAL 模式；后端写、前端读 |
 | 模板库（TemplateIR + tags + thumbnail + last_extract_task_id） | `DATA_ROOT/kb.sqlite` 的 `templates` 表 | WAL；`api/templates` 读写 / `extract/pipeline` 写 |
 | 上传媒体 / 归一化产物 / 渲染输出 | `DATA_ROOT/{samples,projects}/...` | 文件系统，相对路径在 IR 内引用 |
-| ProjectIR / TemplateIR / TranscriptLedger | `projects/{id}/project.json` 等 | JSON 落盘，供回放、调试 |
+| AIGC 生成产物（B-roll mp4 / sticker png） | `DATA_ROOT/aigc/{broll,stickers}/{hash}.{mp4,png}` | 永久缓存，按 `(prompt, style_hint, duration)` 的 sha256 命名；同一请求不重复支付 API 费。`PlacedSegment.aigc_broll_path` 指向此目录 |
+| ProjectIR / TemplateIR / TranscriptLedger | `projects/{id}/project.json`、`projects/{id}/transcript.json` 等 | JSON 落盘，供回放、调试；`transcript.json` 由 `recommend` 写、`apply` 读，跨阶段复用同一份 ledger |
 | AI 决策事件流（VisionEvent jsonl） | `samples/{sid}/extracted/events_{task_id}.jsonl`、`projects/{pid}/pipeline/events_{task_id}.jsonl` | 路径方案 B：随资源走、task_id 作后缀；event_bus.publish 写入、SSE replay 与 history 端点读；同时承担 EventBus 的 sequence high-water mark 真理源（重启后 lazy 读最后一行恢复计数） |
 | Remotion bundle | renderer 进程内存 + headless Chromium 缓存 | 启动后首次渲染缓存一次 |
 | 前端 UI 态（工作台事件 / IR 快照 / 选中事件） | 浏览器内存（Zustand `useWorkbenchStore`） | 刷新走 SSE replay 重建，不持久化 |
@@ -233,23 +234,35 @@ python -m app.cli ingest-sample /local/path.mp4
   → POST /api/projects/{pid}/recommend-templates
      → tasks_store.create_task("recommend_templates", resource_kind="project")
         路径方案 B → events_jsonl_path = projects/{pid}/pipeline/events_{task_id}.jsonl
-     → 同步跑：understand.asr.transcribe → frame_sampler.sample_frames（首/中/末）
+     → 同步跑：understand.asr.transcribe（三层降级 glm/whisperx/uniform；GLM 路径 = PPIO GLM-ASR-2512 取文本 + WhisperX wav2vec2 forced alignment 给字级时间戳；Unit 切分按 gap+max_chars+min_chars+标点四因素）→ 写 projects/{pid}/transcript.json 给 apply 复用 → frame_sampler.sample_frames（首/中/末）
             → kb.recommend.recommend_templates（一次 VLM call 看 ≤50 模板 + ASR 摘要 + 3 帧）
             → 每条推荐发 stage="2.recommend" VisionEvent
      → 返回 {recommendations:[{template_id,score,reason,...}], workbench_url}
-浏览器选模板，点「应用」
-  → POST /api/projects/{pid}/apply {template_id, allow_aigc_broll:false}
+浏览器选模板，可选勾选「允许 AI 补画面」(D10 用户主动触发)，点「应用」
+  → POST /api/projects/{pid}/apply {template_id, allow_aigc_broll}
      → tasks_store.create_task("apply_short", resource_kind="project")
-     → BackgroundTask: apply.pipeline.apply_short(pid, tid, task_id)
+     → BackgroundTask: apply.pipeline.apply_short(pid, tid, task_id, allow_aigc_broll)
         → kb_store.get_template → TemplateIR
         → _safe("probe_duration") → ffprobe duration
-        → _safe("asr") → understand.asr.transcribe → TranscriptLedger
+        → _safe("asr") → 优先读 projects/{pid}/transcript.json 复用推荐阶段的 ledger（命中则发 stage="2.pipeline.asr_reuse" 事件并跳过 transcribe），未命中则 understand.asr.transcribe → TranscriptLedger
         → _safe("mapping") → apply.mapping.map_short_to_template
                               (Unit → voice slot 顺序绑定 + ±20% speed 钳制)
         → _safe("gaps") → apply.gaps.detect_gaps
-                          (按 material_req 分类 text_fill / wrap_fill / reuse)
-        → _safe("fill") → apply.fill.fill_gaps
-                          (text LLM 受 placeholder/length_constraint/semantic_purpose 锚定；
+                          (按 material_req 分类 aigc_broll / text_fill / wrap_fill / reuse；
+                           AI生成画面 slot → aigc_broll 策略，gaps.py 只标 intent，
+                           是否真调 provider 由 fill.py 看 allow_aigc_broll 决定)
+        → _safe("fill") → apply.fill.fill_gaps(project_id, allow_aigc_broll)
+                          (text_fill: text LLM 受 placeholder/length_constraint/semantic_purpose 锚定；
+                           aigc_broll + 勾选: chat_text 用 5_aigc_broll.md 把 ASR ±2 Unit + tags
+                           合成英文 image prompt → agent.aigc.generate_broll(hash 缓存 + PPIO
+                           OpenAI-compat /v1/images/generations 文本生图 → render.ffmpeg.image_to_video
+                           把静图循环成 duration 秒 mp4 落到 data/aigc/broll/{hash}.mp4) →
+                           写 PlacedSegment.aigc_broll_path + use_aigc_broll=True；
+                           运动由模板 zoom_keyframes 在渲染时附加，生成 API 只产出静态画面；
+                           AIGCProviderError 任一子类 → fallback _reuse_segment_for + 把
+                           degraded_msg 装到 FillOutcome 让 pipeline 写 ProjectIR.degraded
+                           [sections.0.segments.{i}.aigc_broll]，永不阻塞 pipeline；
+                           aigc_broll + 未勾选: 静默走 reuse，不调 LLM 也不调 provider；
                            wrap/reuse 段速度让 output_span = slot.nominal 保持 timeline 连续)
         → _safe("style") → apply.style.apply_style
                           (per-PlacedSegment 深拷贝 slot.style；per-Unit Caption（D11
@@ -283,13 +296,17 @@ python -m app.cli ingest-sample /local/path.mp4
 浏览器从 ProjectHistoryStrip 重进 /editor/{pid}（或 URL 直接打开）
   → useEffect [projectId] 并行 Promise.allSettled:
      - getProject(pid) → project.json → applyDone + chosenTemplate（取 sections[0].template_id）
+       + aigc_cost_summary（GET /projects/{id} 内反查最新 apply_short 的 events.jsonl，
+         聚合 stage="5.aigc.broll" 事件计数 + ProjectIR.degraded 中 *.aigc_broll 键计数；
+         无 AIGC 活动返 null）
      - getRecommendations(pid) → tasks_store.list_by_resource("project", pid) 取最新
        kind="recommend_templates" → event_bus.replay 过滤 stage="2.recommend"
        且 ir_value 为字符串 → 按 template_id 反查 kb_store.get_template 拼 name/thumbnail
        → 恢复 step-2 卡片
      - listProjectTasks(pid) → tasks 表取最新 kind="apply_short" → 恢复 step-3
        「apply 全链路 #...」工作台链接
-  ← Editor 渲染：step-2 卡片高亮 chosenTemplate；step-3 显示 apply 全链路 #...；
+  ← Editor 渲染：step-2 卡片高亮 chosenTemplate；step-3 显示 apply 全链路 #...
+     + 成本面板（已调 / 缓存命中 / 失败降级 / 累计秒）；
      PatchHistoryList 顶部「打开工作台看 apply 全链路 →」一并恢复
 ```
 

@@ -15,6 +15,11 @@ export interface ProjectIRProps {
   // server-resolved fallback to projectIR.bgm_track (DATA_ROOT-relative)
   // is plumbed by render.ts before this composition runs.
   bgmUrl?: string | null;
+  // Phase 5 (ISS-028): map from aigc_broll_path → resolved /data URL. Pre-
+  // built in render.ts so this composition doesn't re-implement the URL
+  // encoding. Segments with aigc_broll_path set play the AIGC clip instead
+  // of userMaterialUrl; non-AIGC segments leave the map untouched.
+  aigcBrollUrls?: Record<string, string>;
 }
 
 /**
@@ -46,6 +51,7 @@ export const Project: React.FC<ProjectIRProps> = ({
   projectIR,
   userMaterialUrl,
   bgmUrl,
+  aigcBrollUrls,
 }) => {
   const sections = projectIR?.sections ?? [];
   const captions = projectIR?.captions ?? [];
@@ -83,6 +89,19 @@ export const Project: React.FC<ProjectIRProps> = ({
             const maskKind = seg.applied_style?.visual?.mask ?? null;
             const maskParams = seg.applied_style?.visual?.mask_params ?? null;
 
+            // Phase 5: AIGC B-roll segments swap the OffthreadVideo source
+            // to the generated clip; non-AIGC segments keep userMaterialUrl.
+            const aigcPath = seg.aigc_broll_path;
+            const segVideoUrl =
+              aigcPath && aigcBrollUrls?.[aigcPath]
+                ? aigcBrollUrls[aigcPath]
+                : userMaterialUrl;
+            // AIGC clips have no audio — mute them so the renderer doesn't
+            // crossfade nothing-into-voice. User material keeps its track
+            // (the voice playing under the B-roll comes through ProjectIR's
+            // bgm_track + the user material on adjacent segments).
+            const segMuted = Boolean(seg.use_aigc_broll);
+
             return (
               <Sequence
                 key={`seg-${si}-${gi}`}
@@ -94,10 +113,10 @@ export const Project: React.FC<ProjectIRProps> = ({
                   segmentDurationInFrames={durationInFrames}
                 >
                   <OffthreadVideo
-                    src={userMaterialUrl}
+                    src={segVideoUrl}
                     startFrom={Math.round(srcStart * fps)}
                     endAt={Math.round(srcEnd * fps)}
-                    muted={false}
+                    muted={segMuted}
                     playbackRate={speed}
                   />
                 </ZoomLayer>

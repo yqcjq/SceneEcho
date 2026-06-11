@@ -1,6 +1,6 @@
 """2.fill · gap completion (PLAN 1601).
 
-Three strategies (MVP — no AIGC):
+Four strategies:
 
 1. **text_fill**: Text LLM generates a Caption for the gap, anchored by the
    slot's caption ``placeholder_text`` + ``length_constraint`` +
@@ -12,10 +12,18 @@ Three strategies (MVP — no AIGC):
    StyleRule colors fill from the slot's existing visual style.
 3. **reuse**: Take an adjacent PlacedSegment's last 0.5-1.0s, zoom-in,
    and repeat it. No text added; no LLM call.
-
-``allow_aigc_broll`` is plumbed for Phase 5 — when set to True we *would*
-choose AIGC B-roll for B-roll gaps, but Phase 2 ignores the flag (PLAN
-1587 strictly bans AIGC for this stage).
+4. **aigc_broll** (Phase 5, ISS-028): the slot's ``material_req`` is
+   "AI生成画面". When ``allow_aigc_broll`` is True we synthesize an image
+   prompt from the slot's ASR context + template tags and call
+   ``agent.aigc.generate_broll`` to fetch a third-party text-to-image then
+   loop it into mp4 via ffmpeg, writing the result onto
+   ``PlacedSegment.aigc_broll_path`` + ``use_aigc_broll``.
+   Any ``AIGCProviderError`` (missing key / quota / network / content
+   rejected) degrades the slot to ``reuse`` and records the reason in the
+   outcome's ``degraded_msg`` so the pipeline can flag
+   ``ProjectIR.degraded`` (D28 — never block the pipeline). When the
+   project did **not** opt in, the slot degrades straight to ``reuse``
+   without touching the AIGC provider (D10 — user-initiated only).
 
 Each fill emits one VisionEvent so the workbench shows the completed
 gap card filling in.
@@ -23,8 +31,9 @@ gap card filling in.
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
+from app.agent.aigc import AIGCProviderError, generate_broll
 from app.apply.style import _segment_output_span, style_for_segment
 from app.config import get_settings
 from app.event_bus import get_event_bus
@@ -45,6 +54,18 @@ class _FillTextResult(BaseModel):
     reasoning: str = ""
 
 
+class _BrollPromptResult(BaseModel):
+    """LLM-synthesized image prompt for an AI生成画面 slot (5_aigc_broll.md).
+
+    The renderer's ZoomLayer supplies motion at render time, so the prompt
+    describes a *still* composition; the LLM is told not to use motion verbs.
+    """
+
+    prompt: str = ""
+    style_keywords: list[str] = Field(default_factory=list)
+    reasoning: str = ""
+
+
 class FillOutcome(BaseModel):
     """Result of filling one Gap. Drives ProjectIR insertion."""
 
@@ -54,6 +75,11 @@ class FillOutcome(BaseModel):
     segment: PlacedSegment | None = None  # generated styling-only segment
     caption: Caption | None = None  # generated caption (if any)
     reasoning: str = ""
+    # Set when an AIGC B-roll attempt failed and degraded to reuse. The
+    # pipeline reads this to write ``ProjectIR.degraded[sections.0.segments.
+    # {i}.aigc_broll]`` against the final (post-sort) segment index, so the
+    # workbench banner can navigate to the affected segment.
+    degraded_msg: str = ""
 
 
 def _ctx_units(
@@ -240,6 +266,152 @@ def _reuse_segment_for(
     )
 
 
+async def _synthesize_broll_prompt(
+    slot: Slot,
+    *,
+    ledger: TranscriptLedger,
+    segments: list[PlacedSegment],
+    template: TemplateIR,
+    duration_sec: float,
+    task_id: str,
+    parent_event_id: str | None,
+) -> _BrollPromptResult:
+    """Text LLM turns ASR context + template tags into an English image prompt.
+
+    Falls back to a deterministic prompt built from the template scene tag
+    when the LLM declines (``_invoke`` returns a default-constructed schema
+    with empty ``prompt``) — generate_broll still needs a non-empty string.
+    The fallback intentionally avoids motion language so it composes the
+    same way as a real LLM-produced prompt with the renderer's ZoomLayer.
+    """
+    settings = get_settings()
+    cl = get_llm_client(stage=f"{STAGE}.aigc_broll")
+
+    pivot = _pivot_unit_for(segments, ledger)
+    before_txt, after_txt = _ctx_units(ledger, pivot_unit_id=pivot)
+    tags = template.tags
+
+    system = load_prompt("5_aigc_broll")
+    user_msg = (
+        f"material_req: {slot.material_req}\n"
+        f"scene: {tags.scene}\n"
+        f"function: {tags.function}\n"
+        f"duration_sec: {duration_sec:.1f}\n"
+        f"content_before: {before_txt or '（无）'}\n"
+        f"content_after: {after_txt or '（无）'}\n"
+        "请按 schema 输出 image prompt JSON。"
+    )
+    result, _events = await cl.chat_text(
+        [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user_msg},
+        ],
+        model=settings.model_text_cheap,
+        stage=f"{STAGE}.aigc_broll",
+        task_id=task_id,
+        ir_target_template=IRTarget(ir_type="ProjectIR", path="sections.0.segments"),
+        schema=_BrollPromptResult,
+        parent_event_id=parent_event_id,
+    )
+    if not (result.prompt or "").strip():
+        # Deterministic fallback so generate_broll always gets a real prompt.
+        # No motion verbs — the renderer's ZoomLayer supplies the motion.
+        scene = tags.scene or "clean studio"
+        result = _BrollPromptResult(
+            prompt=(
+                f"a still cinematic B-roll establishing composition, {scene} style, "
+                "soft natural lighting, no text, no faces, no logos"
+            ),
+            style_keywords=[scene],
+            reasoning="LLM 未给出 prompt，回退到基于模板 scene 标签的确定性静态构图 prompt。",
+        )
+    return result
+
+
+async def _fill_aigc_broll(
+    slot: Slot,
+    timeline_start: float,
+    nearest_src_range: tuple[float, float] | None,
+    *,
+    ledger: TranscriptLedger,
+    segments: list[PlacedSegment],
+    template: TemplateIR,
+    project_id: str,
+    task_id: str,
+    parent_event_id: str | None,
+) -> tuple[PlacedSegment, str, str]:
+    """Generate an AI B-roll clip for an "AI生成画面" slot.
+
+    Returns ``(segment, reasoning, degraded_msg)``. On success the segment
+    carries ``aigc_broll_path`` + ``use_aigc_broll=True`` (and ``degraded_msg``
+    is empty). On any ``AIGCProviderError`` we fall back to a ``reuse`` segment
+    and return the failure in ``degraded_msg`` so the pipeline flags
+    ``ProjectIR.degraded`` — the slot still renders (D28), just from adjacent
+    user material instead of AI B-roll.
+
+    The output span equals ``slot.nominal`` like every other fill segment so
+    the timeline stays continuous; the AIGC clip's own duration is clamped by
+    ``generate_broll`` to ``aigc_broll_max_duration_sec`` and looped/trimmed by
+    the renderer's OffthreadVideo endpoints to fill the slot.
+    """
+    settings = get_settings()
+    nominal = float(slot.duration.get("nominal", 1.5))
+    duration = min(nominal, float(settings.aigc_broll_max_duration_sec))
+
+    prompt_res = await _synthesize_broll_prompt(
+        slot,
+        ledger=ledger,
+        segments=segments,
+        template=template,
+        duration_sec=duration,
+        task_id=task_id,
+        parent_event_id=parent_event_id,
+    )
+    style_hint = {
+        "style_keywords": prompt_res.style_keywords,
+        "scene": template.tags.scene,
+        "function": template.tags.function,
+    }
+    try:
+        rel_path, _events = await generate_broll(
+            prompt_res.prompt,
+            duration,
+            style_hint,
+            project_id,
+            task_id=task_id,
+            parent_event_id=parent_event_id,
+        )
+    except AIGCProviderError as e:
+        degraded_msg = f"{type(e).__name__}: {e}"
+        log.warning("fill.aigc_broll_degraded_to_reuse", slot_role=slot.role, error=str(e))
+        seg = _reuse_segment_for(slot, timeline_start, nearest_src_range)
+        reasoning = (
+            f"AI 补画面失败（{degraded_msg}），降级到 reuse 策略："
+            "裁取相邻片段重复填入；ProjectIR.degraded 已记录原因。"
+        )
+        return seg, reasoning, degraded_msg
+
+    # Success — build a segment whose source plays the AIGC clip. We still
+    # set src_timerange/speed so _segment_output_span keeps the timeline
+    # contiguous; the renderer reads aigc_broll_path as the video source.
+    seg = PlacedSegment(
+        slot_role=slot.role,
+        source_unit_ids=[],
+        src_timerange=(0.0, round(max(0.04, duration), 3)),
+        timeline_start=round(timeline_start, 3),
+        speed=round(max(0.1, duration / nominal), 3),
+        applied_style=style_for_segment(slot, nominal),
+        is_fill=True,
+        use_aigc_broll=True,
+        aigc_broll_path=rel_path,
+    )
+    reasoning = (
+        f"AI 补画面成功：prompt='{prompt_res.prompt[:60]}…'；"
+        f"{prompt_res.reasoning}；资源 {rel_path}。"
+    )
+    return seg, reasoning, ""
+
+
 async def fill_gaps(
     gaps: list[Gap],
     template: TemplateIR,
@@ -247,18 +419,19 @@ async def fill_gaps(
     ledger: TranscriptLedger,
     *,
     task_id: str,
+    project_id: str = "",
     allow_aigc_broll: bool = False,
     parent_event_id: str | None = None,
 ) -> tuple[list[FillOutcome], list[VisionEvent]]:
     """Fill each gap per its ``fill_strategy``.
 
-    ``allow_aigc_broll`` is captured for Phase 5; Phase 2 ignores it
-    (PLAN 1587). The function never raises — failures inside one fill
-    flag that gap as degraded but keep filling the others.
+    ``allow_aigc_broll`` gates the ``aigc_broll`` strategy (D10 — AIGC only
+    runs when the user opted in). When False, "AI生成画面" slots degrade to
+    ``reuse`` without touching the provider. The function never raises —
+    AIGC provider failures degrade individual slots to reuse and are flagged
+    via ``FillOutcome.degraded_msg`` for the pipeline to record; other
+    failures inside one fill keep filling the rest.
     """
-    if allow_aigc_broll:
-        log.info("fill.aigc_broll_requested_but_phase2_ignores", count=len(gaps))
-
     bus = get_event_bus()
     outcomes: list[FillOutcome] = []
     events: list[VisionEvent] = []
@@ -307,7 +480,41 @@ async def fill_gaps(
         # cur_gap belongs to this slot. Fill it.
         strategy = cur_gap.fill_strategy
         outcome: FillOutcome
-        if strategy == "text_fill":
+        if strategy == "aigc_broll":
+            # D10: only call the provider when the project opted in. Without
+            # opt-in the "AI生成画面" slot quietly degrades to reuse — no event
+            # spam, no cost, no degraded flag (it's the expected default).
+            if allow_aigc_broll:
+                seg, reasoning, degraded_msg = await _fill_aigc_broll(
+                    slot,
+                    timeline_cursor,
+                    last_real_src,
+                    ledger=ledger,
+                    segments=segments,
+                    template=template,
+                    project_id=project_id,
+                    task_id=task_id,
+                    parent_event_id=parent_event_id,
+                )
+                outcome = FillOutcome(
+                    gap_idx=cur_gap_idx if cur_gap_idx is not None else -1,
+                    strategy="aigc_broll",
+                    segment=seg,
+                    reasoning=reasoning,
+                    degraded_msg=degraded_msg,
+                )
+            else:
+                seg = _reuse_segment_for(slot, timeline_cursor, last_real_src)
+                outcome = FillOutcome(
+                    gap_idx=cur_gap_idx if cur_gap_idx is not None else -1,
+                    strategy="reuse",
+                    segment=seg,
+                    reasoning=(
+                        "模板标「AI生成画面」但项目未勾选「允许 AI 补画面」，"
+                        "降级到 reuse 策略（裁取相邻片段重复填入）。"
+                    ),
+                )
+        elif strategy == "text_fill":
             text, reasoning = await _fill_text(
                 cur_gap,
                 slot,
@@ -365,16 +572,21 @@ async def fill_gaps(
         if seg is not None:
             timeline_cursor += _segment_output_span(seg)
 
+        # Use ``outcome.strategy`` (not the gap's requested ``strategy``) so the
+        # event reflects what actually happened — e.g. an aigc_broll gap that
+        # degraded to reuse because the project didn't opt in shows 2.fill.reuse.
+        eff = outcome.strategy
         ev = VisionEvent(
             task_id=task_id,
-            source="system" if strategy != "text_fill" else "text_llm",
-            stage=f"{STAGE}.{strategy}",
+            source="text_llm" if eff == "text_fill" else "system",
+            stage=f"{STAGE}.{eff}",
             semantic_label=(
-                f"缺口 #{cur_gap_idx} 补全 · {strategy}"
+                f"缺口 #{cur_gap_idx} 补全 · {eff}"
                 + (f" · '{outcome.text}'" if outcome.text else "")
+                + (" · [degraded→reuse]" if outcome.degraded_msg else "")
             ),
             reasoning=outcome.reasoning or "（补全完成）",
-            confidence=0.7 if strategy == "text_fill" else 0.85,
+            confidence=0.7 if eff == "text_fill" else 0.85,
             ir_target=IRTarget(ir_type="ProjectIR", path="sections.0.gaps", op="append"),
             ir_value=cur_gap.model_dump(mode="json"),
             parent_event_id=parent_event_id,

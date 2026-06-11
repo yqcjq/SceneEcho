@@ -111,7 +111,7 @@ const EventRow: React.FC<RowProps> = ({
           {event.model_used ? ` · ${event.model_used}` : ""}
         </span>
         <span>
-          conf {event.confidence.toFixed(2)}
+          置信度 {event.confidence.toFixed(2)}
           {event.cost_tokens ? ` · ${event.cost_tokens}t` : ""}
         </span>
       </div>
@@ -317,6 +317,23 @@ export const WorkbenchEventStream: React.FC = () => {
       <div className="border-b border-border px-4 py-3">
         <div className="flex items-center justify-between gap-2">
           <h2 className="font-serif text-lg text-primary">VLM 怎么想</h2>
+          <div className="flex items-center gap-2">
+          {viewMode === "by_stage" && groups.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => {
+                const allCollapsed = groups.every((g) => collapsedStages.has(g.stage));
+                if (allCollapsed) {
+                  setCollapsedStages(new Set());
+                } else {
+                  setCollapsedStages(new Set(groups.map((g) => g.stage)));
+                }
+              }}
+              className="shrink-0 rounded-sm border border-border bg-subtle px-2 py-0.5 font-mono text-[11px] text-secondary hover:text-primary"
+            >
+              {groups.every((g) => collapsedStages.has(g.stage)) ? "展开全部" : "折叠全部"}
+            </button>
+          ) : null}
           <div
             role="tablist"
             aria-label="event stream view mode"
@@ -346,6 +363,7 @@ export const WorkbenchEventStream: React.FC = () => {
             >
               按到达顺序
             </button>
+          </div>
           </div>
         </div>
         <p className="text-tertiary text-xs">

@@ -83,10 +83,21 @@ export interface ApplyResponse {
   workbench_url: string;
 }
 
+export interface AigcCostSummary {
+  broll_calls: number;
+  broll_cache_hits: number;
+  broll_failures: number;
+  total_seconds_spent: number;
+}
+
 export interface ProjectResponse {
   project_id: string;
   ir: any | null;
   user_material_url: string | null;
+  /** Phase 5 (ISS-028): present after an apply task with AIGC activity (real
+   * calls or recorded failures); null when the project never opted in or no
+   * apply task ran yet. Derived from events.jsonl + ProjectIR.degraded. */
+  aigc_cost_summary: AigcCostSummary | null;
 }
 
 export interface PreviewProps {
@@ -101,6 +112,8 @@ export interface PreviewProps {
       timeline_start: number;
       speed: number;
       is_fill: boolean;
+      use_aigc_broll?: boolean;
+      aigc_broll_path?: string | null;
       applied_style: any;
     }>;
   }>;

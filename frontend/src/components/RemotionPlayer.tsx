@@ -30,6 +30,11 @@ interface PreviewSegment {
   timeline_start: number;
   speed: number;
   is_fill: boolean;
+  // Phase 5 (ISS-028): AIGC B-roll segments swap the <video> source to the
+  // generated clip (DATA_ROOT-relative path). When unset / null the segment
+  // plays the user material like every other fill.
+  use_aigc_broll?: boolean;
+  aigc_broll_path?: string | null;
   applied_style: any;
 }
 
@@ -188,6 +193,13 @@ export const RemotionPlayer: React.FC<RemotionPlayerProps> = ({
 
   const seg = activeSegment(segments, timelineSec);
   const zoom = seg ? activeZoomTransform(seg, timelineSec) : { scale: 1, dx: 0, dy: 0 };
+  // Phase 5 (ISS-028): AIGC B-roll segments swap the <video> source to the
+  // generated clip; non-AIGC segments fall back to userMaterialUrl. Uses the
+  // same /data static mount as everything else in the preview.
+  const segVideoUrl =
+    seg?.aigc_broll_path
+      ? `/data/${seg.aigc_broll_path.replace(/^\/+/, "")}`
+      : userMaterialUrl;
   const activeCaptions = captions.filter((c) => timelineSec >= c.start && timelineSec <= c.end);
   // applied_style.stickers carry segment-local seconds (apply/style.py
   // remapped from slot-local [0,1]). Lift them onto the global timeline
@@ -206,11 +218,11 @@ export const RemotionPlayer: React.FC<RemotionPlayerProps> = ({
         className="relative overflow-hidden rounded-md border border-border bg-black"
         style={{ width: displayWidth, height: displayHeight }}
       >
-        {userMaterialUrl ? (
+        {segVideoUrl ? (
           <video
             ref={videoRef}
-            src={userMaterialUrl}
-            muted={false}
+            src={segVideoUrl}
+            muted={Boolean(seg?.use_aigc_broll)}
             playsInline
             style={{
               position: "absolute",

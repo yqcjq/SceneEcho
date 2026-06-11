@@ -19,7 +19,7 @@ import { existsSync } from "node:fs";
 import { resolveDataPath } from "./paths.js";
 
 export interface MissingResource {
-  category: "user_material" | "bgm_track" | "sticker_image";
+  category: "user_material" | "bgm_track" | "sticker_image" | "aigc_broll";
   path: string;
   absolutePath: string;
   hint: string;
@@ -59,6 +59,16 @@ function collectResourceRefs(projectIR: any): Array<{
             hint: `贴纸生成图缺失（${stk.description ?? "?"}）；Phase 5 AIGC 应已写入此路径。`,
           });
         }
+      }
+      // Phase 5 (ISS-028): AIGC B-roll segments must have their cached clip
+      // on disk before render — otherwise OffthreadVideo would silently 404.
+      if (seg?.aigc_broll_path) {
+        refs.push({
+          category: "aigc_broll",
+          path: seg.aigc_broll_path,
+          hint:
+            "AI 补画面 mp4 缺失；apply 的 _fill_aigc_broll 应已下载到 data/aigc/broll/。",
+        });
       }
     }
   }

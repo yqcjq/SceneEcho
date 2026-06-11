@@ -1062,3 +1062,101 @@ useEffect [projectId] 改为闭包内声明 `let cancelled = false`，return cle
 ASR 后端引入 PPIO GLM-ASR-2512（中文 CER ~7%）拿高精度文本 + WhisperX wav2vec2 forced alignment 单独跑出字级时间戳；三层降级链 `glm → whisperx → uniform_chunks` 由 `ASR_PROVIDER` 切换。`_segments_to_units` 改为四因素切分（gap > 0.15s / 累积 ≥ 12 字 / 中文标点 / 拒绝 < 4 字软断），消除 8s 一条的退化。recommend 阶段持久化 ledger 至 `projects/{id}/transcript.json`，apply 进 ASR 阶段前优先读盘复用，跳过重跑并发 `2.pipeline.asr_reuse` 事件。
 
 ---
+
+## [ISS-028] Phase 5 B-roll 视觉补充能力跨级实施 — 越过 Phase 3/4 提前接入生成层闭环
+
+**状态**：[已解决]
+**优先级**：[P2 一般]
+**类型**：[功能异常]
+**发现日期**：2026-06-10
+**解决日期**：2026-06-11
+**解决方案**：`agent/aigc.py` 占位升级为真实 provider 抽象（typed errors + sha256 hash 缓存 + 5.aigc.broll/sticker 事件 + 工厂动态 import + `_is_retryable` 复用）；后端选用「文本生图 + ffmpeg 静图循环成 mp4」路径（视频侧的运动由模板 zoom_keyframes 在渲染时附加，避免双重叠加），消费端契约不变。新增 `aigc_providers/ppio.py` 实现 OpenAI-compat `/v1/images/generations` 单方法 `generate_image` + `render/ffmpeg.image_to_video` helper；`apply/gaps.py` AI生成画面 → aigc_broll 策略 + `apply/fill.py::_fill_aigc_broll` 接通（LLM 合成英文 image prompt + 调 generate_broll + 失败降级 reuse 写 degraded_msg）；`apply/pipeline.py` 透传 project_id + 按 final 段索引写 `ProjectIR.degraded`；`api/projects.py::get_project` 反查 events.jsonl 聚合 `aigc_cost_summary`；renderer / RemotionPlayer 段级视频源切到 aigc_broll_path；Editor step-2 加「允许 AI 补画面」checkbox + 风险披露 + step-3 成本面板。
+
+**现象**：
+PLAN.md 阶段总览（51-66 行）依赖链 `0 → 0.5 → 1A → 1B → 2 → 2.5 → 2.6 → 3 → 7 → 4 → 5` 推荐 Phase 2.6 完工后做 Phase 3。但 PLAN 2125 行 Phase 5 实际硬前置只列 1B / 2 / 2.5——3 / 7 / 4 是 demo 节奏推荐而非物理依赖。
+
+口播视频"画面单调时插入 AI B-roll 增强视觉"能力的"识别 + 标记 + IR 钩子"三件套已经分散预埋:
+- `extract/b_roll.py`（ISS-023）已识别样例每个 scene 的画面构成（`人物主导 / 全屏 B-roll / 画中画 / 侧栏`），写 `Phase1AReport.b_roll_segments`，并已注册 Lab REGISTRY 的 `b_roll` 子能力。
+- `extract/skeleton.py::_infer_material_req` 已在 Slot 含非「人物主导」b_roll 段时优先标 `material_req="AI生成画面"`。
+- `ProjectIR.allow_aigc_broll: bool = False` + `PlacedSegment.use_aigc_broll: bool` + `PlacedSegment.aigc_broll_path: str | None` 三个字段已存在。
+- `apply/fill.py:250-260` `fill_gaps` 函数签名已含 `allow_aigc_broll` 形参，但函数体内显式 ignored（PLAN 1587 锁 Phase 2 不引入 AIGC）。
+- `agent/aigc.py` 是 11 行的占位 re-export，没有任何真实第三方 API 接入。
+
+缺的只是 Phase 5 的"生成层":`agent/aigc.py` 真接入 + `apply/fill.py` 的 `aigc_broll` 策略实现 + Editor 的"允许 AI 补画面"开关。
+
+**后果**：
+不解决 ISS-028:B-roll 视觉补充能力的"识别 + 标记 + 钩子"三件套就绪但生成层空白，整个口播单调度补救闭环死在最后一步;KB 模板里所有标 `AI生成画面` 的 slot 在 apply 阶段全部退化到 reuse 策略（裁取相邻片段 0.5-1.0s 重复），模板复用价值不全;按依赖链顺序得先完成 Phase 3 长视频流水线（9-step + 条件审核 + Quality scoring）才能轮到 Phase 5——单 phase 工作量预估 1-2 周，期间 B-roll 闭环始终空缺。
+
+**初步判断**：
+已确认。Phase 5 跨级实施可行（硬前置已满足），但需克制范围避免重蹈"在第一版偷懒后二核还债"覆辙;最初提案"在 SubcapabilityLab 加用户素材单调度检测子能力"被否定（语义错位 + 重复 b_roll 已有能力 + 污染 Phase 1A 样例理解作用域），改为更窄的"仅生成层"实施。
+
+**方案讨论**（已确认，详见 `decisions/013-phase5-broll-fill-without-lab-detection.md`）：
+- Lab 不动:`b_roll` 子能力已在 REGISTRY，能跑、能在工作台看 b_roll_segments 字段填充。
+- 仅实现 `generate_broll` / `generate_sticker_image` provider 抽象 + 缓存层 + `apply/fill.py` `aigc_broll` 策略 + Editor 项目级勾选开关。
+- 不做封面 / 多 provider 选型 / 段级 AIGC 控制（推迟到 future-plans/005 / 006 与 ISS-030）。
+- D10「AIGC 用户主动触发」严守:项目级 `allow_aigc_broll` 默认关，UI 含风险披露文字。
+
+**关联**：
+-> backend/app/agent/aigc.py（占位升级为真实 provider 抽象 + hash 缓存层）
+-> backend/app/apply/fill.py（`_fill_aigc_broll` 新策略分支 + 失败降级到 reuse + degraded warning）
+-> backend/app/apply/pipeline.py（fill stage 增 AIGC 调用统计）
+-> backend/app/api/projects.py（apply 端点 body 增 `allow_aigc_broll` 直传 ProjectIR）
+-> backend/app/config.py（`aigc_broll_provider` / `aigc_broll_api_key` / `aigc_broll_max_duration_sec`）
+-> backend/app/llm/prompts/5_aigc_broll.md（新增 prompt 把 Slot ASR 上下文 + 模板 tags 翻译成 video prompt）
+-> renderer/src/compositions/Project.tsx（PlacedSegment 渲染时优先 `aigc_broll_path`）
+-> frontend/src/components/RemotionPlayer.tsx（CSS 预览侧 `<video src>` 切到 AIGC 资源）
+-> frontend/src/pages/Editor.tsx（apply 卡片内"允许 AI 补画面" checkbox + 风险披露文字）
+-> frontend/src/api/index.ts（applyTemplate 请求体加 `allow_aigc_broll` 字段）
+-> backend/tests/unit/test_apply.py（aigc_broll 策略 + provider 缓存命中 / 失败降级 / 项目级开关关闭时不调用 三组单测）
+-> docs/decisions/013-phase5-broll-fill-without-lab-detection.md
+-> docs/future-plans/005-aigc-cover-generation.md
+-> docs/future-plans/006-aigc-broll-provider-selection.md
+-> 004CHANGELOG.md [2026-06-11-1]
+
+---
+
+## [ISS-029] Phase 3 长视频分步审核闭环跟进 — Phase 5 B-roll 完成后启动
+
+**状态**：[暂缓]
+**优先级**：[P2 一般]
+**类型**：[功能异常]
+**发现日期**：2026-06-10
+
+**现象**：
+ISS-028 把 Phase 5 B-roll 子集前置到 Phase 3 之前。PLAN.md 阶段总览仍把 Phase 3（长视频 9-step pipeline + 条件审核 + Quality scoring，PLAN 1873-2055 行）列为 Phase 2.6 后的下一阶段，是 demo 演示长口播（~3min）能力的关键路径。本期跨级仅"前置部分 Phase 5"，不是"砍掉 Phase 3"，因此需要占位 issue 显式追踪"Phase 3 仍欠"。
+
+**后果**：
+长视频（~3min 口播）当前完全跑不通——Phase 2 ★MVP 闭环锁定 10–20s 短素材，长素材没有 ASR 分段、去重、主题分段、选模板、Quality scoring 等流水线步骤;PLAN 课题任务 2 / 6 / 7 / 10 / 12 大量项依赖 Phase 3 才能落地。
+
+**暂缓原因**：
+Phase 5 B-roll 子集（ISS-028）正在前置实施。Phase 3 启动需等 ISS-028 落地试用一段时间，确认 apply/fill.py 的 `aigc_broll` 策略与 long_pipeline 的 Step 07 接入设计无冲突;此外 Phase 3 工作量本身较大（9-step pipeline + 5 个 review 组件 + pipeline_state 持久化基础设施），需要单独评估排期。
+
+**关联**：
+-> PLAN.md 1873-2055 行 Phase 3 完整章节
+-> docs/decisions/013-phase5-broll-fill-without-lab-detection.md（已知代价 3:跨阶段后回头补可能产生设计冲突）
+-> ISS-028（前置依赖）
+
+---
+
+## [ISS-030] AIGC 段级勾选与单段重生成 — 项目级开关试用后升级
+
+**状态**：[暂缓]
+**优先级**：[P3 轻微]
+**类型**：[体验]
+**发现日期**：2026-06-10
+
+**现象**：
+ISS-028 实施时 `allow_aigc_broll` 是项目级 boolean——用户勾一次即对所有标 `AI生成画面` 的 Slot 启用 AIGC，缺乏对单个 PlacedSegment 的精细控制。PLAN.md 2143 行原文档描述 D10 时含"段级勾选"——用户对每个 PlacedSegment 单独决定是否生成 AI 补画面，且 apply 后某 PlacedSegment 右键"AI 生成画面"可单段重生成。
+
+**后果**：
+用户无法对 apply 自动生成的某条 B-roll 不满意时单独重生成，只能整个项目重新 apply（成本 / 时延都翻倍）;无法在多 slot 都标 `AI生成画面` 但部分 slot 用户更想保留 reuse 效果（节奏感）的场景里精细控制。
+
+**暂缓原因**：
+段级控制需要 PlacedSegment 列表交互（每段独立勾选 + 状态展示）+ 每段的预估成本预览 + 单段重生成按钮 + ProjectIR 增 per-segment AIGC 状态字段，工作量约等于 ISS-028 项目级实施的所有改动之和;在项目级开关实际试用前难以判断段级控制是否真的高频被需要;若 90% 场景下用户"全开 / 全关"已足够，段级控制可能是过度设计。
+
+**关联**：
+-> PLAN.md 2143 行 D10 段级勾选描述
+-> docs/decisions/013-phase5-broll-fill-without-lab-detection.md（已知代价 4:段级勾选退化为项目级勾选）
+-> ISS-028（前置依赖）
+
+

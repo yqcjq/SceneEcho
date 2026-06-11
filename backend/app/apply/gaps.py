@@ -69,6 +69,13 @@ def _strategy_for(slot: Slot) -> tuple[str, str]:
     ``_role_for_position``): if no AI call happens, the name shouldn't
     suggest one.
     """
+    if slot.material_req == "AI生成画面":
+        # Phase 5 (ISS-028): the template marked this slot as wanting AI-
+        # generated B-roll. fill.py routes ``aigc_broll`` through generate_broll
+        # *only* when the project opted in (allow_aigc_broll); otherwise it
+        # degrades to reuse. gaps.py stays a pure function of material_req — it
+        # doesn't know the opt-in flag, so it always tags the intent here.
+        return "模板期望 AI 补画面（B-roll）", "aigc_broll"
     if slot.material_req == "人物口播":
         return "无用户语音覆盖", "text_fill"
     if slot.material_req == "B-roll/包装":

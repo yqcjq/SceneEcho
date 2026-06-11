@@ -47,6 +47,7 @@ export const Editor: React.FC = () => {
   const [recsLoading, setRecsLoading] = useState(false);
   const [recsTaskId, setRecsTaskId] = useState<string | null>(null);
   const [chosenTemplate, setChosenTemplate] = useState<string | null>(null);
+  const [allowAigcBroll, setAllowAigcBroll] = useState(false);
   const [applyTaskId, setApplyTaskId] = useState<string | null>(null);
   const [applyDone, setApplyDone] = useState(false);
   const [renderTaskId, setRenderTaskId] = useState<string | null>(null);
@@ -65,6 +66,10 @@ export const Editor: React.FC = () => {
     setRecs(null);
     setRecsTaskId(null);
     setChosenTemplate(null);
+    // D10: AIGC must be re-confirmed per project. Sticky across switches
+    // would surprise users coming back to a project they didn't realise had
+    // AIGC enabled.
+    setAllowAigcBroll(false);
     setApplyTaskId(null);
     setApplyDone(false);
     setRenderTaskId(null);
@@ -199,7 +204,7 @@ export const Editor: React.FC = () => {
     setRenderTaskId(null);
     setApplyDone(false);
     try {
-      const r = await applyTemplate(projectId, templateId);
+      const r = await applyTemplate(projectId, templateId, allowAigcBroll);
       setApplyTaskId(r.task_id);
     } catch (err: any) {
       setError(String(err?.response?.data?.detail ?? err?.message ?? err));
@@ -300,6 +305,26 @@ export const Editor: React.FC = () => {
                 {recsLoading ? "推荐中…" : recs ? "重新推荐" : "调 VLM 推荐 top-3"}
               </button>
             </div>
+            {/* D10 (ISS-028): AIGC must be user-initiated. Default off + risk
+                disclosure; the checkbox state is read at click-time of the
+                template card below. */}
+            <label className="mt-3 flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={allowAigcBroll}
+                onChange={(e) => setAllowAigcBroll(e.target.checked)}
+                disabled={!!applyTaskId && !applyDone}
+                className="mt-0.5"
+              />
+              <span>
+                <span className="font-medium">允许 AI 补画面</span>
+                <span className="block text-tertiary text-xs mt-0.5 leading-snug">
+                  勾选后，模板里标「AI 生成画面」的段落会调第三方视频生成 API；
+                  时延 30s–3min/段、成本不可预测。仅个人 demo 使用，
+                  请遵守生成内容审查与版权义务。
+                </span>
+              </span>
+            </label>
             <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
               {(recs ?? []).map((rec) => {
                 const isChosen = chosenTemplate === rec.template_id;
@@ -371,6 +396,19 @@ export const Editor: React.FC = () => {
               />
             ) : (
               <p className="text-sm text-secondary">已从历史记录加载，apply pipeline 已完成。</p>
+            )}
+            {/* AIGC cost panel — derived from events.jsonl by GET /projects/{id}.
+                Hidden when there's no AIGC activity at all (decisions/013 代价 2). */}
+            {project?.aigc_cost_summary && (
+              <div className="mt-3 rounded-md border border-border bg-surface px-4 py-2 text-sm text-secondary">
+                <div className="font-medium text-primary mb-1">AI 补画面成本</div>
+                <ul className="space-y-0.5 text-xs">
+                  <li>已调 API：{project.aigc_cost_summary.broll_calls} 次</li>
+                  <li>缓存命中：{project.aigc_cost_summary.broll_cache_hits} 次</li>
+                  <li>失败降级：{project.aigc_cost_summary.broll_failures} 次</li>
+                  <li>累计耗时：{project.aigc_cost_summary.total_seconds_spent.toFixed(1)} s</li>
+                </ul>
+              </div>
             )}
           </StepCard>
         )}

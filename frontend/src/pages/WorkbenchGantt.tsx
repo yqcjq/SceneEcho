@@ -272,7 +272,7 @@ const GanttCanvas: React.FC<CanvasProps> = ({ data, width, height }) => {
                           <title>
                             {ev.stage} · {ev.semantic_label}
                             {"\n"}
-                            duration {ev.duration_ms}ms · confidence{" "}
+                            duration {ev.duration_ms}ms · 置信度{" "}
                             {ev.confidence.toFixed(2)}
                             {ev.reasoning ? `\n${ev.reasoning.slice(0, 200)}` : ""}
                           </title>
