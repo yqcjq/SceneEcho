@@ -155,7 +155,7 @@
 
 视觉识别之外的两条理解通路。`extract/` 关心"画面里有什么"，这里关心"声音说了什么、字幕在干什么"，输出供后续口播匹配与字幕功能识别使用。
 
-- `asr.py`                 三层降级 ASR 编排：首选 GLM-ASR（拿文本）+ WhisperX wav2vec2 forced alignment（拿字级时间戳），其次 WhisperX 全程跑，最后等距 chunk 兜底；Unit 切分按词间 gap / 累积字数 / 中文标点 / min_chars 四因素，让"一停顿一字幕、4-12 字一片"的颗粒度落到 ledger。
+- `asr.py`                 三层降级 ASR 编排：首选 GLM-ASR（拿文本）+ alignment 双腿（wav2vec2 forced alignment 优先 / 缺 whisperx 时按音频时长等距分配字符兜底，文本与时间戳解耦——alignment 失败不再丢文本），其次 WhisperX 全程跑，最后等距 chunk 占位兜底；Unit 切分按词间 gap / 累积字数 / 中文标点 / min_chars 四因素，让"一停顿一字幕、4-12 字一片"的颗粒度落到 ledger。
 - `glm_asr.py`             PPIO GLM-ASR-2512 HTTP client：base64 上传 wav，30s/25MB 上限校验，缺 key/超限/HTTP 错误抛 typed exception 让 `asr.py` 自动降级；复用 `LLM_API_KEY`，endpoint 由 `ASR_BASE_URL` 配置。
 - `vision.py`              字幕功能 + 动画分类器：拿 `extract/captions.py` 已识别的字幕条目，调一次 VLM 综合判断功能（标题 / 强调 / 卖点 / CTA / regular）+ 动画类型（逐字弹入 / 整句滑入 / 淡入 / 打字机）+ stagger 估算；输出 `Phase1ACaptionFunctionEvent` 写入 `Phase1AReport.caption_functions`。
 

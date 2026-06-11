@@ -1,29 +1,40 @@
-"""2.asr · ASR → TranscriptLedger with three-layer fallback.
+"""2.asr · ASR → TranscriptLedger with text/timestamp decoupled fallback.
 
-Layer 1: **GLM-ASR-2512 via PPIO** for high-accuracy Chinese text, then
-    WhisperX wav2vec2 forced alignment (字级 CTC alignment) to recover
-    word-level timestamps the GLM endpoint doesn't return.
+Layer 1: **GLM-ASR-2512 via PPIO** for high-accuracy Chinese text, with a
+    two-leg alignment branch for字级 timestamps:
+      Leg A (preferred): WhisperX wav2vec2 forced alignment when the
+          ``whisperx`` package + torch are present. Real CTC字级 timing.
+      Leg B (fallback): proportional character distribution over ffprobe
+          duration. No ML deps; ~0.1-0.3s drift per char on uneven speech
+          but acceptable for ≤30 s短口播.
+    The two legs are mutually exclusive but independent — Leg B firing
+    does NOT discard the GLM text, which is the whole point of decision
+    014. Real text always reaches the ledger when GLM-ASR returns 200.
 
-Layer 2: **WhisperX self-contained** (Whisper transcribe + wav2vec2 align)
-    — the original path. Used when GLM is unavailable / no network /
-    audio > 30 s, or as a deterministic dev path with ASR_PROVIDER=whisperx.
+Layer 2: **WhisperX self-contained** (Whisper transcribe + wav2vec2 align).
+    Used when GLM is unreachable / over 30 s / no PPIO key, or when
+    ASR_PROVIDER=whisperx is set explicitly. Requires whisperx + torch
+    installed; otherwise this layer no-ops to its except-branch.
 
-Layer 3: **Uniform-chunk shell** — degraded ledger built from ffprobe
-    duration + ~3-second placeholder Units. Only kicks in when both ASR
-    paths fail; downstream mapping/fill/style stages still produce a
-    valid (if unsynced) ProjectIR.
+Layer 3: **Uniform-chunk shell** — placeholder ledger built from ffprobe
+    duration + ~3-second ``[语音 N]`` Units. Only fires when both upper
+    layers fail (no GLM text + no WhisperX engine). Mapping/fill/style
+    stages still build a valid (if unsynced) ProjectIR so the renderer
+    has something to draw.
 
-Each fallback boundary emits a ``severity="warning"`` VisionEvent so the
-workbench surfaces the degradation. The function itself never raises —
-apply pipeline's ``_safe`` wrapper expects this discipline so a single
-asr glitch doesn't kill the whole project.
+Each layer / leg boundary emits a structured VisionEvent so the workbench
+shows what actually ran (real wav2vec2, etc) — Leg B emits an
+``severity="info"`` event labeled ``2.asr.glm.align_proportional``;
+fallbacks between layers emit ``severity="warning"``. The function itself
+never raises so apply pipeline's ``_safe`` wrapper sees uniform behavior.
 
 Unit segmentation (PLAN 1593 + 用户 8s 一镜到底口播退化复盘):
-WhisperX gives word-level timestamps after alignment; we group those
-words into Units by (a) inter-word pause > UNIT_GAP_SEC; (b) hard char
-ceiling UNIT_MAX_CHARS; (c) Chinese punctuation as priority break;
-(d) refuse splits below UNIT_MIN_CHARS unless forced. Defaults 0.15 s /
-12 / 4 chars — see ``backend/app/config.py`` rationale.
+both alignment legs emit WhisperX-shaped segments with word-level
+start/end. ``_segments_to_units`` groups those words into Units by
+(a) inter-word pause > UNIT_GAP_SEC; (b) hard char ceiling UNIT_MAX_CHARS;
+(c) Chinese punctuation as priority break; (d) refuse splits below
+UNIT_MIN_CHARS unless forced. Defaults 0.15 s / 12 / 4 chars — see
+``backend/app/config.py`` rationale. The same splitter consumes both legs.
 """
 
 from __future__ import annotations
@@ -127,7 +138,9 @@ async def transcribe(
         stage=STAGE,
         semantic_label=f"语音转写完成 · {len(units)} 个 Unit",
         reasoning=(
-            f"provider={s.asr_provider};{language} 转写 + wav2vec2 字级对齐;"
+            f"provider={s.asr_provider};{language} 转写;字级对齐由 _glm_pipeline "
+            "内部决定(wav2vec2 优先 / 等比兜底,以 stage='2.asr.glm.align_proportional' "
+            "事件单独标记);"
             f"按 gap>{s.unit_gap_sec}s / 累积 {s.unit_min_chars}-{s.unit_max_chars} 字 切分;"
             f"avg logprob {_avg_logprob(units):.2f}。"
         ),
@@ -153,30 +166,165 @@ async def _glm_pipeline(
     task_id: str,
     parent_event_id: str | None,
 ) -> list[Unit]:
-    """GLM-ASR-2512 text + WhisperX wav2vec2 forced alignment → Unit list.
+    """GLM-ASR-2512 text + (wav2vec2 优先 / 等比兜底) 字级对齐 → Unit list.
 
-    Extracts a wav once, sends to GLM for accurate Chinese text, then feeds
-    that text back into wav2vec2 align (which gives字级 timestamps because
-    GLM-ASR's response only carries the transcript, no timing info). The
-    intermediate wav is removed when done.
+    Pipeline (decisions/014):
+
+        1. ffmpeg → wav  (16 kHz mono — both alignment legs accept this)
+        2. transcribe_glm(wav) → text   (PPIO GLM-ASR-2512;真理源)
+        3. align text:
+             try   wav2vec2 forced alignment (whisperx + torch)
+             except → proportional char distribution over wav duration
+        4. _segments_to_units(...) — same splitter for both legs
+
+    Critical contract: the GLM text from step 2 ALWAYS reaches step 4.
+    Step 3 only decides timing precision; an alignment exception is
+    recovered locally without bubbling up to the outer fallback ladder
+    (which would discard the text). Decisions 014 is the why.
+
+    Failure modes that DO bubble (and let the outer transcribe() decide
+    Layer 2/3): GLM returns 4xx/timeout/empty (raised as GLMASRError),
+    or ffmpeg can't extract the wav (FileNotFoundError / OSError). At
+    that point we genuinely have no text and degradation is correct.
     """
     from app.understand.glm_asr import transcribe_glm
 
     wav = media_path.with_name(f"_asr_{media_path.stem}.wav")
     try:
-        await asyncio.to_thread(extract_audio, media_path, wav)
+        # Mono 16 kHz: PPIO GLM-ASR rejects stereo (`1214 transcriptions
+        # 文件只支持单声道`); wav2vec2 forced alignment also expects 16 kHz.
+        # One extraction serves both alignment legs.
+        await asyncio.to_thread(
+            extract_audio, media_path, wav, channels=1, sample_rate=16000
+        )
         text = await transcribe_glm(
             wav,
             task_id=task_id,
             parent_event_id=parent_event_id,
         )
-        aligned_segments = await _align_text_only(wav, text, language=language)
+        if not text or not text.strip():
+            return []
+
+        aligned_segments: list[dict] = []
+        align_method = "wav2vec2"
+        try:
+            aligned_segments = await _align_text_only(wav, text, language=language)
+        except Exception as e:  # noqa: BLE001
+            # whisperx/torch absent OR alignment runtime error. Either way,
+            # the GLM text is intact — switch to proportional and keep going.
+            log.info(
+                "asr.wav2vec2_unavailable_fallback_proportional",
+                error=f"{type(e).__name__}: {e}",
+            )
+            align_method = "proportional"
+
+        if not aligned_segments:
+            # wav2vec2 returned empty (rare — model loaded but produced
+            # zero segments) → also fall through to proportional so we
+            # never hand the splitter an empty list.
+            if align_method == "wav2vec2":
+                align_method = "proportional"
+            duration = float(get_media_info(wav).get("format", {}).get("duration", 0.0))
+            aligned_segments = _proportional_alignment(text, duration)
+
+        if align_method == "proportional":
+            await _emit_proportional_align_event(
+                text=text,
+                segments=aligned_segments,
+                task_id=task_id,
+                parent_event_id=parent_event_id,
+            )
+
         return _segments_to_units(aligned_segments)
     finally:
         try:
             wav.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _proportional_alignment(text: str, duration_sec: float) -> list[dict]:
+    """Distribute characters of ``text`` uniformly over ``duration_sec``.
+
+    Returns WhisperX-shaped segments (``{text, start, end, words: [...]}``)
+    so ``_segments_to_units`` consumes them with no special-casing.
+    Each character becomes one ``word`` with equal duration. probability=0.6
+    flags the proportional origin in case downstream code wants to surface it.
+
+    Used inside ``_glm_pipeline`` as Leg B — the fallback path when wav2vec2
+    forced alignment is unavailable. For ≤ 30 s短口播 with roughly uniform
+    speaking rate, drift per character is bounded by ~0.1-0.3 s; the Unit
+    splitter's punctuation + UNIT_MAX_CHARS rules still produce
+    "一标点一字幕、4-12 字一片" granularity because GLM-ASR returns text
+    with native Chinese punctuation.
+
+    Pure function — no ML deps, no ffprobe call (caller passes duration).
+    """
+    chars = list(text)
+    if not chars or duration_sec <= 0:
+        return []
+    char_dur = duration_sec / len(chars)
+    words: list[dict] = []
+    cursor = 0.0
+    for ch in chars:
+        start = cursor
+        end = cursor + char_dur
+        words.append(
+            {
+                "word": ch,
+                "start": round(start, 3),
+                "end": round(end, 3),
+                "probability": 0.6,
+            }
+        )
+        cursor = end
+    return [
+        {
+            "text": text,
+            "start": 0.0,
+            "end": round(cursor, 3),
+            "words": words,
+        }
+    ]
+
+
+async def _emit_proportional_align_event(
+    *,
+    text: str,
+    segments: list[dict],
+    task_id: str,
+    parent_event_id: str | None,
+) -> None:
+    """Publish an info-level event flagging that timing is proportional.
+
+    Lets the workbench show "本次走等比对齐而非 wav2vec2"
+    so Phase 2 users understand字级 timestamps are approximate.
+    """
+    bus = get_event_bus()
+    span = float(segments[-1]["end"]) if segments else 0.0
+    n_words = sum(len(s.get("words") or []) for s in segments)
+    await bus.publish(
+        task_id,
+        VisionEvent(
+            task_id=task_id,
+            source="asr",
+            stage=f"{STAGE}.glm.align_proportional",
+            semantic_label=(
+                f"等比字级对齐 · {n_words} 字 / {span:.2f}s"
+            ),
+            reasoning=(
+                "wav2vec2 forced alignment 不可用(whisperx 未安装 / 加载失败),"
+                f"按音频 {span:.2f}s 把 {n_words} 个字符等距分配到时间轴。"
+                f"text_preview={text[:40]!r}{'…' if len(text) > 40 else ''}。"
+                "Caption 切分仍按 标点+UNIT_MAX_CHARS 触发,精度上 ±0.1-0.3s/字"
+                "在均匀语速短口播范围内可接受;长视频建议装 whisperx 或换流式 ASR。"
+            ),
+            confidence=0.6,
+            severity="info",
+            ir_target=IRTarget(ir_type="TranscriptLedger", path="units", op="set"),
+            parent_event_id=parent_event_id,
+        ),
+    )
 
 
 async def _align_text_only(

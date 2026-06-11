@@ -28,8 +28,17 @@ def no_credentials(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_asr_fallback_uniform_chunks(task_with_events, no_credentials, monkeypatch):
-    """When WhisperX is unavailable, ASR degrades to uniform 3s chunks."""
+async def test_asr_uniform_chunks_only_when_glm_and_whisperx_both_unreachable(
+    task_with_events, no_credentials, monkeypatch
+):
+    """[语音 N] placeholder fallback只在两条 ASR 引擎都跑不动时才触发(decisions/014)。
+
+    no_credentials 清空 LLM_API_KEY → GLM-ASR 在凭据校验阶段抛
+    GLMASRMissingKey,_glm_pipeline 整个失败;`_whisperx_run` 也 mock 成抛
+    ImportError(模拟没装 whisperx)。两条腿都断了才该看到 ``[语音 N]``;
+    GLM 单独失败但 whisperx 装了应走 Layer 2,GLM 单独成功而 whisperx 缺失
+    应走 Leg B(等比对齐),都不该退到 uniform_chunks。
+    """
     from app.understand import asr
 
     task_id, sample_id = task_with_events
@@ -56,6 +65,116 @@ async def test_asr_fallback_uniform_chunks(task_with_events, no_credentials, mon
     assert ledger.units[-1].end >= 9.9
     # Fallback event is severity=warning
     assert any(e.severity == "warning" for e in events)
+
+
+def test_proportional_alignment_distributes_uniformly():
+    """_proportional_alignment 把 N 个字符等距分布到 duration_sec(decisions/014)。"""
+    from app.understand.asr import _proportional_alignment
+
+    text = "你好世界。我是张三"
+    duration = 8.0
+    segments = _proportional_alignment(text, duration)
+
+    assert len(segments) == 1
+    seg = segments[0]
+    assert seg["text"] == text
+    words = seg["words"]
+    assert len(words) == len(text)  # 中文一字一 word
+    # 所有 word_text 拼回去应等于原文(不丢字、不重排序)。
+    assert "".join(w["word"] for w in words) == text
+    # 首字 start=0,末字 end ≈ duration_sec(允许 0.01s 浮点余量)。
+    assert words[0]["start"] == 0.0
+    assert abs(words[-1]["end"] - duration) < 0.01
+    # 单调递增,无重叠。
+    for i in range(1, len(words)):
+        assert words[i]["start"] >= words[i - 1]["end"] - 1e-3
+
+
+def test_proportional_alignment_empty_text_returns_empty():
+    """空文本 / 零时长 → 返回 []。"""
+    from app.understand.asr import _proportional_alignment
+
+    assert _proportional_alignment("", 5.0) == []
+    assert _proportional_alignment("你好", 0.0) == []
+    assert _proportional_alignment("你好", -1.0) == []
+
+
+@pytest.mark.asyncio
+async def test_asr_glm_with_proportional_align_when_no_whisperx(
+    task_with_events, monkeypatch, tmp_path
+):
+    """GLM-ASR 200 OK + whisperx 缺失 → ledger 拿到真实文本(非 [语音])
+    + Unit 数 ≥ 2(标点切分生效) + 时间戳跨度匹配音频时长(decisions/014)。
+    """
+    import httpx
+
+    from app.event_bus import get_event_bus
+    from app.understand import asr as asr_mod
+    from app.understand import glm_asr
+
+    monkeypatch.setenv("LLM_API_KEY", "fake-key")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    task_id, _ = task_with_events
+    fake_mp4 = tmp_path / "normalized.mp4"
+    fake_mp4.write_bytes(b"\x00")
+
+    # 1) ffmpeg.extract_audio → 写一个空 wav,够通过 stat().st_size 与 read_bytes()
+    #    在 GLM 模块和 _proportional_alignment 的下游路径。
+    def _fake_extract(_src, dst, **_kw):
+        from pathlib import Path as _P
+
+        _P(dst).write_bytes(b"RIFF" + b"\x00" * 1024 + b"WAVEfmt ")
+
+    monkeypatch.setattr(asr_mod, "extract_audio", _fake_extract)
+
+    # 2) get_media_info → 8s 音频(GLM 30s 限内 + 等比分配的总长基准)。
+    monkeypatch.setattr(
+        asr_mod, "get_media_info", lambda *_a, **_kw: {"format": {"duration": 8.0}}
+    )
+    monkeypatch.setattr(
+        glm_asr, "get_media_info", lambda *_a, **_kw: {"format": {"duration": 8.0}}
+    )
+
+    # 3) PPIO GLM-ASR 真实文本(带中文标点,触发 Unit 切分)。
+    def _glm_handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, json={"text": "对于普通大学生来说，综测才是第一外挂。"}
+        )
+
+    transport = httpx.MockTransport(_glm_handler)
+    real_client_ctor = httpx.AsyncClient
+
+    def _patched_client(*_a, **kw):
+        kw.pop("transport", None)
+        return real_client_ctor(transport=transport, **kw)
+
+    monkeypatch.setattr(glm_asr.httpx, "AsyncClient", _patched_client)
+
+    # 4) wav2vec2 alignment (Leg A) 不可用 → 触发 Leg B 等比兜底。
+    async def _no_whisperx(*_a, **_kw):
+        raise ImportError("whisperx not installed")
+
+    monkeypatch.setattr(asr_mod, "_align_text_only", _no_whisperx)
+
+    ledger, _events = await asr_mod.transcribe(fake_mp4, task_id=task_id)
+
+    # 真实文本进入 ledger,不是 [语音] 占位。
+    full_text = "".join(u.text for u in ledger.units)
+    assert "对于普通大学生" in full_text
+    assert not any(u.text.startswith("[语音") for u in ledger.units)
+    # 标点切分:至少切出 2 个 Unit(中间有「，」+ 「。」)。
+    assert len(ledger.units) >= 2
+    # 时间戳跨度 ≈ 8s。
+    assert abs(ledger.units[-1].end - 8.0) < 0.5
+    # 等比对齐事件被发出(severity=info,工作台可见)。事件由 _glm_pipeline
+    # 内部发出,不在 transcribe 返回的 events 里;走 event_bus.replay 真理源查。
+    bus_events = get_event_bus().replay(task_id)
+    align_events = [
+        e for e in bus_events if e.stage.endswith("glm.align_proportional")
+    ]
+    assert len(align_events) >= 1
+    get_settings.cache_clear()  # type: ignore[attr-defined]
 
 
 def test_slot_speed_clamp_bounds():

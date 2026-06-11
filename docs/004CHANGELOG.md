@@ -1,3 +1,30 @@
+## [2026-06-11-2] fix(asr): preserve GLM-ASR text when wav2vec2 align is unavailable [ISS-031]
+
+### 改动
+
+修复用户在 Editor 全流程里看到字幕一直是 `[语音 N]` 占位符的问题。根因是 `_glm_pipeline` 把「GLM-ASR 拿文本」与「wav2vec2 拿字级时间戳」串在同一条不可分割的链上：本机没装 `whisperx` / `torch`（既没在 `pyproject.toml` 主依赖也没在 `[extract]` extras 里声明），alignment 一抛 `ImportError` 整个 GLM 路径被判失败，**已经拿到手的 GLM 真实文本被丢弃**，外层降级到 `_whisperx_run`（同样 ImportError），再降级到 `_fallback_uniform_chunks` 写出 `[语音 N]`，落到 `projects/{pid}/transcript.json` 的全是占位符 → recommend 阶段 ASR 摘要无信息 + apply 阶段下游 Caption.text 全是占位符 + 渲染成片字幕完全失败。
+
+第一性原理上是耦合 bug：**文本提取与时间戳标注是两件独立的事**，不应被同一条 fallback 链绑定。修复方案把 `_glm_pipeline` 内部的 alignment 改成「双腿」——优先 wav2vec2，缺失时降级到新增的 `_proportional_alignment(text, duration_sec)`（纯函数，把字符均匀分布到音频时长，输出 WhisperX 兼容 segment 形态）。GLM-ASR 文本始终进入 ledger，时间戳精度按 alignment 可用性 graceful degrade。`_segments_to_units` 切分器无须改动——按 中文标点 + UNIT_MAX_CHARS 两条规则在等比 segments 上完全照常工作（GLM-ASR 自带「，。」），实测 8s 短口播 19 字 → 切出 8 个 Unit「一标点一字幕、4-12 字一片」颗粒度立刻达标。
+
+ASR 总入口的三层降级链结构不变（GLM → WhisperX 自闭环 → uniform chunks），只在 Layer 1 内部增加 alignment 的二级降级；新增 `stage="2.asr.glm.align_proportional"` `severity="info"` 的 VisionEvent，每次走等比腿都发一条让工作台可见。
+
+实测端到端跑通：用 `tests/fixtures/raw_10s/start10s.mp4` + 真实 PPIO key 调 transcribe，ledger 落到 8 个 Unit，全部是真实中文台词（「对于普通大学生来说，」「综测才是第一外挂。」…），无任何 `[语音` 占位；事件流正确按顺序出 `2.asr.glm` → `2.asr.glm.align_proportional` → `2.asr`。
+
+### 涉及文件
+
+- `backend/app/understand/asr.py`：模块 docstring 重写 + `_glm_pipeline` 改成 try wav2vec2 / except 进等比兜底；新增 `_proportional_alignment(text, duration_sec)` 纯函数；新增 `_emit_proportional_align_event` 发 info 事件；外层 transcribe 完成事件 reasoning 标注 alignment 由 `_glm_pipeline` 内部决定。
+- `backend/tests/unit/test_apply.py`：原 `test_asr_fallback_uniform_chunks` 改名为 `test_asr_uniform_chunks_only_when_glm_and_whisperx_both_unreachable` + 改 docstring 阐述 [语音 N] 仅在两条引擎都断时触发；新增 `test_proportional_alignment_distributes_uniformly` / `test_proportional_alignment_empty_text_returns_empty` / `test_asr_glm_with_proportional_align_when_no_whisperx` 三个新测覆盖等比对齐的纯函数行为 + GLM 200 OK + whisperx 缺失的端到端路径。
+- `docs/decisions/014-asr-decouple-text-from-alignment.md`：新决策。
+- `docs/003ISSUES.md`：新 ISS-031 已解决。
+- `docs/001ARCHITECTURE.md` / `docs/002STRUCTURE.md`：链路 F + asr.py 职责微调。
+
+### 关联
+
+-> ISS-031
+-> decisions/014-asr-decouple-text-from-alignment.md
+
+---
+
 ## [2026-06-11-1] feat(phase5-broll): wire aigc provider + apply/fill aigc_broll strategy + editor opt-in switch [ISS-028]
 
 ### 改动

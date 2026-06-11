@@ -221,12 +221,26 @@ def image_to_video(
     return dst
 
 
-def extract_audio(src_path: str | Path, dst_path: str | Path) -> Path:
-    """Extract the audio track of a media file as 44.1k stereo WAV.
+def extract_audio(
+    src_path: str | Path,
+    dst_path: str | Path,
+    *,
+    channels: int = 2,
+    sample_rate: int = 44100,
+) -> Path:
+    """Extract the audio track of a media file as PCM 16-bit WAV.
 
-    Used by Phase 2's BGM mixer to feed the voice track into FFmpeg's
-    ``sidechaincompress`` filter. WAV is cheap to read and the size is
-    fine for short user material (10-20s ≈ 4-8 MB).
+    Two callers, two presets:
+      - Phase 2 BGM mixer (default): stereo 44.1 kHz so FFmpeg's
+        ``sidechaincompress`` filter sees the same channel count as the
+        BGM track (avoids implicit downmix at filter boundary).
+      - PPIO GLM-ASR (`channels=1, sample_rate=16000`): the endpoint
+        rejects multi-channel uploads with `1214 transcriptions文件只支持单声道`,
+        and 16 kHz is what wav2vec2 forced alignment expects too — keeping
+        a single wav file usable by both alignment legs avoids re-extracting.
+
+    WAV is cheap to read and the size is fine for short clips
+    (10-20s ≈ 0.3-8 MB depending on channel/sample_rate preset).
     """
     dst = Path(dst_path)
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -237,9 +251,9 @@ def extract_audio(src_path: str | Path, dst_path: str | Path) -> Path:
         str(src_path),
         "-vn",
         "-ac",
-        "2",
+        str(int(channels)),
         "-ar",
-        "44100",
+        str(int(sample_rate)),
         "-c:a",
         "pcm_s16le",
         str(dst),

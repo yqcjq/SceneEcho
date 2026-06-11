@@ -1160,3 +1160,37 @@ ISS-028 实施时 `allow_aigc_broll` 是项目级 boolean——用户勾一次�
 -> ISS-028（前置依赖）
 
 
+
+
+## [ISS-031] ASR 文本未流入 recommend/apply 工作流，字幕全是 `[语音 N]` 占位符
+
+**状态**：[已解决]
+**优先级**：[P1 严重]
+**类型**：[功能异常]
+**发现日期**：2026-06-11
+**解决日期**：2026-06-11
+**解决方案**：解耦 `_glm_pipeline` 内部的「文本提取」与「时间戳标注」——alignment 缺失时降级到等比兜底，GLM-ASR 文本始终进入 ledger，不再因 wav2vec2 不可用而把文本一起丢掉。
+
+**现象**：
+Editor 全流程跑下来观察到：第二步「模板推荐」事件流和第三步「apply pipeline」工作台右栏 IR 树里的字幕一直是 `[语音 0]` / `[语音 1]` 形式的占位符，而不是真实 ASR 转写文本。`projects/{pid}/transcript.json` 落盘内容也是同样的占位符——已在 `data/projects/prj_381c792265/transcript.json` 现场确认。
+
+**后果**：
+- recommend 阶段 VLM 收到的 ASR 摘要变成 `"[语音 0][语音 1]…"` 这种无信息文本，模板推荐丢失语音语义参考维度；
+- apply 阶段下游 mapping → style → Caption 全部基于占位文本,最终成片字幕显示 `[语音 N]` 而非用户实际口播内容,Phase 2 ★MVP 闭环视觉效果完全失败;
+- `Caption.text == Unit.text` 是 D11 强约束,无下游纠错——ASR 写什么进去就是什么,占位符直接进 ProjectIR.captions[].text。
+
+**初步判断**：
+已确认。三步排查链：
+1. 直接对 `https://api.ppio.com/v3/glm-asr` POST 真实 wav,HTTP 200 + 返回完整中文转写「对于普通大学生来说，综测才是第一外挂…」——GLM-ASR 接口本身完全正常,凭据/endpoint 都对;
+2. `pip list` 显示 venv 里既没 whisperx 也没 torch;`backend/pyproject.toml` 既没在主依赖也没在 `[extract]` extras 里声明 whisperx——决策 012 落地时只改了代码,没补 dep 声明;
+3. 阅读 `backend/app/understand/asr.py::_glm_pipeline` 发现 alignment 步骤用 `_align_text_only` → `import whisperx` 抛 `ModuleNotFoundError`,整个 GLM 路径被判失败,**已经在手的 GLM 文本被丢弃**,外层降级到 `_whisperx_run`(同样 ImportError),再降级到 `_fallback_uniform_chunks` 写出 `[语音 N]`。
+
+第一性原理上是耦合 bug:**文本提取和时间戳标注是两件独立的事**,不应被同一条 fallback 链绑定。
+
+**关联**：
+-> backend/app/understand/asr.py
+-> backend/app/api/projects.py（recommend_templates_endpoint 写 transcript.json）
+-> backend/app/apply/pipeline.py（apply_short 复用 transcript.json）
+-> docs/decisions/012-asr-glm-with-wav2vec2-align.md（被本 issue 暴露的耦合)
+-> docs/decisions/014-asr-decouple-text-from-alignment.md（修复决策)
+-> docs/004CHANGELOG.md [2026-06-11-2]

@@ -234,7 +234,7 @@ python -m app.cli ingest-sample /local/path.mp4
   → POST /api/projects/{pid}/recommend-templates
      → tasks_store.create_task("recommend_templates", resource_kind="project")
         路径方案 B → events_jsonl_path = projects/{pid}/pipeline/events_{task_id}.jsonl
-     → 同步跑：understand.asr.transcribe（三层降级 glm/whisperx/uniform；GLM 路径 = PPIO GLM-ASR-2512 取文本 + WhisperX wav2vec2 forced alignment 给字级时间戳；Unit 切分按 gap+max_chars+min_chars+标点四因素）→ 写 projects/{pid}/transcript.json 给 apply 复用 → frame_sampler.sample_frames（首/中/末）
+     → 同步跑：understand.asr.transcribe（三层降级 glm/whisperx/uniform；GLM 路径 = PPIO GLM-ASR-2512 取文本 + alignment 双腿（wav2vec2 优先 / 等比兜底）给字级时间戳，文本与时间戳解耦——alignment 缺失时 GLM 文本仍进入 ledger，决策 014；Unit 切分按 gap+max_chars+min_chars+标点四因素）→ 写 projects/{pid}/transcript.json 给 apply 复用 → frame_sampler.sample_frames（首/中/末）
             → kb.recommend.recommend_templates（一次 VLM call 看 ≤50 模板 + ASR 摘要 + 3 帧）
             → 每条推荐发 stage="2.recommend" VisionEvent
      → 返回 {recommendations:[{template_id,score,reason,...}], workbench_url}
