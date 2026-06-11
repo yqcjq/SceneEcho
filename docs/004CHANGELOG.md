@@ -1,3 +1,32 @@
+
+## [2026-06-10-8] feat(asr): swap WhisperX for PPIO GLM-ASR + wav2vec2 align with smart Unit splitting and recommend→apply ledger reuse [ISS-027]
+
+### 改动
+- 新增 `backend/app/understand/glm_asr.py`，调 PPIO `https://api.ppio.com/v3/glm-asr`（GLM-ASR-2512），复用 `LLM_API_KEY`，base64 上传；30s/25MB 上限校验，缺 key/超限/HTTP 错误抛 typed exception 让外层 asr.py 自动降级
+- 重写 `backend/app/understand/asr.py`：`transcribe()` 实现三层降级链 `glm → whisperx → uniform_chunks`；新增 `_glm_pipeline`（ffmpeg.extract_audio + GLM-ASR + wav2vec2 align）与 `_align_text_only`（接受外部文本喂 whisperx.align，绕过 Whisper 转写）；`_segments_to_units` 改为四因素切分（gap / max_chars / min_chars / 中文标点）
+- `backend/app/api/projects.py` recommend 端点跑完 ASR 后写 `projects/{pid}/transcript.json`
+- `backend/app/apply/pipeline.py` apply_short 进 ASR 阶段前优先读 `transcript.json`，命中则发 `stage="2.pipeline.asr_reuse"` 事件并跳过 transcribe
+- `backend/app/config.py` 加 `asr_provider`（glm/whisperx）/ `asr_base_url` / `model_asr` / `unit_gap_sec` / `unit_max_chars` / `unit_min_chars` 字段
+- `.env` 加上述字段默认值与中文注释段
+- `backend/tests/unit/test_apply.py` 新增 9 个测试覆盖切分四种边界（max_chars 硬上限 / pause 断句 / pause 不足 min_chars 不断 / 中文标点断）+ GLM client 三组（缺 key / 超时长 / mock 200 OK）+ apply ledger 复用
+
+### 涉及文件
+- `backend/app/understand/glm_asr.py`：新文件，PPIO GLM-ASR HTTP client + typed errors
+- `backend/app/understand/asr.py`：三层降级链 + 字级对齐路径分离 + 智能切句重写
+- `backend/app/apply/pipeline.py`：apply 阶段 ASR ledger 缓存读取
+- `backend/app/api/projects.py`：recommend 阶段 ledger 持久化
+- `backend/app/config.py`：ASR provider 与 Unit 切分阈值配置字段
+- `.env`：ASR provider 与切分阈值默认值 + 注释
+- `backend/tests/unit/test_apply.py`：splitter / glm client / reuse 三组单测
+- `docs/decisions/012-asr-glm-with-wav2vec2-align.md`：本次决策原文
+- `docs/003ISSUES.md`：ISS-027 新增并标记已解决
+- `docs/001ARCHITECTURE.md`：链路 F 与状态持久化分类同步
+- `docs/002STRUCTURE.md`：`backend/app/understand/` 节描述同步
+
+### 关联
+-> ISS-027
+-> decisions/012-asr-glm-with-wav2vec2-align.md
+
 ## [2026-06-10-7] feat(renderer/lab): finish decisions/010 P5-P7 — caption style as single prop + nl-edit prompt for new visual fields + lab samples scan [ISS-022/024]
 
 ### 改动

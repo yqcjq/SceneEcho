@@ -64,6 +64,31 @@ class Settings(BaseSettings):
     unit_max_chars: int = Field(default=12, alias="UNIT_MAX_CHARS")
     unit_min_chars: int = Field(default=4, alias="UNIT_MIN_CHARS")
 
+    # AIGC B-roll generation (Phase 5 · agent/aigc.py). The provider is a
+    # text-to-image API (OpenAI-compatible /v1/images/generations on PPIO);
+    # agent/aigc.py converts the returned image to mp4 via ffmpeg loop so the
+    # consumer (renderer's OffthreadVideo) sees a normal video segment.
+    # Motion comes from the slot's zoom_keyframes at render time, not the
+    # generation API.
+    #
+    # Empty provider string disables AIGC entirely — every "AI生成画面" slot
+    # then degrades to the reuse fill strategy. api_key + model are the
+    # third-party image-gen credentials (separate account from LLM_API_KEY);
+    # missing either raises a typed error so apply/fill can fall back visibly
+    # instead of silently skipping. max_duration_sec is a protective ceiling
+    # on the looped-image clip length so a single AIGC slot doesn't dominate
+    # the timeline (decisions/013 代价 2).
+    aigc_broll_provider: str = Field(default="", alias="AIGC_BROLL_PROVIDER")
+    aigc_broll_api_key: str | None = Field(default=None, alias="AIGC_BROLL_API_KEY")
+    aigc_broll_base_url: str = Field(
+        default="https://api.ppio.com/openai/v1/images/generations",
+        alias="AIGC_BROLL_BASE_URL",
+    )
+    aigc_broll_model: str = Field(default="", alias="AIGC_BROLL_MODEL")
+    aigc_broll_max_duration_sec: float = Field(
+        default=6.0, alias="AIGC_BROLL_MAX_DURATION_SEC"
+    )
+
     # HuggingFace cache lives under DATA_ROOT so weights co-locate with the
     # rest of the system's heavy assets (kb.sqlite / system/bgm_pool /
     # system/models — see 001ARCHITECTURE §4). Default is a DATA_ROOT-relative

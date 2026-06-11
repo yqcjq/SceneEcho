@@ -392,9 +392,53 @@ async def apply_endpoint(
     }
 
 
+def _aigc_cost_summary(project_id: str, ir: ProjectIR | None) -> dict | None:
+    """Replay the latest apply_short task's events and aggregate AIGC cost.
+
+    Apply runs as a background task (the POST /apply response carries only
+    a task_id), so we can't return the summary in the apply response itself.
+    Instead we derive it on every project load from the events.jsonl truth
+    source (D36) — the same pattern as :func:`get_recommendations`.
+
+    Returns ``None`` when the project has no AIGC activity at all (no apply
+    task, no opt-in, or zero broll events) so the Editor can suppress the
+    cost panel for plain non-AIGC projects.
+
+    Shape::
+
+        {"broll_calls": int,        # 5.aigc.broll events with cache_hit=False
+         "broll_cache_hits": int,   # 5.aigc.broll events with cache_hit=True
+         "broll_failures": int,     # ProjectIR.degraded keys *.aigc_broll
+         "total_seconds_spent": float}  # sum of event.duration_ms / 1000
+    """
+    rows = tasks_store.list_by_resource("project", project_id)
+    apply_tasks = [r for r in rows if r["kind"] == "apply_short"]
+    if not apply_tasks:
+        return None
+    task_id = apply_tasks[0]["id"]
+    events = get_event_bus().replay(task_id)
+    broll_events = [e for e in events if e.stage == "5.aigc.broll"]
+    failures = sum(
+        1
+        for k in (ir.degraded if ir else {})
+        if k.endswith(".aigc_broll")
+    )
+    if not broll_events and failures == 0:
+        return None
+    cache_hits = sum(1 for e in broll_events if "cache_hit=True" in (e.reasoning or ""))
+    fresh = len(broll_events) - cache_hits
+    total_ms = sum(int(e.duration_ms or 0) for e in broll_events)
+    return {
+        "broll_calls": fresh,
+        "broll_cache_hits": cache_hits,
+        "broll_failures": failures,
+        "total_seconds_spent": round(total_ms / 1000.0, 2),
+    }
+
+
 @router.get("/projects/{project_id}")
 async def get_project(project_id: str) -> dict:
-    """Return ProjectIR (or null if apply hasn't run yet)."""
+    """Return ProjectIR + AIGC cost summary (or null when apply hasn't run)."""
     ir = _load_project(project_id)
     settings = get_settings()
     project_dir = settings.data_root / "projects" / project_id
@@ -412,6 +456,7 @@ async def get_project(project_id: str) -> dict:
         "user_material_url": (
             f"/data/{user_material_rel}" if user_material_rel else None
         ),
+        "aigc_cost_summary": _aigc_cost_summary(project_id, ir),
     }
 
 
@@ -477,6 +522,8 @@ async def preview_props(project_id: str) -> dict:
                         "timeline_start": s.timeline_start,
                         "speed": s.speed,
                         "is_fill": s.is_fill,
+                        "use_aigc_broll": s.use_aigc_broll,
+                        "aigc_broll_path": s.aigc_broll_path,
                         "applied_style": s.applied_style.model_dump(mode="json"),
                     }
                     for s in sec.segments

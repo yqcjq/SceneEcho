@@ -1024,3 +1024,41 @@ ISS-025 的二次核查发现：`frontend/src/pages/Editor.tsx::useEffect [proje
 
 **解决方案**：
 useEffect [projectId] 改为闭包内声明 `let cancelled = false`，return cleanup 函数将其置 true。在 `Promise.allSettled` 与内层 `getPreviewProps` 两个 await 边界之后立刻 `if (cancelled) return` 短路所有 setState。后续同步 setState 块（recs / applyTaskId）不需要再检查——它们没有跨 await，运行时已经到达此函数则 cleanup 已经无法触发。改动只局限在这一个 useEffect 内，不影响其他模块；不引入 AbortController（轴 API 不接受 signal，强行接入会污染 axios 客户端）。
+
+## [ISS-027] 模板推荐 ASR 同音字错误率高 + Apply Pipeline 字幕碎片化退化 + ledger 重跑浪费
+
+**状态**：[已解决]
+**优先级**：[P1 严重]
+**类型**：[功能异常]
+**发现日期**：2026-06-10
+**解决日期**：2026-06-10
+
+**现象**：
+1. Editor 出片闭环最终 mp4 字幕大量同音不同字错别字（user 原话："基本上是同音不同字的错别字"）。
+2. 一段 8 秒、约 100 字的口播只产出**一条**静态字幕、横跨整个视频时长，整段不动。
+3. 推荐阶段已跑过完整 ASR、ledger 用完即丢；apply pipeline 又对同一份 normalized.mp4 重跑一次 transcribe，浪费 3-5s。
+
+**后果**：
+出片质量与"模板复刻样例视频效果"目标相悖；user 在 Phase 2 ★MVP 上无法验证完整闭环出片。
+
+**初步判断**：
+已确认。
+- 同音字根因：WhisperX large-v3 中文 CER 12-15% 量级；style.py D11 硬规则 `Caption.text == Unit.text`，下游无纠错环节
+- 字幕碎片化根因：`backend/app/understand/asr.py:38` 的 `_UNIT_GAP_SEC=0.3` 远大于流畅口播实际词间停顿（多数 < 0.15s），所有词被并为单个 Unit；`backend/app/apply/style.py:233-252` 一 Unit 一 Caption，故只产出一条 Caption 覆盖整段视频
+- 重跑 ASR 根因：`backend/app/api/projects.py:206` 推荐阶段拿到的 ledger 用完即丢，`backend/app/apply/pipeline.py:209-215` 又调 transcribe
+
+**关联**：
+-> backend/app/understand/asr.py
+-> backend/app/understand/glm_asr.py（新增）
+-> backend/app/apply/pipeline.py
+-> backend/app/api/projects.py
+-> backend/app/config.py
+-> backend/tests/unit/test_apply.py
+-> .env
+-> decisions/012-asr-glm-with-wav2vec2-align.md
+-> 004CHANGELOG.md [2026-06-10-8]
+
+**解决方案**：
+ASR 后端引入 PPIO GLM-ASR-2512（中文 CER ~7%）拿高精度文本 + WhisperX wav2vec2 forced alignment 单独跑出字级时间戳；三层降级链 `glm → whisperx → uniform_chunks` 由 `ASR_PROVIDER` 切换。`_segments_to_units` 改为四因素切分（gap > 0.15s / 累积 ≥ 12 字 / 中文标点 / 拒绝 < 4 字软断），消除 8s 一条的退化。recommend 阶段持久化 ledger 至 `projects/{id}/transcript.json`，apply 进 ASR 阶段前优先读盘复用，跳过重跑并发 `2.pipeline.asr_reuse` 事件。
+
+---

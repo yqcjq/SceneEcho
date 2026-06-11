@@ -64,6 +64,7 @@ STAGE_TO_IR_PATH: dict[str, str] = {
     "style": "captions",
     "bgm": "bgm_track",
     "bgm_mix": "bgm_track",
+    "5.aigc.broll": "sections.0.segments",
     "save_project": "project_id",
 }
 
@@ -282,6 +283,7 @@ async def apply_short(
     # --------- Stage 5: fill ----------
     fill_segments: list[PlacedSegment] = []
     fill_captions: list[Caption] = []
+    aigc_degraded: list[tuple[PlacedSegment, str]] = []
     if gaps:
         fill_res = await _safe(
             "fill",
@@ -292,6 +294,7 @@ async def apply_short(
                 segments,
                 ledger,
                 task_id=task_id,
+                project_id=project_id,
                 allow_aigc_broll=allow_aigc_broll,
             ),
             task_id=task_id,
@@ -302,6 +305,12 @@ async def apply_short(
             for o in outcomes:
                 if o.segment is not None:
                     fill_segments.append(o.segment)
+                    # Defer the ProjectIR.degraded write until after the final
+                    # sort so the key carries the segment's real index. fill.py
+                    # already fell back to a reuse segment (D28) — this only
+                    # surfaces *why* for the workbench banner.
+                    if o.degraded_msg:
+                        aigc_degraded.append((o.segment, o.degraded_msg))
                 if o.caption is not None:
                     fill_captions.append(o.caption)
                 # Pipeline owns the Gap.fill_result write so fill.py stays
@@ -314,6 +323,15 @@ async def apply_short(
     all_segments = sorted(
         [*segments, *fill_segments], key=lambda s: s.timeline_start
     )
+    # Now that segment order is final, record any AIGC B-roll degradations
+    # against the segment's index in the sorted list (identity match — the
+    # exact PlacedSegment object survives the sort).
+    for seg, msg in aigc_degraded:
+        try:
+            seg_idx = all_segments.index(seg)
+        except ValueError:  # pragma: no cover — seg always in all_segments
+            continue
+        degraded[f"sections.0.segments.{seg_idx}.aigc_broll"] = msg
     tasks_store.update_task(task_id, stage="2.style", progress=0.75)
 
     # --------- Stage 6: style + caption + BGM ----------

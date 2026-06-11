@@ -304,6 +304,164 @@ async def test_glm_asr_happy_path_returns_text(task_with_events, monkeypatch, tm
 
 
 # ---------------------------------------------------------------------------
+# fill.py · aigc_broll strategy (Phase 5, ISS-028)
+# ---------------------------------------------------------------------------
+
+
+def _aigc_template() -> TemplateIR:
+    """Single-slot template flagged AI生成画面 — no voice mapping happens."""
+    return TemplateIR(
+        id="tpl_aigc",
+        name="aigc test",
+        source_sample="smp_aigc",
+        skeleton=[
+            Slot(
+                role="主体",
+                duration={"min": 2.0, "nominal": 3.0, "max": 4.5},
+                material_req="AI生成画面",
+                style=StyleRule(),
+            ),
+        ],
+        tags=Tags(scene="知识科普", function="逻辑讲述"),
+    )
+
+
+def _aigc_gap() -> "Gap":
+    from app.ir.project import Gap
+
+    return Gap(
+        slot_role="主体",
+        reason="模板期望 AI 补画面（B-roll）",
+        fill_strategy="aigc_broll",
+        fill_result="",
+    )
+
+
+def _empty_ledger() -> "TranscriptLedger":
+    from app.ir.ledger import TranscriptLedger
+
+    return TranscriptLedger(units=[], language="zh", media_path="projects/prj_aigc/normalized.mp4")
+
+
+@pytest.mark.asyncio
+async def test_fill_aigc_broll_no_optin_skips_provider(task_with_events, monkeypatch):
+    """allow_aigc_broll=False → AI生成画面 gap quietly reuses; generate_broll never called."""
+    from app.agent import aigc as aigc_mod
+    from app.apply.fill import fill_gaps
+
+    calls: list[tuple] = []
+
+    async def _spy(*args, **kwargs):  # pragma: no cover — assertion guards this
+        calls.append((args, kwargs))
+        raise AssertionError("generate_broll must not be called when allow_aigc_broll=False")
+
+    monkeypatch.setattr(aigc_mod, "generate_broll", _spy)
+    # fill.py imported the symbol locally; patch that binding too.
+    from app.apply import fill as fill_mod
+
+    monkeypatch.setattr(fill_mod, "generate_broll", _spy)
+
+    task_id, _ = task_with_events
+    outcomes, _ = await fill_gaps(
+        [_aigc_gap()],
+        _aigc_template(),
+        [],
+        _empty_ledger(),
+        task_id=task_id,
+        project_id="prj_aigc",
+        allow_aigc_broll=False,
+    )
+    assert calls == []
+    assert len(outcomes) == 1
+    o = outcomes[0]
+    assert o.strategy == "reuse"
+    assert o.segment is not None and o.segment.use_aigc_broll is False
+    assert o.segment.aigc_broll_path is None
+    assert o.degraded_msg == ""
+
+
+@pytest.mark.asyncio
+async def test_fill_aigc_broll_missing_creds_degrades_to_reuse(
+    task_with_events, no_credentials
+):
+    """allow=True + no provider → AIGCMissingCredentials caught, segment reuses, degraded_msg set."""
+    from app.apply.fill import fill_gaps
+
+    task_id, _ = task_with_events
+    # no_credentials fixture clears LLM keys; AIGC_BROLL_PROVIDER stays default "".
+    outcomes, _ = await fill_gaps(
+        [_aigc_gap()],
+        _aigc_template(),
+        [],
+        _empty_ledger(),
+        task_id=task_id,
+        project_id="prj_aigc",
+        allow_aigc_broll=True,
+    )
+    assert len(outcomes) == 1
+    o = outcomes[0]
+    # Strategy stays "aigc_broll" (we *attempted* it) but segment is a reuse one.
+    assert o.strategy == "aigc_broll"
+    assert o.segment is not None
+    assert o.segment.use_aigc_broll is False
+    assert o.segment.aigc_broll_path is None
+    assert "AIGCMissingCredentials" in o.degraded_msg
+
+
+@pytest.mark.asyncio
+async def test_fill_aigc_broll_success_writes_path(task_with_events, monkeypatch):
+    """allow=True + mocked provider success → segment carries aigc_broll_path + use_aigc_broll."""
+    from pathlib import Path
+
+    from app.agent import aigc as aigc_mod
+    from app.apply import fill as fill_mod
+
+    monkeypatch.setenv("AIGC_BROLL_PROVIDER", "ppio")
+    monkeypatch.setenv("AIGC_BROLL_API_KEY", "fake")
+    monkeypatch.setenv("AIGC_BROLL_MODEL", "test/fake-image-model")
+    # Clear LLM creds so the prompt-synth chat_text falls back deterministically
+    # without retrying the real PPIO endpoint (slow + uses real tokens).
+    monkeypatch.setenv("LLM_API_KEY", "")
+    monkeypatch.setenv("LLM_BASE_URL", "")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+    class _Fake:
+        async def generate_image(self, *_a, **_kw):
+            return b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+
+    monkeypatch.setattr(aigc_mod, "_get_broll_provider", lambda _name: _Fake())
+
+    # Stub ffmpeg so the test doesn't shell out — just write the dst mp4.
+    def _fake_ffmpeg(src_image, dst_path, *, duration_sec, **_kw):
+        Path(dst_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(dst_path).write_bytes(b"FAKE_MP4")
+        return Path(dst_path)
+
+    monkeypatch.setattr(aigc_mod, "image_to_video", _fake_ffmpeg)
+
+    task_id, _ = task_with_events
+    outcomes, _ = await fill_mod.fill_gaps(
+        [_aigc_gap()],
+        _aigc_template(),
+        [],
+        _empty_ledger(),
+        task_id=task_id,
+        project_id="prj_aigc",
+        allow_aigc_broll=True,
+    )
+    assert len(outcomes) == 1
+    o = outcomes[0]
+    assert o.strategy == "aigc_broll"
+    assert o.degraded_msg == ""
+    assert o.segment is not None
+    assert o.segment.use_aigc_broll is True
+    assert o.segment.aigc_broll_path is not None
+    assert o.segment.aigc_broll_path.startswith("aigc/broll/")
+    get_settings.cache_clear()  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
 # Apply pipeline ledger reuse
 # ---------------------------------------------------------------------------
 
