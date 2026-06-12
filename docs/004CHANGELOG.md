@@ -1,3 +1,26 @@
+## [2026-06-12-1] docs(dev-setup): rewrite first-build guide as beginner-focused quickstart [ISS-032]
+
+### 改动
+
+- 重新定位目标读者为「想把项目跑起来看看能做什么的新手」，移除所有阶段标签和开发者专属内容
+- 移除所有 Phase N 标签、PLAN.md 引用、CI 守卫脚本说明、stage 命名规范、日常开发循环章节
+- 验证步骤从「Phase 2 ★MVP 闭环」改为功能描述（上传样例 → 提取模板 → 套用渲染 → 自然语言编辑）
+- 环境变量章节精简为「必填」和「默认值够用不需要改」两类，去掉所有阶段来源说明
+- 删除「12. 进阶」章节（含 PLAN.md 行号引用 / Phase 2.6–7 路线图），不适合入门指引
+
+不写代码、不动业务，纯文档修订。`001ARCHITECTURE.md` / `002STRUCTURE.md` 不动。
+
+### 涉及文件
+
+- `docs/005DEVELOPMNET.md`：按「新手快速入门」单一目标全量重写，约 170 行
+- `docs/003ISSUES.md`：更新 ISS-032 描述，改为记录「读者定位不准确」问题
+
+### 关联
+
+-> ISS-032
+
+---
+
 ## [2026-06-11-2] fix(asr): preserve GLM-ASR text when wav2vec2 align is unavailable [ISS-031]
 
 ### 改动

@@ -1,6 +1,6 @@
 # 005 · 首次构建与运行指引
 
-> 目标读者：第一次 clone 这个仓库的开发者。读完照做能在本机跑通"上传 mp4 → 渲染叠字幕的 mp4 → 浏览器播放"全链路。
+> 目标读者：想把 SceneEcho 跑起来、看看它能做什么的人。照着做完能在本机跑通完整功能——上传样例视频 → 提取风格模板 → 上传口播素材 → 套用风格 → 渲染成品 mp4 → 用自然语言修改字幕颜色。不需要提前了解项目架构。
 >
 > 平台：以 Windows 11 + Git Bash 为主，其他平台命令同形（venv 激活脚本路径不同）。
 
@@ -8,29 +8,33 @@
 
 ## 0. 总览
 
-三服务架构，本地全部跑起来：
+本地需要同时跑三个服务：
 
-| 服务 | 端口 | 进程 |
+| 服务 | 端口 | 说明 |
 |------|------|------|
-| Backend (FastAPI) | 18521 | Python venv |
-| Renderer (Node Remotion) | 8001 | Node 进程 |
-| Frontend (Vite) | 5173 | Vite dev server |
+| Backend (FastAPI) | 18521 | Python，处理上传、AI 分析、渲染调度 |
+| Renderer (Node Remotion) | 8001 | Node，负责把模板渲染成 mp4 |
+| Frontend (Vite) | **5177** | 浏览器界面 |
 
-外加一条 IR codegen 管线：pydantic 模型 → `shared/ir.schema.json` → 两端 `src/types/ir.ts`。
+外部依赖：需要一个 OpenAI-compatible LLM 网关账号（项目默认用 PPIO）。没有账号时大部分功能会降级到占位输出，但服务能启动。
 
 ---
 
 ## 1. 前置软件
 
-| 工具 | 版本 | 安装 | 验证 |
-|------|------|------|------|
-| Python | 阶段 0 用 **3.13** 可；进阶段 1 前换 **3.11/3.12** | https://www.python.org/downloads/ | `python --version` |
+| 工具 | 版本要求 | 安装 | 验证 |
+|------|---------|------|------|
+| Python | **3.11 或 3.12**（3.13 不兼容部分 ML 库） | https://www.python.org/downloads/ | `python --version` |
 | Node.js | ≥ 18（推荐 20 LTS） | https://nodejs.org/ | `node --version` |
-| pnpm | ≥ 8（仓库锁定 10.x） | `npm install -g pnpm` | `pnpm --version` |
-| FFmpeg + ffprobe | 6+ 且加入 PATH | `winget install Gyan.FFmpeg` | `ffmpeg -version` / `ffprobe -version` |
+| pnpm | 10.x | `npm install -g pnpm@10` | `pnpm --version` |
+| FFmpeg + ffprobe | 6+，必须加入 PATH | `winget install Gyan.FFmpeg` | `ffmpeg -version` |
 | Git | 任意 | https://git-scm.com/ | `git --version` |
 
-**安装 FFmpeg 后必须新开终端**（让 PATH 生效），再做 `ffmpeg -version` 验证，否则后续后端 normalize 会报"找不到 ffmpeg"。
+**装好 FFmpeg 后必须新开终端**（让 PATH 生效），再验证 `ffmpeg -version`，否则视频处理会报「找不到 ffmpeg」。
+
+**磁盘**：建议预留 ≥ 15 GB（Python 依赖含 torch/demucs 约 3 GB，AI 模型权重约 4 GB，渲染产物按需增长）。
+
+**网络**：首次运行时会自动下载几 GB AI 模型权重，国内网络可能需要 HuggingFace 镜像或代理。
 
 ---
 
@@ -41,107 +45,127 @@ git clone https://github.com/yqcjq/SceneEcho.git
 cd SceneEcho
 ```
 
-仓库根绝对路径示例：`D:\Project\2026-6-SceneEcho\SceneEcho`。本文档所有相对路径基于此。
-
 ---
 
-## 3. 环境变量
+## 3. 配置环境变量
 
 ```bash
 cp .env.example .env
 ```
 
-`.env` 字段：
+用任意编辑器打开 `.env`，按需填写以下字段。标注「必填」的不填对应功能会降级。
 
-| 变量 | 阶段 0 是否必填 | 说明 |
-|------|---------------|------|
-| `DATA_ROOT` | 不填 = 默认 `backend/data` | 所有媒体落盘根 |
-| `RENDERER_URL` | 不填 = `http://localhost:8001` | 后端调 renderer |
-| `BACKEND_URL` | 不填 = `http://localhost:18521` | renderer 回调后端 |
-| `LLM_*` / `MODEL_*` | **阶段 0 可空** | 阶段 1 起才真用 |
-| `BGM_STRATEGY` | 默认 `features` | `original` 仅个人使用（版权风险） |
-| `ENABLE_CLI_INGEST` | 推荐设 `true` | dev CLI 上传开关 |
-| `LOG_LEVEL` | 默认 `INFO` | `DEBUG` 排障用 |
+### LLM / VLM（AI 分析功能）
 
-`.env` 不入 git（`.gitignore` 已忽略）。
+| 变量 | 是否必填 | 说明 |
+|------|---------|------|
+| `LLM_BASE_URL` | 必填 | OpenAI-compatible 接口地址，默认已指向 PPIO |
+| `LLM_API_KEY` | 必填 | 你的 API Key；缺则模板推荐 / 字幕分析全走占位符输出 |
+| `MODEL_VLM` | 必填 | 视觉模型 id（如 PPIO 上的 Qwen-VL 系列） |
+| `MODEL_TEXT` | 必填 | 文本推理模型 id（如 DeepSeek） |
+| `MODEL_TEXT_CHEAP` | 必填 | 高频调用文本模型 id（如 Qwen-Plus） |
+
+### 存储路径（默认值够用，通常不需要改）
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DATA_ROOT` | `backend/data` | 所有上传文件 / 渲染产物的存放目录 |
+| `RENDERER_URL` | `http://localhost:8001` | 后端调 renderer 的地址 |
+| `BACKEND_URL` | `http://localhost:18521` | renderer 回调后端的地址 |
+
+### ASR 语音转写
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `ASR_PROVIDER` | `glm` | `glm` 用 PPIO GLM-ASR 网络转写（推荐）；`whisperx` 用本地模型 |
+| `ASR_BASE_URL` | `https://api.ppio.com/v3/glm-asr` | GLM-ASR 接口地址 |
+| `MODEL_ASR` | `glm-asr-2512` | GLM-ASR 模型 id |
+
+> `glm` 模式复用 `LLM_API_KEY`，不需要额外申请。`whisperx` 模式在本机离线运行，但首次会下载约 3 GB 模型。
+
+### 其他（可不改，保持默认即可）
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `BGM_STRATEGY` | `features` | BGM 匹配策略，保持默认 |
+| `ENABLE_DEV_MOCK` | `true` | 开启子能力调试页（开发时保持 true） |
+| `LOG_LEVEL` | `INFO` | 日志级别 |
+
+`.env` 不入 git，凭据自行管理。
 
 ---
 
-## 4. 后端环境（Python）
+## 4. 安装 Python 依赖
 
 ```bash
 cd backend
 python -m venv .venv
 
-# 激活（Windows Git Bash 用 source 也行）
-source .venv/Scripts/activate
-# Windows PowerShell：.venv\Scripts\Activate.ps1
-# Windows cmd：    .venv\Scripts\activate.bat
-# macOS / Linux：  source .venv/bin/activate
+# 激活虚拟环境
+source .venv/Scripts/activate        # Windows Git Bash
+# .venv\Scripts\Activate.ps1         # Windows PowerShell
+# source .venv/bin/activate           # macOS / Linux
 
 pip install --upgrade pip
-pip install -e ".[dev]"
+pip install -e ".[dev,extract]"
 ```
 
-验证（**仍在 `backend/` 目录、venv 已激活**）：
+`[extract]` 包含视频分析所需的重型依赖（torch / demucs / opencv 等），不装的话视频分析功能会全部降级。安装时间较长，耐心等待。
+
+验证（仍在 `backend/` 目录、venv 已激活）：
+
 ```bash
-python -c "import app.main; print('backend importable')"
-ruff check .
-pytest tests/unit -v
-# 单测路径是 backend/tests/unit/，跑出 test_ir_schema + test_ir_models 全绿即可。
-# 注意：仓库根的 tests/ 只放 fixtures（测试视频），不放单测代码。
+python -c "import app.main; print('backend ok')"
 ```
 
 ---
 
-## 5. Node 工作区（renderer + frontend）
+## 5. 安装 Node 依赖
 
-回到仓库根：
+回到仓库根目录：
+
 ```bash
 cd ..
 pnpm install
 ```
 
-`pnpm install` 会自动给 `renderer/` 和 `frontend/` 装依赖（pnpm-workspace.yaml 管理）。
+会自动给 renderer 和 frontend 两个子项目装好依赖。
 
 ---
 
-## 6. 生成 IR 类型（关键步骤）
+## 6. 生成类型文件（必做）
 
 ```bash
-# 仍在仓库根，且 backend 的 venv 已激活
+# 仓库根，且 backend 的 venv 已激活
 pnpm gen:types
 ```
 
-这个命令会：
-1. 跑 `python scripts/gen_schema.py` → 生成 `shared/ir.schema.json`
-2. 跑 `renderer/scripts/gen-types.ts` → 生成 `renderer/src/types/ir.ts`
-3. 跑 `frontend/scripts/gen-types.ts` → 生成 `frontend/src/types/ir.ts`
-
-**这三个产物 gitignore，每次拉新代码 / 改 IR 都要重新生成**。
-
 验证：
+
 ```bash
 ls shared/ir.schema.json renderer/src/types/ir.ts frontend/src/types/ir.ts
 # 三个文件都应存在
 ```
 
----
-
-## 7. 准备测试 fixtures
-
-按 `tests/fixtures/README.md` 放两段 mp4：
-
-```
-tests/fixtures/sample_basic_15s/source.mp4   # 5–20s
-tests/fixtures/short_15s/source.mp4          # 10–20s
-```
-
-这两个文件**不入 git**。没有它们可以跳过 CLI ingest 验证，但 UI 上传链路仍可用任意 mp4 测。
+这步生成的文件被 gitignore 忽略，每次拉新代码后都需要重新执行。
 
 ---
 
-## 8. 启动三服务
+## 7. 系统资源确认
+
+仓库内 `data/system/` 已包含渲染所需的字体和调色预设：
+
+```
+data/system/
+├─ fonts/          # 思源黑体 / 宋体 + Source Han Sans SC
+└─ luts/           # 调色 LUT 预设
+```
+
+这两个目录随仓库一起 clone 下来，不需要手动操作。
+
+---
+
+## 8. 启动服务
 
 **方式 A：一键起（推荐）**
 
@@ -150,15 +174,15 @@ tests/fixtures/short_15s/source.mp4          # 10–20s
 pnpm dev
 ```
 
-会用 concurrently 同时起 backend / renderer / frontend，控制台带颜色前缀区分。
+控制台会用颜色区分三个服务（蓝 = backend，紫 = renderer，绿 = frontend）。
 
-**方式 B：分三个终端**
+**方式 B：分三个终端（便于单独查看日志）**
 
 终端 1（backend）：
 ```bash
 cd backend
 source .venv/Scripts/activate
-python -m uvicorn app.main:app --reload --port 18521
+python -m uvicorn app.main:app --reload --reload-dir app --port 18521
 ```
 
 终端 2（renderer）：
@@ -173,35 +197,35 @@ pnpm dev:frontend
 
 ---
 
-## 9. 验证全链路
+## 9. 验证服务正常
 
-### 9.1 服务探活
+### 9.1 探活
 
 ```bash
-curl http://localhost:18521/health    # {"status":"ok","service":"backend"}
-curl http://localhost:8001/health    # {"status":"ok","service":"renderer",...}
-curl http://localhost:5173           # HTML 入口
+curl http://localhost:18521/health    # 应返回 {"status":"ok","service":"backend"}
+curl http://localhost:8001/health     # 应返回 {"status":"ok","service":"renderer",...}
+curl http://localhost:5177            # 应返回 HTML
 ```
 
-### 9.2 浏览器端到端
+### 9.2 上传样例，提取风格模板
 
-1. 打开 http://localhost:5173 自动跳转到 `/sample-extract`
-2. 选一段 mp4 上传（任意短视频，几秒到几十秒）
-3. 上传成功显示 `sample_id`
-4. 点"渲染 demo"
-5. 看到进度条 0% → 100%（阶段 `bundling` → `rendering` → `done`）
-6. 页面下方 `<video>` 播放产物，画面中央偏下叠加 "Hello SceneEcho" 字幕
+1. 打开 http://localhost:5177，会跳到样例上传页
+2. 上传 `tests/fixtures/sample_basic_15s/source.mp4`
+3. 上传成功后点「提取模板」
+4. 顶部出现 banner，点「打开 AI 工作台」可看到实时分析事件流
+5. 分析完成后，进 `/templates` 能看到刚入库的模板卡片
 
-### 9.3 CLI ingest（可选）
+### 9.3 上传口播素材，套用模板渲染出片
 
-确认 `.env` 里 `ENABLE_CLI_INGEST=true`，然后：
-```bash
-cd backend
-source .venv/Scripts/activate
-python -m app.cli ingest-sample ../tests/fixtures/sample_basic_15s/source.mp4
-```
+1. 进 `/editor`，上传一段 10–20 秒的口播视频
+2. 上传完成后下方自动出现智能推荐的模板卡片
+3. 选一张模板，点「应用」
+4. 等待处理完成，中央播放器出现实时预览
+5. 点「渲染出片」，等进度条跑完，下载 mp4
 
-检查 `backend/data/samples/smp_*/` 下出现 `source.mp4`、`normalized.mp4`、`thumbnail.jpg`。
+### 9.4 自然语言编辑
+
+在 Editor 页底部输入框输入「字幕换成黄色」，播放器字幕实时变黄。
 
 ---
 
@@ -209,36 +233,16 @@ python -m app.cli ingest-sample ../tests/fixtures/sample_basic_15s/source.mp4
 
 | 现象 | 排查 |
 |------|------|
-| `ffmpeg: command not found` / 上传 500 报 normalize failed | 装 FFmpeg 后**重开终端**；`where ffmpeg` 看路径 |
-| `pnpm gen:types` 报 `ModuleNotFoundError: app` | backend venv 未激活，或没跑过 `pip install -e .` |
-| `pnpm gen:types` 报 `json-schema-to-zod` 缺失 | `pnpm install` 没跑完，重跑 |
-| renderer 首次 `/render` 慢 30s+ | 首次会下载 headless Chromium（~150MB），缓存到 `~/.cache/remotion/` |
-| 上传 mp4 浏览器报 CORS | 检查 backend 启动端口是不是 18521；vite.config.ts 代理只走 18521 |
-| 渲染进度卡在 `bundling` | 看 renderer 终端日志，可能是 bundle 编译报错（IR 类型未生成？） |
-| pytest 报 `app` 找不到 | 必须在 `backend/` 目录下跑 pytest，且 venv 激活 |
-| Windows 路径反斜杠出问题 | IR 内引用一律用 POSIX 风格（`projects/x/normalized.mp4`），后端 / renderer 内部自动解析 |
+| 浏览器输入 `localhost:5173` 一直打不开 | 端口是 `5177`，不是 5173 |
+| `ffmpeg: command not found` 或上传报 normalize 失败 | 装 FFmpeg 后**重开终端**；`where ffmpeg` 确认路径 |
+| 视频分析事件全是 degraded / fallback | backend venv 没装 `[extract]`，重跑 `pip install -e ".[dev,extract]"` |
+| 字幕显示 `[语音 0]` / `[语音 1]` 占位 | `LLM_API_KEY` 未填或 PPIO 网络不通，先用 `curl` 测试接口连通性 |
+| 模板推荐返回空 | `LLM_API_KEY` 缺失或 `MODEL_VLM` 在 PPIO 上不存在，进控制台确认模型可用 |
+| `pnpm gen:types` 报 `ModuleNotFoundError: app` | backend venv 未激活，或没跑 `pip install -e .` |
+| renderer 首次渲染慢 30 秒以上 | 首次下载 headless Chromium（约 150 MB），等待即可 |
+| ASR / 视频分析首次跑很慢 | 在下载 AI 模型权重，终端有 `Downloading` 字样即正常，等待即可 |
+| `/sublab` 路由 404 | `ENABLE_DEV_MOCK=true` 没设置，或 backend 没重启 |
+| 上传 mp4 报 CORS | 检查 backend 是否在 18521 端口，`vite.config.ts` 的代理只走这个端口 |
+| `pytest` 报 `app` 找不到 | 必须在 `backend/` 目录下跑，且 venv 已激活 |
 
-排障时优先打开 backend 终端 + renderer 终端的 stdout 看 JSON 结构化日志，每条带 `task_id`。
-
----
-
-## 11. 日常开发循环
-
-```bash
-# 改了 IR（backend/app/ir/*.py）
-pnpm gen:types     # 重生成两端 types
-# 改了 backend Python 代码：uvicorn --reload 自动热更
-# 改了 renderer/frontend：tsx watch / Vite HMR 自动热更
-```
-
-**改 IR 后必须 commit 前先 `pnpm gen:types`**：CI 的 `type-sync` job 会校验 schema 与 ir.ts 是否一致，不一致直接红。
-
----
-
-## 12. 进阶
-
-- 集成测试 / 端到端测试：阶段 0 暂无，Phase 1+ 引入。
-- 部署：阶段 0 不部署，三服务全本地。
-- 长视频管线、AIGC、NL 编辑：后续阶段功能，见 `../PLAN.md`。
-
-下一步阅读：`001ARCHITECTURE.md`（系统协作）→ `002STRUCTURE.md`（代码在哪）→ `../PLAN.md`（接下来做什么）。
+排障时优先看 backend 终端输出（结构化 JSON 日志，每条带 `task_id` / `stage`）和浏览器 DevTools → Network → SSE 事件流。
